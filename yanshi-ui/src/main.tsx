@@ -9,6 +9,7 @@ import { HarnessSessionDetail } from './pages/HarnessSessionDetail';
 import { HarnessSessionList } from './pages/HarnessSessionList';
 import { HarnessSubmitForm } from './pages/HarnessSubmitForm';
 import { RunCreateForm } from './pages/RunCreateForm';
+import { WorkflowStudioPage } from './pages/WorkflowStudioPage';
 import { harnessSessionIdFromPath } from './lib/harness';
 import { apiFetch, parseSseChunk } from './lib/api';
 import {
@@ -681,7 +682,7 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
         setEvents([]);
         setSelectedSeq(null);
         setError(null);
-        window.history.replaceState(null, '', `/ui?run=${encodeURIComponent(runId)}`);
+        window.history.replaceState(null, '', `/ui/console?run=${encodeURIComponent(runId)}`);
 
         // P10.17.3: when the operator already has a filter expression
         // (loaded from localStorage on the run-id effect above), pass
@@ -861,6 +862,9 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
           <button disabled={!activeRun || isTerminalRun(activeRun) || submitState === 'cancelling'} type="button" onClick={cancelActiveRun}>
             Cancel
           </button>
+          <a className="topbar-link" href="/ui/studio">
+            Studio 画布 →
+          </a>
           <a className="topbar-link" href="/ui/runs/new">
             New run →
           </a>
@@ -1112,7 +1116,28 @@ function App() {
       />
     );
   }
-  return <RunConsole apiToken={apiToken} onTokenChange={setApiToken} />;
+  if (pathname === '/ui/console' || pathname === '/ui/console/') {
+    return <RunConsole apiToken={apiToken} onTokenChange={setApiToken} />;
+  }
+  if (pathname === '/ui/app' || pathname === '/ui/app/') {
+    return (
+      <WorkflowStudioPage
+        initialMode="release"
+        apiToken={apiToken}
+        onTokenChange={setApiToken}
+      />
+    );
+  }
+  if (pathname === '/ui/studio' || pathname === '/ui/studio/') {
+    return (
+      <WorkflowStudioPage
+        initialMode="debug"
+        apiToken={apiToken}
+        onTokenChange={setApiToken}
+      />
+    );
+  }
+  return <WorkflowStudioPage apiToken={apiToken} onTokenChange={setApiToken} />;
 }
 
 const container = document.getElementById('yanshi-debugger');

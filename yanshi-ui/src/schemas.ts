@@ -231,6 +231,139 @@ export const DiagnosticsReportSchema = z
   .loose();
 export type DiagnosticsReport = z.infer<typeof DiagnosticsReportSchema>;
 
+// ── Workflow Studio inspection, debug step & artifacts ───────────────
+
+export const InspectedInputKindSchema = z.enum(['string', 'number', 'boolean', 'json']);
+export type InspectedInputKind = z.infer<typeof InspectedInputKindSchema>;
+
+export const InspectedInputSchema = z
+  .object({
+    name: z.string(),
+    description: z.string().nullable().optional(),
+    required: z.boolean(),
+    default: z.unknown().optional(),
+    kind: InspectedInputKindSchema,
+  })
+  .loose();
+export type InspectedInput = z.infer<typeof InspectedInputSchema>;
+
+export interface InspectedNode {
+  id: string;
+  type: string;
+  dependencies: string[];
+  input_mapping: Record<string, string>;
+  run_if?: string | null;
+  timeout_ms?: number | null;
+  max_retries?: number | null;
+  parameters: unknown;
+  sub_nodes?: InspectedNode[];
+  level: number;
+}
+
+export const InspectedNodeSchema: z.ZodType<InspectedNode> = z.lazy(() =>
+  z
+    .object({
+      id: z.string(),
+      type: z.string(),
+      dependencies: z.array(z.string()),
+      input_mapping: z.record(z.string(), z.string()),
+      run_if: z.string().nullable().optional(),
+      timeout_ms: z.number().nullable().optional(),
+      max_retries: z.number().nullable().optional(),
+      parameters: z.unknown(),
+      sub_nodes: z.array(InspectedNodeSchema).optional(),
+      level: z.number(),
+    })
+    .loose(),
+);
+
+export const InspectedEdgeKindSchema = z.enum(['dependency', 'input_mapping', 'condition']);
+export type InspectedEdgeKind = z.infer<typeof InspectedEdgeKindSchema>;
+
+export const InspectedEdgeSchema = z
+  .object({
+    from: z.string(),
+    to: z.string(),
+    kind: InspectedEdgeKindSchema,
+    label: z.string().nullable().optional(),
+  })
+  .loose();
+export type InspectedEdge = z.infer<typeof InspectedEdgeSchema>;
+
+export const InspectDiagnosticsSchema = z
+  .object({
+    valid: z.boolean(),
+    issues: z.array(z.string()),
+    warnings: z.array(z.string()),
+  })
+  .loose();
+export type InspectDiagnostics = z.infer<typeof InspectDiagnosticsSchema>;
+
+export const InspectWorkflowResponseSchema = z
+  .object({
+    valid: z.boolean(),
+    name: z.string().nullable().optional(),
+    cost_limit_usd: z.number().nullable().optional(),
+    inputs: z.array(InspectedInputSchema),
+    nodes: z.array(InspectedNodeSchema),
+    edges: z.array(InspectedEdgeSchema),
+    execution_order: z.array(z.string()),
+    levels: z.array(z.array(z.string())),
+    diagnostics: InspectDiagnosticsSchema,
+  })
+  .loose();
+export type InspectWorkflowResponse = z.infer<typeof InspectWorkflowResponseSchema>;
+
+export const FlowDebugPauseSchema = z
+  .object({
+    node_id: z.string(),
+    phase: z.enum(['before_node', 'after_node']),
+    next_nodes: z.array(z.string()),
+  })
+  .loose();
+export type FlowDebugPause = z.infer<typeof FlowDebugPauseSchema>;
+
+export const FlowDebugSnapshotSchema = z
+  .object({
+    step_every_node: z.boolean(),
+    breakpoints: z.array(z.string()),
+    paused_at: FlowDebugPauseSchema.nullable().optional(),
+  })
+  .loose();
+export type FlowDebugSnapshot = z.infer<typeof FlowDebugSnapshotSchema>;
+
+export const DebugStatusResponseSchema = z
+  .object({
+    run_id: z.string(),
+    status: z.string(),
+    active: z.boolean(),
+    snapshot: FlowDebugSnapshotSchema.nullable().optional(),
+    resumed: z.boolean().nullable().optional(),
+  })
+  .loose();
+export type DebugStatusResponse = z.infer<typeof DebugStatusResponseSchema>;
+
+export const ArtifactSummarySchema = z
+  .object({
+    id: z.string(),
+    node_id: z.string(),
+    name: z.string(),
+    mime_type: z.string().nullable().optional(),
+    size_bytes: z.number().nullable().optional(),
+    sha256: z.string().nullable().optional(),
+    created_at: z.string().optional(),
+  })
+  .loose();
+export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>;
+
+export const ListArtifactsResponseSchema = z
+  .object({
+    run_id: z.string(),
+    artifacts: z.array(ArtifactSummarySchema),
+  })
+  .loose();
+export type ListArtifactsResponse = z.infer<typeof ListArtifactsResponseSchema>;
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /**

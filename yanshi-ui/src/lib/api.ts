@@ -1,23 +1,60 @@
-// Q3.7.1: HTTP / SSE helpers shared by every page component. Lives in
-// `lib/` so individual pages don't have to re-import from `main.tsx`
-// (which would create a circular dep once pages live in `pages/`).
+// HTTP / SSE helpers shared by Web, Tauri Desktop, and Tauri Mobile surfaces.
 
 import { parseJson } from '../schemas';
+import { apiBaseUrlKey, readStorage, writeStorage } from './storage';
+
+declare global {
+  interface Window {
+    /** Injected by the Tauri Desktop shell when its embedded loopback engine boots. */
+    __YANSHI_API_BASE__?: string;
+    /** True when running inside a Tauri v2 WebView shell. */
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
+/** Normalize a gateway base URL (strip trailing slashes). */
+export const normalizeApiBaseUrl = (raw: string): string => raw.trim().replace(/\/+$/, '');
 
 /**
- * Attach the operator-supplied bearer token to a fetch request, then
- * call `fetch`. Trims whitespace and skips the header entirely when
- * the token is empty so the gateway treats it as "no auth provided"
- * rather than "literal empty token" (the gateway distinguishes those).
- *
- * The optional `tenant` argument sets `X-Yanshi-Tenant`. The
- * gateway treats this header as the authoritative tenant binding
- * (Q1.4.2 / Q1.4.3) — submit endpoints reject body `tenant_id`
- * fields that disagree with it, and every `:id`-bound GET / SSE /
- * action 404s cross-tenant rows. UI flows that operate on a single
- * tenant (harness sessions, run console) propagate the same tenant
- * to every related call so non-`default` tenants don't 404 their
- * own resources after a successful submit.
+ * Return the active gateway origin:
+ * 1. Explicit operator override saved in `localStorage` (`yanshi.ui.apiBaseUrl`)
+ * 2. Embedded Tauri Desktop loopback server (`window.__YANSHI_API_BASE__`)
+ * 3. Same-origin (`""`) when served by `yanshi-server` at `/ui`
+ */
+export const getApiBaseUrl = (): string => {
+  const stored = typeof window !== 'undefined' ? normalizeApiBaseUrl(readStorage(apiBaseUrlKey, '')) : '';
+  if (stored) {
+    return stored;
+  }
+  if (typeof window !== 'undefined' && typeof window.__YANSHI_API_BASE__ === 'string') {
+    return normalizeApiBaseUrl(window.__YANSHI_API_BASE__);
+  }
+  return '';
+};
+
+export const setApiBaseUrl = (nextUrl: string): void => {
+  writeStorage(apiBaseUrlKey, normalizeApiBaseUrl(nextUrl));
+};
+
+export const isTauriRuntime = (): boolean =>
+  typeof window !== 'undefined' &&
+  (Boolean(window.__TAURI_INTERNALS__) || Boolean(window.__YANSHI_API_BASE__));
+
+/** Resolve a gateway path like `/v1/runs` against the active API base URL. */
+export const resolveApiUrl = (path: string): string => {
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const base = getApiBaseUrl();
+  if (!base) {
+    return path;
+  }
+  return path.startsWith('/') ? `${base}${path}` : `${base}/${path}`;
+};
+
+/**
+ * Attach the operator-supplied bearer token and `X-Yanshi-Tenant` header,
+ * resolving relative gateway paths against `getApiBaseUrl()`.
  */
 export const apiFetch = (
   path: string,
@@ -34,22 +71,15 @@ export const apiFetch = (
   if (trimmedTenant) {
     headers.set('X-Yanshi-Tenant', trimmedTenant);
   }
-  return fetch(path, {
+  return fetch(resolveApiUrl(path), {
     ...init,
     headers,
   });
 };
 
 /**
- * Generic SSE chunk parser used by both the workflow runs detail view
- * (`StreamedEventSchema` shape) and the harness session detail view
- * (`HarnessEventSchema` shape). Caller picks the schema so the same
- * chunk parser can validate either wire shape without sharing the
- * `run_id` / `session_id` field name (Q3.7.2).
- *
- * A malformed event payload that fails validation now surfaces as a
- * `SchemaValidationError` the caller can recover from, instead of
- * leaking into downstream rendering with `kind=undefined` / `seq=NaN`.
+ * Generic SSE chunk parser used by workflow runs (`StreamedEventSchema`)
+ * and harness sessions (`HarnessEventSchema`).
  */
 export const parseSseChunk = <T,>(
   buffer: string,
