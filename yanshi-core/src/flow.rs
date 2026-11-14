@@ -373,7 +373,10 @@ impl<'f> FlowExecutor<'f> {
         .values()
         .any(|r| matches!(r, Err(YanshiError::NodePartialExecutionFailed { .. })))
     });
-    if execution_config.mode == FlowExecutionMode::Concurrent && !has_partial_failure {
+    if execution_config.mode == FlowExecutionMode::Concurrent
+      && !has_partial_failure
+      && execution_config.debug_controller.is_none()
+    {
       return self
         .execute_concurrently(
           run_id,
@@ -402,7 +405,7 @@ impl<'f> FlowExecutor<'f> {
         .map(|(_, node_id)| node_id)
     });
 
-    for node_id in &sorted_nodes {
+    for (node_idx, node_id) in sorted_nodes.iter().enumerate() {
       if execution_config
         .cancellation_token
         .as_ref()
@@ -517,12 +520,54 @@ impl<'f> FlowExecutor<'f> {
               }
 
               tracing::info!("Executing node '{}'", node_id);
-              let node_started_at = Instant::now();
+              let announced_at = Instant::now();
               self.emit_event(WorkflowEvent::NodeStarted {
                 workflow_id: run_id.clone(),
                 node_id: node_id.clone(),
-                timestamp: node_started_at,
+                timestamp: announced_at,
               });
+              self.emit_event(WorkflowEvent::NodeInputCaptured {
+                workflow_id: run_id.clone(),
+                node_id: node_id.clone(),
+                input: Self::outputs_to_json(&inputs),
+                timestamp: Instant::now(),
+              });
+              if let Some(debug) = &execution_config.debug_controller
+                && let Err(err) = debug
+                  .gate(
+                    node_id,
+                    crate::events::DebugPausePhase::BeforeNode,
+                    vec![node_id.clone()],
+                    execution_config.cancellation_token.as_ref(),
+                    |pause| {
+                      self.emit_event(WorkflowEvent::NodeDebugPaused {
+                        workflow_id: run_id.clone(),
+                        node_id: pause.node_id.clone(),
+                        phase: pause.phase,
+                        next_nodes: pause.next_nodes.clone(),
+                        timestamp: Instant::now(),
+                      });
+                    },
+                    |action| {
+                      self.emit_event(WorkflowEvent::NodeDebugResumed {
+                        workflow_id: run_id.clone(),
+                        node_id: node_id.clone(),
+                        action: action.to_string(),
+                        timestamp: Instant::now(),
+                      });
+                    },
+                  )
+                  .await
+              {
+                self.emit_event(WorkflowEvent::WorkflowCancelled {
+                  workflow_id: run_id.clone(),
+                  reason: "cancelled while paused at debug breakpoint".to_string(),
+                  duration: workflow_started_at.elapsed(),
+                  timestamp: Instant::now(),
+                });
+                return Err(err);
+              }
+              let node_started_at = Instant::now();
               let result = self
                 .execute_node_with_reliability(
                   &run_id,
@@ -581,15 +626,64 @@ impl<'f> FlowExecutor<'f> {
         }
       }
 
+      let will_stop = (is_failure && execution_config.fail_fast)
+        || (is_skip && !execution_config.continue_on_skip);
+
+      if let Some(debug) = &execution_config.debug_controller {
+        let next_nodes = if will_stop {
+          Vec::new()
+        } else {
+          sorted_nodes
+            .get(node_idx + 1..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|id| !state_pool.get(*id).is_some_and(|r| !is_genuine_failure(r)))
+            .take(4)
+            .cloned()
+            .collect()
+        };
+        if let Err(err) = debug
+          .gate(
+            node_id,
+            crate::events::DebugPausePhase::AfterNode,
+            next_nodes,
+            execution_config.cancellation_token.as_ref(),
+            |pause| {
+              self.emit_event(WorkflowEvent::NodeDebugPaused {
+                workflow_id: run_id.clone(),
+                node_id: pause.node_id.clone(),
+                phase: pause.phase,
+                next_nodes: pause.next_nodes.clone(),
+                timestamp: Instant::now(),
+              });
+            },
+            |action| {
+              self.emit_event(WorkflowEvent::NodeDebugResumed {
+                workflow_id: run_id.clone(),
+                node_id: node_id.clone(),
+                action: action.to_string(),
+                timestamp: Instant::now(),
+              });
+            },
+          )
+          .await
+        {
+          self.emit_event(WorkflowEvent::WorkflowCancelled {
+            workflow_id: run_id.clone(),
+            reason: "cancelled while paused after debug step".to_string(),
+            duration: workflow_started_at.elapsed(),
+            timestamp: Instant::now(),
+          });
+          return Err(err);
+        }
+      }
+
       // V1.1: align with `execute_concurrently`'s fail_fast /
       // continue_on_skip semantics instead of unconditionally running
       // every remaining node regardless of configuration. Remaining
       // nodes simply never get a state_pool entry, exactly like the
       // concurrent path leaves unscheduled `pending` nodes absent.
-      if is_failure && execution_config.fail_fast {
-        break;
-      }
-      if is_skip && !execution_config.continue_on_skip {
+      if will_stop {
         break;
       }
     }
@@ -1056,6 +1150,12 @@ impl<'f> FlowExecutor<'f> {
           workflow_id: run_id.clone(),
           node_id: node_id.clone(),
           timestamp: node_started_at,
+        });
+        self.emit_event(WorkflowEvent::NodeInputCaptured {
+          workflow_id: run_id.clone(),
+          node_id: node_id.clone(),
+          input: Self::outputs_to_json(&inputs),
+          timestamp: Instant::now(),
         });
 
         let run_id_for_task = run_id.clone();
@@ -6028,5 +6128,291 @@ mod tests {
         "a Map item must inherit the parent run's artifact root"
       );
     }
+  }
+
+  #[tokio::test]
+  async fn debug_controller_steps_node_by_node_and_captures_inputs_and_outputs() {
+    struct EchoNode;
+
+    #[async_trait]
+    impl AsyncNode for EchoNode {
+      async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+        let val = match inputs.get("in_val") {
+          Some(FlowValue::Json(Value::String(s))) => s.as_str(),
+          _ => "empty",
+        };
+        let mut out = HashMap::new();
+        out.insert(
+          "out_val".to_string(),
+          FlowValue::Json(json!(format!("{val}!"))),
+        );
+        Ok(out)
+      }
+    }
+
+    struct RecordingListener {
+      events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EventListener for RecordingListener {
+      fn on_event(&self, event: &WorkflowEvent) {
+        let mut guard = self.events.lock().unwrap();
+        match event {
+          WorkflowEvent::NodeInputCaptured { node_id, input, .. } => {
+            guard.push(format!("input:{node_id}:{input}"));
+          }
+          WorkflowEvent::NodeOutputCaptured {
+            node_id, output, ..
+          } => {
+            guard.push(format!("output:{node_id}:{output}"));
+          }
+          WorkflowEvent::NodeDebugPaused {
+            node_id,
+            phase,
+            next_nodes,
+            ..
+          } => {
+            guard.push(format!("paused:{node_id}:{phase}:{next_nodes:?}"));
+          }
+          WorkflowEvent::NodeDebugResumed {
+            node_id, action, ..
+          } => {
+            guard.push(format!("resumed:{node_id}:{action}"));
+          }
+          _ => {}
+        }
+      }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut n1_init = HashMap::new();
+    n1_init.insert("in_val".to_string(), FlowValue::Json(json!("hello")));
+    let mut n2_map = HashMap::new();
+    n2_map.insert(
+      "in_val".to_string(),
+      ("n1".to_string(), "out_val".to_string()),
+    );
+
+    let flow = Flow::new(vec![
+      GraphNode {
+        id: "n1".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoNode)),
+        dependencies: vec![],
+        input_mapping: None,
+        run_if: None,
+        initial_inputs: n1_init,
+      },
+      GraphNode {
+        id: "n2".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoNode)),
+        dependencies: vec!["n1".to_string()],
+        input_mapping: Some(n2_map),
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+    ])
+    .with_event_listener(Arc::new(RecordingListener {
+      events: Arc::clone(&events),
+    }));
+
+    let debug = crate::FlowDebugController::step_every_node();
+    let config = FlowExecutionConfig::concurrent(4)
+      .with_run_base_dir(temp_dir.path())
+      .with_debug_controller(debug.clone());
+
+    let handle = tokio::spawn(async move {
+      flow
+        .execute_from_inputs_with_config(HashMap::new(), config)
+        .await
+    });
+
+    for _ in 0..100 {
+      if debug.snapshot().paused_at.is_some() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let snap1 = debug.snapshot();
+    let pause1 = snap1.paused_at.expect("expected pause after n1");
+    assert_eq!(pause1.node_id, "n1");
+    assert_eq!(pause1.phase, crate::DebugPausePhase::AfterNode);
+    assert_eq!(pause1.next_nodes, vec!["n2".to_string()]);
+
+    assert!(debug.step());
+
+    for _ in 0..100 {
+      if debug
+        .snapshot()
+        .paused_at
+        .as_ref()
+        .is_some_and(|p| p.node_id == "n2")
+      {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let snap2 = debug.snapshot();
+    let pause2 = snap2.paused_at.expect("expected pause after n2");
+    assert_eq!(pause2.node_id, "n2");
+    assert!(pause2.next_nodes.is_empty());
+
+    assert!(debug.step());
+
+    let state = handle.await.unwrap().unwrap();
+    assert_eq!(
+      state["n2"].as_ref().unwrap().get("out_val"),
+      Some(&FlowValue::Json(json!("hello!!")))
+    );
+
+    let log = events.lock().unwrap().clone();
+    assert!(
+      log
+        .iter()
+        .any(|e| e.starts_with("input:n1:") && e.contains("hello"))
+    );
+    assert!(
+      log
+        .iter()
+        .any(|e| e.starts_with("output:n1:") && e.contains("hello!"))
+    );
+    assert!(
+      log
+        .iter()
+        .any(|e| e.starts_with("input:n2:") && e.contains("hello!"))
+    );
+    assert!(
+      log
+        .iter()
+        .any(|e| e.starts_with("output:n2:") && e.contains("hello!!"))
+    );
+    assert!(log.iter().any(|e| e == "resumed:n1:step"));
+  }
+
+  #[tokio::test]
+  async fn debug_controller_breakpoint_and_continue_runs_remaining_nodes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingNode {
+      counter: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncNode for CountingNode {
+      async fn execute(&self, _inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+        let idx = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut out = HashMap::new();
+        out.insert("count".to_string(), FlowValue::Json(json!(idx)));
+        Ok(out)
+      }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mk_node = |id: &str, deps: Vec<&str>| GraphNode {
+      id: id.to_string(),
+      node_type: NodeType::Standard(Arc::new(CountingNode {
+        counter: Arc::clone(&counter),
+      })),
+      dependencies: deps.into_iter().map(String::from).collect(),
+      input_mapping: None,
+      run_if: None,
+      initial_inputs: HashMap::new(),
+    };
+
+    let flow = Flow::new(vec![
+      mk_node("a", vec![]),
+      mk_node("b", vec!["a"]),
+      mk_node("c", vec!["b"]),
+    ]);
+
+    let debug = crate::FlowDebugController::new(false, ["b"]);
+    let config = FlowExecutionConfig::serial()
+      .with_run_base_dir(temp_dir.path())
+      .with_debug_controller(debug.clone());
+
+    let handle = tokio::spawn(async move {
+      flow
+        .execute_from_inputs_with_config(HashMap::new(), config)
+        .await
+    });
+
+    for _ in 0..100 {
+      if debug.snapshot().paused_at.is_some() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    let pause = debug.snapshot().paused_at.expect("paused before b");
+    assert_eq!(pause.node_id, "b");
+    assert_eq!(pause.phase, crate::DebugPausePhase::BeforeNode);
+
+    assert!(debug.continue_run());
+    let state = handle.await.unwrap().unwrap();
+    assert_eq!(counter.load(Ordering::SeqCst), 3);
+    assert!(state["c"].is_ok());
+  }
+
+  #[tokio::test]
+  async fn debug_controller_cancel_while_paused_exits_immediately() {
+    struct NoopNode;
+
+    #[async_trait]
+    impl AsyncNode for NoopNode {
+      async fn execute(&self, _inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+        Ok(HashMap::new())
+      }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let token = crate::scheduler::FlowCancellationToken::new();
+    let debug = crate::FlowDebugController::step_every_node();
+    let config = FlowExecutionConfig::serial()
+      .with_run_base_dir(temp_dir.path())
+      .with_cancellation_token(token.clone())
+      .with_debug_controller(debug.clone());
+
+    let flow = Flow::new(vec![
+      GraphNode {
+        id: "n1".to_string(),
+        node_type: NodeType::Standard(Arc::new(NoopNode)),
+        dependencies: vec![],
+        input_mapping: None,
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+      GraphNode {
+        id: "n2".to_string(),
+        node_type: NodeType::Standard(Arc::new(NoopNode)),
+        dependencies: vec!["n1".to_string()],
+        input_mapping: None,
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+    ]);
+
+    let handle = tokio::spawn(async move {
+      flow
+        .execute_from_inputs_with_config(HashMap::new(), config)
+        .await
+    });
+
+    for _ in 0..100 {
+      if debug.snapshot().paused_at.is_some() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(debug.snapshot().paused_at.is_some());
+
+    token.cancel();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+      .await
+      .expect("cancelled debug flow must not hang")
+      .unwrap();
+    assert!(matches!(outcome, Err(YanshiError::TaskCancelled)));
+    assert!(debug.snapshot().paused_at.is_none());
   }
 }

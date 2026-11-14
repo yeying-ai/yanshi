@@ -387,6 +387,31 @@ impl TraceCollector {
         }
       }
 
+      WorkflowEvent::NodeInputCaptured {
+        workflow_id,
+        node_id,
+        mut input,
+        timestamp: _,
+      } => {
+        if config.capture_io
+          && let Err(e) = Self::limit_value_size(&mut input, config.max_io_size_bytes)
+        {
+          Self::handle_storage_error(&config, e);
+        }
+
+        let mut traces_guard = traces.write().await;
+        if let Some(trace) = traces_guard.get_mut(&workflow_id)
+          && let Some(node) = trace
+            .nodes
+            .iter_mut()
+            .rev()
+            .find(|n| n.node_id == node_id && n.status == NodeStatus::Running)
+          && config.capture_io
+        {
+          node.input = Some(input);
+        }
+      }
+
       WorkflowEvent::NodeOutputCaptured {
         workflow_id,
         node_id,

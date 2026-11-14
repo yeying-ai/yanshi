@@ -29,8 +29,35 @@
 //! }
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{Duration, Instant};
+
+/// Phase at which a debuggable workflow run paused on a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugPausePhase {
+  /// Paused after resolving node inputs, before invoking `AsyncNode::execute`.
+  BeforeNode,
+  /// Paused after node completion (succeeded, skipped, or failed) for I/O inspection.
+  AfterNode,
+}
+
+impl DebugPausePhase {
+  /// Stable snake_case wire representation.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::BeforeNode => "before_node",
+      Self::AfterNode => "after_node",
+    }
+  }
+}
+
+impl fmt::Display for DebugPausePhase {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
 
 /// Workflow execution events
 ///
@@ -84,11 +111,36 @@ pub enum WorkflowEvent {
     timestamp: Instant,
   },
 
+  /// Node input captured right after assembly (before execution)
+  NodeInputCaptured {
+    workflow_id: String,
+    node_id: String,
+    input: serde_json::Value,
+    timestamp: Instant,
+  },
+
   /// Node output captured after successful execution
   NodeOutputCaptured {
     workflow_id: String,
     node_id: String,
     output: serde_json::Value,
+    timestamp: Instant,
+  },
+
+  /// Workflow paused at a debug step boundary awaiting operator step/continue
+  NodeDebugPaused {
+    workflow_id: String,
+    node_id: String,
+    phase: DebugPausePhase,
+    next_nodes: Vec<String>,
+    timestamp: Instant,
+  },
+
+  /// Workflow resumed from a debug step boundary
+  NodeDebugResumed {
+    workflow_id: String,
+    node_id: String,
+    action: String,
     timestamp: Instant,
   },
 
@@ -244,7 +296,10 @@ impl WorkflowEvent {
       | Self::WorkflowCancelled { workflow_id, .. }
       | Self::NodeStarted { workflow_id, .. }
       | Self::NodeCompleted { workflow_id, .. }
+      | Self::NodeInputCaptured { workflow_id, .. }
       | Self::NodeOutputCaptured { workflow_id, .. }
+      | Self::NodeDebugPaused { workflow_id, .. }
+      | Self::NodeDebugResumed { workflow_id, .. }
       | Self::NodeFailed { workflow_id, .. }
       | Self::NodeSkipped { workflow_id, .. }
       | Self::CheckpointSaved { workflow_id, .. }
@@ -269,7 +324,10 @@ impl WorkflowEvent {
       | Self::WorkflowCancelled { timestamp, .. }
       | Self::NodeStarted { timestamp, .. }
       | Self::NodeCompleted { timestamp, .. }
+      | Self::NodeInputCaptured { timestamp, .. }
       | Self::NodeOutputCaptured { timestamp, .. }
+      | Self::NodeDebugPaused { timestamp, .. }
+      | Self::NodeDebugResumed { timestamp, .. }
       | Self::NodeFailed { timestamp, .. }
       | Self::NodeSkipped { timestamp, .. }
       | Self::CheckpointSaved { timestamp, .. }
@@ -294,7 +352,10 @@ impl WorkflowEvent {
       Self::WorkflowCancelled { .. } => "workflow.cancelled",
       Self::NodeStarted { .. } => "node.started",
       Self::NodeCompleted { .. } => "node.completed",
+      Self::NodeInputCaptured { .. } => "node.input.captured",
       Self::NodeOutputCaptured { .. } => "node.output.captured",
+      Self::NodeDebugPaused { .. } => "node.debug.paused",
+      Self::NodeDebugResumed { .. } => "node.debug.resumed",
       Self::NodeFailed { .. } => "node.failed",
       Self::NodeSkipped { .. } => "node.skipped",
       Self::CheckpointSaved { .. } => "checkpoint.saved",
@@ -344,8 +405,19 @@ impl fmt::Display for WorkflowEvent {
       } => {
         write!(f, "Node '{}' completed in {:?}", node_id, duration)
       }
+      Self::NodeInputCaptured { node_id, .. } => {
+        write!(f, "Node '{}' input captured", node_id)
+      }
       Self::NodeOutputCaptured { node_id, .. } => {
         write!(f, "Node '{}' output captured", node_id)
+      }
+      Self::NodeDebugPaused { node_id, phase, .. } => {
+        write!(f, "Node '{}' debug paused ({})", node_id, phase)
+      }
+      Self::NodeDebugResumed {
+        node_id, action, ..
+      } => {
+        write!(f, "Node '{}' debug resumed ({})", node_id, action)
       }
       Self::NodeFailed { node_id, error, .. } => {
         write!(f, "Node '{}' failed: {}", node_id, error)

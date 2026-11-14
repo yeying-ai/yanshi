@@ -75,7 +75,9 @@ pub mod plugin;
 pub use async_node::AsyncNode;
 pub use checkpoint::{Checkpoint, CheckpointConfig, CheckpointManager, WorkflowStatus};
 pub use error::{Result, YanshiError};
-pub use events::{ConsoleListener, EventListener, MultiListener, NoOpListener, WorkflowEvent};
+pub use events::{
+  ConsoleListener, DebugPausePhase, EventListener, MultiListener, NoOpListener, WorkflowEvent,
+};
 pub use flow::{Flow, FlowExt, GraphNode, NodeType};
 pub use health::{HealthChecker, HealthReport, HealthStatus};
 pub use resource_limits::ResourceLimits;
@@ -85,6 +87,9 @@ pub use resume::{
 };
 pub use retry::{ErrorPattern, RetryContext, RetryPolicy, RetryStrategy};
 pub use retry_executor::{execute_with_retry, execute_with_retry_and_hook};
-pub use scheduler::{FlowCancellationToken, FlowExecutionConfig, FlowExecutionMode};
+pub use scheduler::{
+  FlowCancellationToken, FlowDebugController, FlowDebugPause, FlowDebugSnapshot,
+  FlowExecutionConfig, FlowExecutionMode,
+};
 pub use state_size::{StateSizeObserver, estimated_state_pool_bytes};
 pub use value::FlowValue;
