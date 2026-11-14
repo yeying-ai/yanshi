@@ -1144,9 +1144,15 @@ impl RenderVideoNode {
   }
 }
 
+struct SceneFrame {
+  picture: std::path::PathBuf,
+  caption: String,
+}
+
 struct Scene {
   picture: std::path::PathBuf,
   moving: bool,
+  frames: Vec<SceneFrame>,
   audio: std::path::PathBuf,
   caption: String,
 }
@@ -1240,7 +1246,7 @@ impl RenderVideoNode {
       _ => {
         return Err(input_error(
           &self.id,
-          "missing input 'scenes' (a non-empty array of {image | video, audio, caption})",
+          "missing input 'scenes' (a non-empty array of {image | video | frames, audio, caption})",
         ));
       }
     };
@@ -1248,22 +1254,52 @@ impl RenderVideoNode {
       .iter()
       .enumerate()
       .map(|(i, item)| {
-        let (picture, moving) = match (item.get("image"), item.get("video")) {
-          (_, Some(video)) if !video.is_null() => (video, true),
-          (Some(image), _) => (image, false),
-          _ => {
-            return Err(input_error(
-              &self.id,
-              format!("scene {i} needs an image or a video"),
-            ));
+        let mut frames = Vec::new();
+        if let Some(Value::Array(raw_frames)) = item.get("frames") {
+          for (fi, frame_item) in raw_frames.iter().enumerate() {
+            let img_val = frame_item.get("image").ok_or_else(|| {
+              input_error(&self.id, format!("scene {i} frame {fi} needs an image"))
+            })?;
+            let pic = inside_artifact_root(&self.id, &json_path(&self.id, img_val, "picture")?)?;
+            let cap = frame_item
+              .get("caption")
+              .and_then(Value::as_str)
+              .unwrap_or_default()
+              .trim()
+              .to_string();
+            frames.push(SceneFrame {
+              picture: pic,
+              caption: cap,
+            });
           }
+        }
+
+        let (picture, moving) = if let Some(first) = frames.first() {
+          (first.picture.clone(), false)
+        } else {
+          let (raw_pic, mv) = match (item.get("image"), item.get("video")) {
+            (_, Some(video)) if !video.is_null() => (video, true),
+            (Some(image), _) => (image, false),
+            _ => {
+              return Err(input_error(
+                &self.id,
+                format!("scene {i} needs an image, video, or non-empty frames"),
+              ));
+            }
+          };
+          (
+            inside_artifact_root(&self.id, &json_path(&self.id, raw_pic, "picture")?)?,
+            mv,
+          )
         };
+
         let audio = item
           .get("audio")
           .ok_or_else(|| input_error(&self.id, format!("scene {i} needs audio")))?;
         Ok(Scene {
-          picture: inside_artifact_root(&self.id, &json_path(&self.id, picture, "picture")?)?,
+          picture,
           moving,
+          frames,
           audio: inside_artifact_root(&self.id, &json_path(&self.id, audio, "audio")?)?,
           caption: item
             .get("caption")
@@ -1366,21 +1402,70 @@ impl AsyncNode for RenderVideoNode {
       }
 
       // 2. One uniformly encoded segment per scene, so step 3 can join
-      // them without re-encoding.
+      // them without re-encoding. Multi-frame progressive scenes split
+      // the audio duration across their build frames in proportion to
+      // each frame's caption length.
       let fit = format!(
         "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={VIDEO_FPS},format=yuv420p"
       );
       let mut list = String::new();
+      let mut cue_captions: Vec<&str> = Vec::new();
+      let mut cue_durations: Vec<f64> = Vec::new();
       for (i, (scene, seconds)) in scenes.iter().zip(&durations).enumerate() {
         let segment = workdir.join(format!("scene-{i}.mp4"));
-        let mut args: Vec<std::ffi::OsString> = if scene.moving {
-          vec!["-stream_loop".into(), "-1".into()]
+        let mut args: Vec<std::ffi::OsString> = if scene.frames.len() >= 2 {
+          let total_weight: usize = scene
+            .frames
+            .iter()
+            .map(|f| f.caption.chars().count().max(8))
+            .sum();
+          let mut frame_list = String::new();
+          for frame in &scene.frames {
+            let share =
+              seconds * frame.caption.chars().count().max(8) as f64 / total_weight.max(1) as f64;
+            let escaped = frame.picture.to_string_lossy().replace('\'', "'\\''");
+            frame_list.push_str(&format!("file '{escaped}'\nduration {share:.3}\n"));
+            cue_captions.push(if frame.caption.is_empty() {
+              scene.caption.as_str()
+            } else {
+              frame.caption.as_str()
+            });
+            cue_durations.push(share);
+          }
+          if let Some(last) = scene.frames.last() {
+            let escaped = last.picture.to_string_lossy().replace('\'', "'\\''");
+            frame_list.push_str(&format!("file '{escaped}'\n"));
+          }
+          let frames_file = workdir.join(format!("frames-{i}.txt"));
+          tokio::fs::write(&frames_file, frame_list)
+            .await
+            .map_err(|e| input_error(&self.id, format!("cannot write frame list: {e}")))?;
+          vec![
+            "-f".into(),
+            "concat".into(),
+            "-safe".into(),
+            "0".into(),
+            "-i".into(),
+            frames_file.into(),
+          ]
         } else {
-          vec!["-loop".into(), "1".into()]
+          let single_cap = scene
+            .frames
+            .first()
+            .filter(|f| !f.caption.is_empty())
+            .map_or(scene.caption.as_str(), |f| f.caption.as_str());
+          cue_captions.push(single_cap);
+          cue_durations.push(*seconds);
+          let mut prefix: Vec<std::ffi::OsString> = if scene.moving {
+            vec!["-stream_loop".into(), "-1".into()]
+          } else {
+            vec!["-loop".into(), "1".into()]
+          };
+          prefix.push("-i".into());
+          prefix.push(scene.picture.clone().into());
+          prefix
         };
         args.extend([
-          "-i".into(),
-          scene.picture.clone().into(),
           "-i".into(),
           scene.audio.clone().into(),
           "-map".into(),
@@ -1414,9 +1499,8 @@ impl AsyncNode for RenderVideoNode {
         .map_err(|e| input_error(&self.id, format!("cannot write the scene list: {e}")))?;
 
       // 3. Join; 4. add the subtitle track when there are captions.
-      let captions: Vec<&str> = scenes.iter().map(|s| s.caption.as_str()).collect();
-      let srt = if captions.iter().any(|c| !c.is_empty()) {
-        Some(build_srt(&captions, &durations))
+      let srt = if cue_captions.iter().any(|c| !c.is_empty()) {
+        Some(build_srt(&cue_captions, &cue_durations))
       } else {
         None
       };

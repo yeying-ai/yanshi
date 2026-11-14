@@ -10,15 +10,28 @@
    - **第 5 章 · 注意事项**：孤儿规则（Orphan Rule / Coherence）、对象安全（`dyn` 兼容性）、单态化二进制膨胀治理与“单实现提前抽 Trait”反模式
    - **第 6 章 · 总结与深思** *(配 Veo I2V 视频)*：把运行时的不确定性前移为编译期证明——从“它是什么”到“它能做什么”的工程哲学
 
-2. **三种运行与复用方式**：
-   - **配置驱动 YAML 工作流**：[`workflow.yml`](workflow.yml)
-   - **Rust SDK 代码级管线**：[`yanshi-llm/examples/rust_traits_studio.rs`](../../../yanshi-llm/examples/rust_traits_studio.rs)（支持离线 Mock 冒烟与线上 Vertex AI 全链路生成自包含交互式 `index.html` + `tutorial.md` + 带字幕长视频 `full_course.mp4`）
+2. **四种运行与复用方式**：
+   - **1080p 技术 PPT 演播级课程工坊（推荐技术深度讲解）**：[`yanshi-config/examples/rust_traits_ppt_studio.rs`](../../../yanshi-config/examples/rust_traits_ppt_studio.rs)（基于纯原生 `render_slides` 矢量渲染引擎，自动生成 10 页 × 22 步渐进式动画技术幻灯片——含语法高亮代码焦点框、拓扑流程图、Stack/Heap/VTable 胖指针内存布局图、对比矩阵与贝塞尔思维导图——输出 1080p MP4 视频、双模交互式 Web Keynote 播放器 `index.html`、可编辑 PowerPoint `rust_traits_slides.pptx` 与高清矢量讲义 `rust_traits_handout.pdf`）
+   - **通用可复用技术幻灯片视频生成器模板**：[`examples/generators/tech_slides_video.yml`](../../generators/tech_slides_video.yml)（给定任意技术主题 `topic`，自动执行 `LLM JSON Schema 分镜 -> render_slides 逐帧渲染 -> TTS 配音 -> render_video 多帧渐进混流 + PPTX/PDF 导出`）
+   - **配置驱动多模态 YAML 工作流**：[`workflow.yml`](workflow.yml)
+   - **Rust SDK 概念艺术 + Veo I2V 管线**：[`yanshi-llm/examples/rust_traits_studio.rs`](../../../yanshi-llm/examples/rust_traits_studio.rs)（支持离线 Mock 冒烟与线上 Vertex AI 全链路生成自包含交互式 `index.html` + `tutorial.md` + 带字幕长视频 `full_course.mp4`）
 
 ---
 
 ## 快速使用
 
-### 1. 严格校验 YAML 工作流（离线零依赖）
+### 1. 生成 1080p 技术 PPT 演播视频 + PPTX + PDF（推荐）
+
+```bash
+# 默认自动复用 runs/rust-traits-course/assets/ch01..06.wav 真实中文语音（若无缓存且未开启 LIVE 则走离线 Mock 语音）
+cargo run -p yanshi-config --example rust_traits_ppt_studio
+
+# 校验通用技术 PPT 视频生成模板（零外部依赖）
+cargo run -p yanshi-cli -- workflow validate \
+  examples/generators/tech_slides_video.yml --strict
+```
+
+### 2. 严格校验多模态 YAML 工作流（离线零依赖）
 
 ```bash
 cargo run -p yanshi-cli -- workflow validate \
@@ -47,7 +60,24 @@ yanshi workflow run examples/applications/rust-traits-tutorial/workflow.yml \
 
 ---
 
-## 产物目录结构（`runs/rust-traits-course/`）
+## 产物目录结构
+
+### A. 1080p 技术 PPT 演播套件（`runs/rust-traits-ppt/`）
+
+```text
+runs/rust-traits-ppt/
+├── full_course.mp4             # 1920×1080 渐进动画幻灯片讲课视频（H.264 + AAC 中文配音 + SRT 软字幕轨）
+├── rust_traits_slides.pptx     # 可编辑 PowerPoint 课件（含每页高清矢量帧与讲师逐字稿备注）
+├── rust_traits_handout.pdf     # 16:9 宽屏高清讲义 PDF（Typst 矢量排版：幻灯片 + 批注页）
+├── index.html                  # 双模交互式 Web Keynote 播放器（支持视频时间轴同步高亮 & 键盘方向键翻页）
+├── full_course.srt             # 22 步逐句对齐时间轴字幕 (SRT)
+├── full_course.vtt             # Web 播放器时间轴字幕 (WebVTT)
+├── tutorial.md                 # 结构化图文课程讲义 (Markdown)
+└── slides/
+    └── s01_step01.png .. s10_step01.png  # 22 张 1920×1080 原生矢量渲染渐进帧（代码高亮/流程图/胖指针内存图/对比表/思维导图）
+```
+
+### B. 概念插图 + Veo I2V 多模态套件（`runs/rust-traits-course/`）
 
 ```text
 runs/rust-traits-course/

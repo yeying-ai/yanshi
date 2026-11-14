@@ -517,6 +517,11 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::required_input("tree", ParamType::Any),
       ParamSpec::optional("format", ParamType::String),
     ]),
+    "render_slides" => Some(vec![
+      ParamSpec::required_input("deck", ParamType::Any),
+      ParamSpec::optional("width", ParamType::Integer),
+      ParamSpec::optional("progressive", ParamType::Bool),
+    ]),
     "render_video" => Some(vec![
       ParamSpec::required_input("scenes", ParamType::Any),
       ParamSpec::optional("width", ParamType::Integer),
