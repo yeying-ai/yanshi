@@ -64,6 +64,7 @@ referenced file for the runnable code, comments, and run commands.
 | 10 | RAG ingest + query + (eval via CLI) | [`phase4_indexing_demo.rs`](../yanshi-rag/examples/phase4_indexing_demo.rs), [`phase5_advanced_retrieval.rs`](../yanshi-rag/examples/phase5_advanced_retrieval.rs), `yanshi rag eval <dataset>` | `yanshi-rag`, `yanshi-cli` | ✓ |
 | 11 | Tracing JSONL (and OTel export hook) | [`simple_tracing.rs`](../yanshi-tracing/examples/simple_tracing.rs) | `yanshi-tracing` | ✓ JSONL; OTel exporter wired but no dedicated example yet (follow-up) |
 | 12 | Tool policy + sandbox capability decision | [`tool_policy_sandbox_demo.rs`](../yanshi-tools/examples/tool_policy_sandbox_demo.rs) | `yanshi-tools` | ✓ (added under P3.1) |
+| 13 | Multimodal studio (Chat + T2I + VLM + Veo I2V + TTS + MP4/HTML) | [`rust_traits_studio.rs`](../yanshi-llm/examples/rust_traits_studio.rs), [`rust-traits-tutorial/workflow.yml`](applications/rust-traits-tutorial/workflow.yml) | `yanshi-llm`, `yanshi-cli` | ✓ |
 
 ## Ecosystem / scenario-level demos
 

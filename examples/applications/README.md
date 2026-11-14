@@ -33,6 +33,7 @@ status table.
 | A6 | Markdown folder multi-language translator | WIP — four workflow iterations shipped | [`doc-translator/`](doc-translator/) |
 | A7 | Git log → conventional CHANGELOG (yanshi eats its own dogfood) | WIP — live ✅ as a binary; skill form rejected (2026-05-18) | [`changelog-writer/`](changelog-writer/) |
 | A8 | **Content Studio** — one URL or idea → report + mind map + audio overview via a planner agent (track Y, `TODOs.md` Y4.4) | DONE — mock smoke in CI; the live run needs model keys (2026-11-05) | [`content-studio/`](content-studio/) |
+| A9 | **Rust Traits Multimodal Course Studio** — 6-chapter deep-dive tutorial → 16:9 illustrations + Veo 3.1 I2V animations + VLM review + Chinese TTS voiceover + subtitled MP4 & interactive HTML portal | DONE — offline mock smoke + Vertex AI live verified | [`rust-traits-tutorial/`](rust-traits-tutorial/) |
 
 ## Conventions for new applications
 

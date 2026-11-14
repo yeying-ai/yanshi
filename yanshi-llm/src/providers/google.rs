@@ -580,6 +580,7 @@ struct GoogleCandidate {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct GoogleContent {
+  #[serde(default)]
   parts: Vec<GooglePart>,
   role: Option<String>,
 }

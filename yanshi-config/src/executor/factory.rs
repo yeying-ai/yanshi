@@ -285,6 +285,10 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
       if let Some(seconds) = params.get("duration_seconds").and_then(|v| v.as_u64()) {
         node = node.with_duration_seconds(u32::try_from(seconds).unwrap_or(u32::MAX));
       }
+      let image = get_string_param_optional(params, "image");
+      if !image.is_empty() {
+        node = node.with_image(&image);
+      }
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "tts" => {

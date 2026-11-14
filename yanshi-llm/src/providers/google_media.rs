@@ -391,17 +391,59 @@ impl TtsProvider for GoogleMediaProvider {
         message: "Google generateContent response carried no inlineData media parts".to_string(),
       })?;
 
-    let audio = base64::engine::general_purpose::STANDARD
+    let raw_audio = base64::engine::general_purpose::STANDARD
       .decode(&first.data)
       .map_err(|e| LLMError::ResponseParsingError {
         message: format!("Google TTS response inlineData.data was not valid base64: {e}"),
       })?;
 
-    Ok(TtsResponse {
-      audio,
-      mime_type: first.mime_type,
-    })
+    let (audio, mime_type) = normalize_tts_audio(raw_audio, first.mime_type);
+
+    Ok(TtsResponse { audio, mime_type })
   }
+}
+
+/// Gemini TTS returns headerless 16-bit signed LE mono PCM labeled
+/// `audio/L16;codec=pcm;rate=24000` (or `audio/pcm`). Wrapping it in a
+/// standard 44-byte RIFF/WAVE header makes downstream consumers (`ffprobe`,
+/// `ffmpeg`, `wav_duration_seconds`, media players) recognize it directly.
+fn normalize_tts_audio(raw_audio: Vec<u8>, mime_type: String) -> (Vec<u8>, String) {
+  let lower = mime_type.to_ascii_lowercase();
+  if !lower.starts_with("audio/l16") && !lower.starts_with("audio/pcm") {
+    return (raw_audio, mime_type);
+  }
+  if raw_audio.starts_with(b"RIFF") {
+    return (raw_audio, "audio/wav".to_string());
+  }
+
+  let sample_rate = lower
+    .split(';')
+    .filter_map(|seg| seg.trim().strip_prefix("rate="))
+    .find_map(|r| r.parse::<u32>().ok())
+    .unwrap_or(24_000);
+  let channels: u16 = 1;
+  let bits_per_sample: u16 = 16;
+  let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample / 8);
+  let block_align = channels * (bits_per_sample / 8);
+  let data_len = u32::try_from(raw_audio.len()).unwrap_or(u32::MAX);
+  let riff_chunk_size = 36u32.saturating_add(data_len);
+
+  let mut wav = Vec::with_capacity(44 + raw_audio.len());
+  wav.extend_from_slice(b"RIFF");
+  wav.extend_from_slice(&riff_chunk_size.to_le_bytes());
+  wav.extend_from_slice(b"WAVEfmt ");
+  wav.extend_from_slice(&16u32.to_le_bytes());
+  wav.extend_from_slice(&1u16.to_le_bytes());
+  wav.extend_from_slice(&channels.to_le_bytes());
+  wav.extend_from_slice(&sample_rate.to_le_bytes());
+  wav.extend_from_slice(&byte_rate.to_le_bytes());
+  wav.extend_from_slice(&block_align.to_le_bytes());
+  wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+  wav.extend_from_slice(b"data");
+  wav.extend_from_slice(&data_len.to_le_bytes());
+  wav.extend_from_slice(&raw_audio);
+
+  (wav, "audio/wav".to_string())
 }
 
 #[cfg(test)]
@@ -473,5 +515,17 @@ mod tests {
     let body = json!({ "candidates": [] }).to_string();
     let err = parse_generate_content_media_response(&body).unwrap_err();
     assert!(err.to_string().contains("no inlineData media parts"));
+  }
+
+  #[test]
+  fn normalize_tts_audio_wraps_l16_pcm_with_riff_wav_header() {
+    let pcm = vec![0u8; 48_000];
+    let (wav, mime) = normalize_tts_audio(pcm, "audio/L16;codec=pcm;rate=24000".to_string());
+    assert_eq!(mime, "audio/wav");
+    assert_eq!(wav.len(), 44 + 48_000);
+    assert_eq!(&wav[0..4], b"RIFF");
+    assert_eq!(&wav[8..12], b"WAVE");
+    let sample_rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+    assert_eq!(sample_rate, 24_000);
   }
 }

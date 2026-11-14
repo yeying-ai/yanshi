@@ -486,6 +486,7 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
     "text_to_video" => Some(vec![
       ParamSpec::required_input("model", ParamType::String),
       ParamSpec::required_input("prompt", ParamType::String),
+      ParamSpec::optional("image", ParamType::String),
       ParamSpec::optional("aspect_ratio", ParamType::String),
       ParamSpec::optional("resolution", ParamType::String),
       ParamSpec::optional("duration_seconds", ParamType::Integer),

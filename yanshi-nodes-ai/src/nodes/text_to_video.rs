@@ -59,6 +59,7 @@ struct Shot {
   model: String,
   aspect_ratio: Option<String>,
   duration_seconds: Option<u32>,
+  image: Option<String>,
 }
 
 impl TextToVideoNode {
@@ -168,10 +169,21 @@ impl TextToVideoNode {
       Some(FlowValue::Json(Value::String(s))) => s.trim().parse().ok(),
       _ => None,
     };
+    let image_input = match inputs.get("image") {
+      Some(FlowValue::Json(Value::String(s))) if !s.trim().is_empty() => Some(s.clone()),
+      Some(FlowValue::File { path, .. }) => Some(path.to_string_lossy().to_string()),
+      Some(FlowValue::Json(Value::Object(obj))) => obj
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(ToString::to_string),
+      _ => None,
+    };
     Shot {
       model: string_input("model").unwrap_or_else(|| self.model.clone()),
       aspect_ratio: string_input("aspect_ratio").or_else(|| self.aspect_ratio.clone()),
       duration_seconds: seconds_input.or(self.duration_seconds),
+      image: image_input.or_else(|| self.image.clone()),
     }
   }
 
@@ -186,6 +198,7 @@ impl TextToVideoNode {
       model,
       aspect_ratio,
       duration_seconds,
+      image: shot_image,
     } = shot;
     tracing::debug!(
       model = %model,
@@ -203,7 +216,7 @@ impl TextToVideoNode {
           ),
         })?;
 
-    let image = match &self.image {
+    let image = match shot_image.as_deref() {
       Some(path_or_uri) => Some(load_video_input_image(path_or_uri).await?),
       None => None,
     };
