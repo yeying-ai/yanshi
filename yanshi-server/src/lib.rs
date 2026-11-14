@@ -47,6 +47,7 @@ pub mod skills;
 pub mod tenant;
 pub mod ui;
 pub mod worker_grpc;
+pub mod workflow_inspect;
 
 pub use auth::{
   AuthConfig, AuthConfigError, AuthenticatedTenant, TenantToken, require_bearer_token,
@@ -83,12 +84,13 @@ pub use harness_approval::{
 pub use harness_live::{LiveHarnessExecutor, ServerHarnessEventSink};
 pub use live_state_registry::LiveStateRegistry;
 pub use runs::{
-  CancelRunResponse, CreateRunRequest, CreateRunResponse, FlowRunExecutor, ListRunsQuery,
-  ListRunsResponse, RUN_CANCELLATION_NOTIFY_CHANNEL, ResumePlanQuery, RetentionOverrides,
-  RunAdmissionError, RunAdmissionGuard, RunAdmissionRegistry, RunApprovalDecisionResponse,
-  RunCancellationRegistry, RunContext, RunExecutor, RunResponse, StubExecutor, cancel_run,
-  decide_run_approval, default_executor, get_run, get_run_resume_plan, list_run_approvals,
-  list_runs, post_run_action, spawn_run_cancellation_listener, spawn_run_lease_loop, submit_run,
+  CancelRunResponse, CreateRunRequest, CreateRunResponse, DebugActionRequest, DebugStatusResponse,
+  FlowRunExecutor, ListRunsQuery, ListRunsResponse, RUN_CANCELLATION_NOTIFY_CHANNEL,
+  ResumePlanQuery, RetentionOverrides, RunAdmissionError, RunAdmissionGuard, RunAdmissionRegistry,
+  RunApprovalDecisionResponse, RunCancellationRegistry, RunContext, RunDebugRegistry, RunExecutor,
+  RunMode, RunResponse, StubExecutor, cancel_run, decide_run_approval, default_executor, get_run,
+  get_run_debug, get_run_resume_plan, list_run_approvals, list_runs, post_run_action,
+  spawn_run_cancellation_listener, spawn_run_lease_loop, submit_run,
 };
 pub use scheduler::{
   AdmissionConfigError, AdmissionError, AuthenticatedControlPlane, AuthenticatedGrpcWorkerService,
@@ -108,6 +110,7 @@ pub use skills::{
   ListSkillsResponse, RunSkillRequest, SkillCatalog, SkillEntry, list_skills, run_skill,
 };
 pub use ui::{asset_response, index_html, ui_router};
+pub use workflow_inspect::{InspectWorkflowRequest, post_inspect_workflow};
 
 pub const CORS_ALLOWED_ORIGINS_ENV: &str = "YANSHI_CORS_ALLOWED_ORIGINS";
 pub const MAX_REQUEST_BODY_BYTES_ENV: &str = "YANSHI_MAX_REQUEST_BODY_BYTES";
@@ -149,6 +152,8 @@ pub struct AppState {
   pub event_broker: EventBroker,
   /// Process-local cancellation registry for queued/running background runs.
   pub cancellation_registry: RunCancellationRegistry,
+  /// Process-local interactive debug step registry for Studio runs.
+  pub debug_registry: RunDebugRegistry,
   /// Background executor for submitted harness sessions (P-H.5). Defaults
   /// to [`StubHarnessExecutor`] until the LLM-backed runtime lands.
   pub harness_executor: Arc<dyn harness::HarnessSessionExecutor>,
@@ -228,6 +233,7 @@ impl AppState {
       executor: default_executor(),
       event_broker: EventBroker::new(),
       cancellation_registry: RunCancellationRegistry::new(),
+      debug_registry: RunDebugRegistry::new(),
       harness_executor: default_harness_executor(),
       harness_broker: HarnessEventBroker::new(),
       approval_registry: PendingApprovalRegistry::new(),
@@ -642,12 +648,17 @@ pub fn create_router(state: AppState) -> Router {
   let v1 = Router::new()
     .route("/v1/whoami", get(whoami))
     .route(
+      "/v1/workflows/inspect",
+      post(workflow_inspect::post_inspect_workflow).layer(DefaultBodyLimit::max(workflow_limit)),
+    )
+    .route(
       "/v1/runs",
       get(list_runs)
         .post(submit_run)
         .layer(DefaultBodyLimit::max(workflow_limit)),
     )
     .route("/v1/runs/:id", get(get_run).post(post_run_action))
+    .route("/v1/runs/:id/debug", get(get_run_debug))
     .route("/v1/runs/:id/resume-plan", get(get_run_resume_plan))
     .route("/v1/runs/:id/events/history", get(list_events))
     .route("/v1/runs/:id/events", get(stream_events))
@@ -674,6 +685,7 @@ pub fn create_router(state: AppState) -> Router {
       "/v1/runs/:id/artifacts/:artifact_id",
       get(artifacts::download_run_artifact),
     )
+    .route("/v1/runs/:id/preview", get(artifacts::preview_run_file))
     .route(
       "/v1/runs/:id/approvals/:request_id",
       post(decide_run_approval),

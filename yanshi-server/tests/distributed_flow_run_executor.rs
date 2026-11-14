@@ -148,6 +148,7 @@ async fn distributed_run_reaches_succeeded_and_emits_ordered_events() {
     inputs: serde_json::Map::new(),
     model: None,
     notebook: None,
+    debug_controller: None,
   };
 
   let executor = DistributedFlowRunExecutor::new(control_plane);
@@ -270,6 +271,7 @@ async fn distributed_run_fails_when_a_node_reports_failure() {
     inputs: serde_json::Map::new(),
     model: None,
     notebook: None,
+    debug_controller: None,
   };
 
   let executor = DistributedFlowRunExecutor::new(control_plane);
@@ -335,6 +337,7 @@ async fn cancelled_distributed_run_releases_its_queued_tasks() {
     inputs: serde_json::Map::new(),
     model: None,
     notebook: None,
+    debug_controller: None,
   };
   // No worker runs: n1 sits in the queue until the cancel.
   let canceller = tokio::spawn(async move {

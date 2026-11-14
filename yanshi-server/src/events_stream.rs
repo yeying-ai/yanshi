@@ -875,6 +875,16 @@ fn workflow_event_payload(event: &yanshi_core::events::WorkflowEvent) -> serde_j
       "node_id": node_id,
       "duration_ms": duration.as_millis() as u64,
     }),
+    W::NodeInputCaptured {
+      workflow_id,
+      node_id,
+      input,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "input": input,
+    }),
     W::NodeOutputCaptured {
       workflow_id,
       node_id,
@@ -884,6 +894,28 @@ fn workflow_event_payload(event: &yanshi_core::events::WorkflowEvent) -> serde_j
       "workflow_id": workflow_id,
       "node_id": node_id,
       "output": output,
+    }),
+    W::NodeDebugPaused {
+      workflow_id,
+      node_id,
+      phase,
+      next_nodes,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "phase": phase,
+      "next_nodes": next_nodes,
+    }),
+    W::NodeDebugResumed {
+      workflow_id,
+      node_id,
+      action,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "action": action,
     }),
     W::NodeFailed {
       workflow_id,

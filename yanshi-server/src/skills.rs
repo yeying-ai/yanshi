@@ -280,6 +280,7 @@ pub async fn run_skill(
         inputs: serde_json::Map::new(),
         model: None,
         notebook: None,
+        debug_controller: None,
       })
       .await;
     cancellation_registry.complete(run_id);

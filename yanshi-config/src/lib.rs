@@ -12,4 +12,5 @@ pub mod config;
 pub mod content;
 pub mod diagnostics;
 pub mod executor;
+pub mod inspect;
 pub mod skill_workflows;

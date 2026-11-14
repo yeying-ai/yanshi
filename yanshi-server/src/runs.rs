@@ -12,6 +12,7 @@
 use async_trait::async_trait;
 use axum::{
   Extension, Json,
+  body::Bytes,
   extract::{Path, Query, State},
   response::{IntoResponse, Response},
 };
@@ -25,7 +26,8 @@ use uuid::Uuid;
 use yanshi_core::FlowExt;
 
 use yanshi_core::{
-  FlowCancellationToken, FlowExecutionConfig, MultiListener, ResumePlan, ResumePlanOptions,
+  FlowCancellationToken, FlowDebugController, FlowDebugSnapshot, FlowExecutionConfig,
+  MultiListener, ResumePlan, ResumePlanOptions,
   async_node::AsyncNodeResult,
   build_resume_plan,
   checkpoint::{CheckpointConfig, CheckpointManager},
@@ -110,6 +112,25 @@ pub struct CreateRunRequest {
   /// those inside map and while bodies.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub model: Option<String>,
+  /// Studio vs. App Runner execution posture (`"release"` default or `"debug"`).
+  #[serde(default)]
+  pub run_mode: RunMode,
+  /// Pre-execution (`BeforeNode`) breakpoint node IDs for Studio debugging.
+  #[serde(default)]
+  pub breakpoints: Vec<String>,
+  /// Optional override for pausing after every top-level node (`true` by
+  /// default when `run_mode == RunMode::Debug`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub step_every_node: Option<bool>,
+}
+
+/// Execution mode distinguishing one-click Release runs from interactive Studio Debug runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+  #[default]
+  Release,
+  Debug,
 }
 
 /// Y5.4: a run started for a notebook; its registered artifacts are
@@ -244,6 +265,54 @@ pub struct RunContext {
   pub model: Option<String>,
   /// Y5.4: link the run's artifacts to this notebook when it finishes.
   pub notebook: Option<NotebookLink>,
+  /// Interactive step-by-step controller when submitted in Studio debug mode.
+  pub debug_controller: Option<FlowDebugController>,
+}
+
+/// Process-local registry of active [`FlowDebugController`] handles keyed by `run_id`.
+#[derive(Clone, Default)]
+pub struct RunDebugRegistry {
+  inner: Arc<Mutex<HashMap<Uuid, FlowDebugController>>>,
+}
+
+impl std::fmt::Debug for RunDebugRegistry {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let len = self.inner.lock().map(|m| m.len()).unwrap_or(0);
+    f.debug_struct("RunDebugRegistry")
+      .field("active_debug_runs", &len)
+      .finish()
+  }
+}
+
+impl RunDebugRegistry {
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  fn lock_inner(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, FlowDebugController>> {
+    match self.inner.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    }
+  }
+
+  pub fn register(&self, run_id: Uuid, controller: FlowDebugController) {
+    self.lock_inner().insert(run_id, controller);
+  }
+
+  pub fn get(&self, run_id: Uuid) -> Option<FlowDebugController> {
+    self.lock_inner().get(&run_id).cloned()
+  }
+
+  pub fn abort_and_remove(&self, run_id: Uuid) {
+    if let Some(ctrl) = self.lock_inner().remove(&run_id) {
+      ctrl.abort();
+    }
+  }
+
+  pub fn complete(&self, run_id: Uuid) {
+    self.lock_inner().remove(&run_id);
+  }
 }
 
 /// Postgres NOTIFY channel carrying cross-replica cancellation intents
@@ -771,6 +840,9 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     .map_err(anyhow::Error::msg)?
   {
     execution_config = execution_config.with_cost_limit_usd(limit);
+  }
+  if let Some(debug_ctrl) = &ctx.debug_controller {
+    execution_config = execution_config.with_debug_controller(debug_ctrl.clone());
   }
   // Y2.4: every gateway run checkpoints after each node, so a failed or
   // cancelled run can be resumed with `POST /v1/runs/{id}:resume`.
@@ -1391,6 +1463,10 @@ fn run_dir_for_run(base_dir: &FsPath, run_id: Uuid) -> PathBuf {
   base_dir.join(run_id.to_string())
 }
 
+pub(crate) fn default_run_dir_for_id(run_id: Uuid) -> PathBuf {
+  run_dir_for_run(&run_base_dir_for_request(), run_id)
+}
+
 /// V1.1: mirrors `yanshi_core::flow`'s `is_genuine_failure` -- a
 /// benign `run_if` skip (`YanshiError::NodeSkipped`) is not a
 /// workflow failure. Before this fix, a run whose only "error" was a
@@ -1537,6 +1613,11 @@ pub async fn submit_run(
     None => state.executor.clone(),
     Some("in_process") => state.executor.clone(),
     Some("distributed") => {
+      if req.run_mode == RunMode::Debug {
+        return Err(ApiError::BadRequest(
+          "run_mode: \"debug\" is only supported on in-process execution".into(),
+        ));
+      }
       let control_plane = state.worker_control_plane.clone().ok_or_else(|| {
         ApiError::BadRequest(
           "execution_mode: \"distributed\" requires a worker gRPC control plane to be \
@@ -1582,6 +1663,9 @@ pub async fn submit_run(
       notebook: None,
       events_retention_days,
       artifacts_retention_days,
+      run_mode: req.run_mode,
+      breakpoints: req.breakpoints,
+      step_every_node: req.step_every_node,
     },
   )
   .await?;
@@ -1601,6 +1685,9 @@ pub(crate) struct RunOptions {
   pub notebook: Option<NotebookLink>,
   pub events_retention_days: Option<i32>,
   pub artifacts_retention_days: Option<i32>,
+  pub run_mode: RunMode,
+  pub breakpoints: Vec<String>,
+  pub step_every_node: Option<bool>,
 }
 
 /// Admission (the replica-local pre-check, then `create_if_admitted`'s
@@ -1662,6 +1749,20 @@ pub(crate) async fn admit_and_dispatch(
     }
   };
 
+  let debug_controller = if options.run_mode == RunMode::Debug {
+    Some(FlowDebugController::new(
+      options.step_every_node.unwrap_or(true),
+      options.breakpoints,
+    ))
+  } else if !options.breakpoints.is_empty() || options.step_every_node == Some(true) {
+    Some(FlowDebugController::new(
+      options.step_every_node.unwrap_or(false),
+      options.breakpoints,
+    ))
+  } else {
+    None
+  };
+
   dispatch_run(
     state,
     executor,
@@ -1675,6 +1776,7 @@ pub(crate) async fn admit_and_dispatch(
       inputs: options.inputs,
       model: options.model,
       notebook: options.notebook,
+      debug_controller,
     },
     local_admission_guard,
   );
@@ -1692,6 +1794,7 @@ struct DispatchedRun {
   inputs: serde_json::Map<String, serde_json::Value>,
   model: Option<String>,
   notebook: Option<NotebookLink>,
+  debug_controller: Option<FlowDebugController>,
 }
 
 /// Execute a run in the background so the HTTP request returns
@@ -1706,12 +1809,16 @@ fn dispatch_run<G: Send + 'static>(
   let repos = state.repos.clone();
   let broker = state.event_broker.clone();
   let cancellation_registry = state.cancellation_registry.clone();
+  let debug_registry = state.debug_registry.clone();
   let live_state_registry = state.live_state_registry.clone();
   let approval_registry = state.approval_registry.clone();
   let run_max_concurrency = state.run_max_concurrency;
   let cancellation_token = FlowCancellationToken::new();
   let task_token = cancellation_token.clone();
   let run_id = run.run_id;
+  if let Some(ctrl) = &run.debug_controller {
+    state.debug_registry.register(run_id, ctrl.clone());
+  }
   let handle = tokio::spawn(async move {
     // Held until the task completes — releases the local pre-check's
     // admission slot on drop (V3.4). Cluster-wide correctness for new
@@ -1737,14 +1844,17 @@ fn dispatch_run<G: Send + 'static>(
         inputs: run.inputs,
         model: run.model,
         notebook: run.notebook,
+        debug_controller: run.debug_controller,
       })
       .await;
+    debug_registry.complete(run_id);
     cancellation_registry.complete(run_id);
   });
   state
     .cancellation_registry
     .register(run_id, cancellation_token, handle.abort_handle());
   if handle.is_finished() {
+    state.debug_registry.complete(run_id);
     state.cancellation_registry.complete(run_id);
   }
 }
@@ -1754,19 +1864,117 @@ fn checkpoint_dir_for_run(run_base_dir: &FsPath, run_id: Uuid) -> PathBuf {
   run_dir_for_run(run_base_dir, run_id).join("checkpoint")
 }
 
-/// `POST /v1/runs/{id}:cancel` and `POST /v1/runs/{id}:resume` share the
-/// route; the suffix picks the action.
+/// `POST /v1/runs/{id}:cancel`, `POST /v1/runs/{id}:resume`, and
+/// `POST /v1/runs/{id}:debug` share the route; the suffix picks the action.
 pub async fn post_run_action(
   state: State<AppState>,
   tenant: Extension<TenantId>,
   Path(id_action): Path<String>,
+  body: Bytes,
 ) -> Response {
+  if let Some(id_raw) = id_action.strip_suffix(":debug") {
+    return debug_run_action(state, tenant, id_raw, &body)
+      .await
+      .into_response();
+  }
   if let Some(id_raw) = id_action.strip_suffix(":resume") {
     return resume_run(state, tenant, id_raw).await.into_response();
   }
   cancel_run(state, tenant, Path(id_action))
     .await
     .into_response()
+}
+
+/// Request body for `POST /v1/runs/{id}:debug`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DebugActionRequest {
+  Step,
+  Continue,
+  SetBreakpoints {
+    #[serde(default)]
+    breakpoints: Vec<String>,
+  },
+}
+
+/// Response body for `GET /v1/runs/{id}/debug` and `POST /v1/runs/{id}:debug`.
+#[derive(Debug, Serialize)]
+pub struct DebugStatusResponse {
+  pub run_id: Uuid,
+  pub status: String,
+  pub active: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub snapshot: Option<FlowDebugSnapshot>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub resumed: Option<bool>,
+}
+
+/// `GET /v1/runs/{id}/debug` — inspect the current step/pause snapshot of a run.
+pub async fn get_run_debug(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+) -> Result<Json<DebugStatusResponse>, ApiError> {
+  let run = state
+    .repos
+    .runs
+    .get(id)
+    .await?
+    .filter(|r| r.tenant_id == tenant.as_str())
+    .ok_or_else(|| ApiError::NotFound(format!("run {id} not found")))?;
+
+  let controller = state.debug_registry.get(id);
+  Ok(Json(DebugStatusResponse {
+    run_id: id,
+    status: run.status,
+    active: controller.is_some(),
+    snapshot: controller.map(|c| c.snapshot()),
+    resumed: None,
+  }))
+}
+
+async fn debug_run_action(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  id_raw: &str,
+  body: &[u8],
+) -> Result<Json<DebugStatusResponse>, ApiError> {
+  let id = Uuid::parse_str(id_raw)
+    .map_err(|_| ApiError::BadRequest(format!("invalid run id '{id_raw}'")))?;
+  let run = state
+    .repos
+    .runs
+    .get(id)
+    .await?
+    .filter(|r| r.tenant_id == tenant.as_str())
+    .ok_or_else(|| ApiError::NotFound(format!("run {id} not found")))?;
+
+  let req: DebugActionRequest = serde_json::from_slice(body)
+    .map_err(|err| ApiError::BadRequest(format!("invalid debug action body: {err}")))?;
+
+  let controller = state.debug_registry.get(id).ok_or_else(|| {
+    ApiError::BadRequest(format!(
+      "run {id} does not have an active debug controller (status: '{}')",
+      run.status
+    ))
+  })?;
+
+  let resumed = match req {
+    DebugActionRequest::Step => Some(controller.step()),
+    DebugActionRequest::Continue => Some(controller.continue_run()),
+    DebugActionRequest::SetBreakpoints { breakpoints } => {
+      controller.set_breakpoints(breakpoints);
+      None
+    }
+  };
+
+  Ok(Json(DebugStatusResponse {
+    run_id: id,
+    status: run.status,
+    active: true,
+    snapshot: Some(controller.snapshot()),
+    resumed,
+  }))
 }
 
 /// Y2.4: `POST /v1/runs/{id}:resume` — continue a `failed` / `cancelled`
@@ -1837,6 +2045,7 @@ async fn resume_run(
       inputs: serde_json::Map::new(),
       model: None,
       notebook: None,
+      debug_controller: None,
     },
     admission_guard,
   );
@@ -1970,6 +2179,7 @@ pub async fn cancel_run(
   // are best-effort on top of the DB status flip below, which is what
   // actually makes the cancellation durable regardless of which (or
   // whether any) replica's live executor task observes it promptly.
+  state.debug_registry.abort_and_remove(id);
   state.cancellation_registry.cancel(id);
   if let Err(err) = state
     .repos

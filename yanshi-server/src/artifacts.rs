@@ -21,17 +21,17 @@
 //! that surfaces such a file as its own `File` output gets registered.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use axum::{
   Extension, Json,
   body::Body,
-  extract::{Path as RoutePath, State},
+  extract::{Path as RoutePath, Query, State},
   http::{HeaderValue, header},
   response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
@@ -230,6 +230,162 @@ pub async fn download_run_artifact(
   Ok(response)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PreviewFileQuery {
+  /// Relative path inside `<run_dir>` or an absolute path already rooted under `<run_dir>`.
+  pub path: String,
+}
+
+/// Infer a browser-renderable MIME type from a file extension for inline Studio previews.
+pub fn infer_preview_mime(path: &Path) -> &'static str {
+  let ext = path
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("")
+    .to_ascii_lowercase();
+  match ext.as_str() {
+    "png" => "image/png",
+    "jpg" | "jpeg" => "image/jpeg",
+    "webp" => "image/webp",
+    "gif" => "image/gif",
+    "svg" => "image/svg+xml",
+    "wav" => "audio/wav",
+    "mp3" => "audio/mpeg",
+    "ogg" => "audio/ogg",
+    "m4a" => "audio/mp4",
+    "mp4" => "video/mp4",
+    "webm" => "video/webm",
+    "vtt" => "text/vtt; charset=utf-8",
+    "srt" | "md" | "txt" | "log" | "yml" | "yaml" => "text/plain; charset=utf-8",
+    "json" => "application/json; charset=utf-8",
+    "html" | "htm" => "text/html; charset=utf-8",
+    "pdf" => "application/pdf",
+    "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    _ => "application/octet-stream",
+  }
+}
+
+/// Resolve and confine `raw_path` strictly inside `run_dir`.
+///
+/// Rejects `..` components and out-of-root absolute paths lexically *before*
+/// touching the target on disk so callers cannot probe host file existence,
+/// then canonicalizes both `run_dir` and the target to defeat symlinks.
+pub async fn resolve_preview_path(run_dir: &Path, raw_path: &str) -> Result<PathBuf, ApiError> {
+  let trimmed = raw_path.trim();
+  if trimmed.is_empty() {
+    return Err(ApiError::BadRequest(
+      "query parameter `path` must not be empty".into(),
+    ));
+  }
+
+  let requested = PathBuf::from(trimmed);
+  if requested
+    .components()
+    .any(|comp| matches!(comp, Component::ParentDir))
+  {
+    return Err(ApiError::BadRequest(
+      "preview `path` must not contain parent directory ('..') segments".into(),
+    ));
+  }
+
+  let canonical_run_dir = tokio::fs::canonicalize(run_dir)
+    .await
+    .map_err(|_| ApiError::NotFound("run directory does not exist on disk yet".into()))?;
+
+  let candidate = if requested.is_absolute() {
+    if !requested.starts_with(run_dir) && !requested.starts_with(&canonical_run_dir) {
+      return Err(ApiError::BadRequest(
+        "preview `path` must stay inside the run directory".into(),
+      ));
+    }
+    requested
+  } else {
+    canonical_run_dir.join(&requested)
+  };
+
+  let canonical_target = tokio::fs::canonicalize(&candidate)
+    .await
+    .map_err(|_| ApiError::NotFound("preview file not found in run directory".into()))?;
+
+  if !canonical_target.starts_with(&canonical_run_dir) {
+    return Err(ApiError::BadRequest(
+      "preview `path` escapes the run directory".into(),
+    ));
+  }
+
+  let meta = tokio::fs::metadata(&canonical_target)
+    .await
+    .map_err(|_| ApiError::NotFound("preview file not found".into()))?;
+  if !meta.is_file() {
+    return Err(ApiError::BadRequest(
+      "preview `path` must point to a regular file".into(),
+    ));
+  }
+
+  Ok(canonical_target)
+}
+
+/// `GET /v1/runs/{id}/preview?path=...` — inline media/file preview for
+/// mid-run Debug Mode inspection and nested Map outputs.
+pub async fn preview_run_file(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  RoutePath(id): RoutePath<Uuid>,
+  Query(query): Query<PreviewFileQuery>,
+) -> Result<Response, ApiError> {
+  let run = state
+    .repos
+    .runs
+    .get(id)
+    .await?
+    .filter(|r| r.tenant_id == tenant.as_str())
+    .ok_or_else(|| ApiError::NotFound(format!("run {id} not found")))?;
+
+  let run_dir = run
+    .run_dir
+    .as_deref()
+    .map(PathBuf::from)
+    .unwrap_or_else(|| crate::runs::default_run_dir_for_id(id));
+
+  let target = resolve_preview_path(&run_dir, &query.path).await?;
+  let file = tokio::fs::File::open(&target)
+    .await
+    .map_err(|_| ApiError::NotFound("preview file could not be opened".into()))?;
+  let len = file.metadata().await.map(|m| m.len()).ok();
+
+  let mime = infer_preview_mime(&target);
+  let safe_name: String = target
+    .file_name()
+    .map(|n| n.to_string_lossy().to_string())
+    .unwrap_or_else(|| "preview".to_string())
+    .chars()
+    .filter(|c| !c.is_control() && *c != '"' && *c != '\\' && *c != '/')
+    .collect();
+  let disposition = format!("inline; filename=\"{safe_name}\"");
+
+  let mut response = Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response();
+  let headers = response.headers_mut();
+  headers.insert(
+    header::CONTENT_TYPE,
+    HeaderValue::from_str(mime)
+      .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+  );
+  if let Some(len) = len {
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+  }
+  if let Ok(value) = HeaderValue::from_str(&disposition) {
+    headers.insert(header::CONTENT_DISPOSITION, value);
+  }
+  if mime.starts_with("text/html") {
+    headers.insert(
+      header::CONTENT_SECURITY_POLICY,
+      HeaderValue::from_static("sandbox allow-scripts"),
+    );
+  }
+  Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -242,5 +398,70 @@ mod tests {
     let (size, digest) = size_and_sha256(&path).await.expect("hash");
     assert_eq!(size, 14);
     assert_eq!(digest, format!("{:x}", Sha256::digest(b"hello artifact")),);
+  }
+
+  #[tokio::test]
+  async fn resolve_preview_path_confines_to_run_dir_and_blocks_traversal() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let run_dir = dir.path().join("run-1");
+    let nested = run_dir.join("artifacts").join("slides");
+    std::fs::create_dir_all(&nested).expect("mkdir");
+    let slide = nested.join("slide_01.png");
+    std::fs::write(&slide, b"png").expect("write");
+
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, b"secret").expect("write secret");
+
+    // Relative path inside run_dir works.
+    let resolved_rel = resolve_preview_path(&run_dir, "artifacts/slides/slide_01.png")
+      .await
+      .expect("relative preview");
+    assert_eq!(
+      resolved_rel,
+      std::fs::canonicalize(&slide).expect("canonical slide")
+    );
+
+    // Absolute path inside run_dir works.
+    let resolved_abs = resolve_preview_path(&run_dir, &slide.to_string_lossy())
+      .await
+      .expect("absolute preview");
+    assert_eq!(resolved_abs, resolved_rel);
+
+    // Parent traversal (`..`) is rejected with BadRequest.
+    let err_parent = resolve_preview_path(&run_dir, "../secret.txt")
+      .await
+      .expect_err("parent traversal rejected");
+    assert!(matches!(err_parent, ApiError::BadRequest(_)));
+
+    // Out-of-root absolute path is rejected with BadRequest before touching target.
+    let err_abs = resolve_preview_path(&run_dir, &outside.to_string_lossy())
+      .await
+      .expect_err("outside absolute path rejected");
+    assert!(matches!(err_abs, ApiError::BadRequest(_)));
+
+    #[cfg(unix)]
+    {
+      let link = nested.join("escape_link.txt");
+      std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+      let err_link = resolve_preview_path(&run_dir, "artifacts/slides/escape_link.txt")
+        .await
+        .expect_err("symlink escape rejected");
+      assert!(matches!(err_link, ApiError::BadRequest(_)));
+    }
+  }
+
+  #[test]
+  fn infer_preview_mime_covers_studio_media_types() {
+    assert_eq!(infer_preview_mime(Path::new("slide.PNG")), "image/png");
+    assert_eq!(infer_preview_mime(Path::new("voice.wav")), "audio/wav");
+    assert_eq!(infer_preview_mime(Path::new("deck.mp4")), "video/mp4");
+    assert_eq!(
+      infer_preview_mime(Path::new("deck.html")),
+      "text/html; charset=utf-8"
+    );
+    assert_eq!(
+      infer_preview_mime(Path::new("deck.pptx")),
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    );
   }
 }
