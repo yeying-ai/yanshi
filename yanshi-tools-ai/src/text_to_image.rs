@@ -4,7 +4,9 @@
 //! see `tts.rs`'s module docs for the shared design rationale.
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
+use std::path::Path;
 use yanshi_llm::{Text2ImageRequest, Yanshi};
 use yanshi_tool::{Tool, ToolError, ToolMetadata, ToolOutput};
 
@@ -75,6 +77,10 @@ impl Tool for Text2ImageTool {
         "cfg_scale": {
           "type": "number",
           "description": "Classifier-free guidance scale. Vendor-specific range."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Optional local file path to save the first generated image instead of returning inline base64 data."
         }
       },
       "required": ["model", "prompt"]
@@ -88,6 +94,8 @@ impl Tool for Text2ImageTool {
   async fn execute(&self, params: Value) -> Result<ToolOutput, ToolError> {
     let model = required_str(&params, "model")?;
     let prompt = required_str(&params, "prompt")?.to_string();
+
+    let output_path = optional_str(&params, "output_path");
 
     let provider = Yanshi::text2image_for(model)
       .await
@@ -105,7 +113,47 @@ impl Tool for Text2ImageTool {
     };
 
     match provider.generate(request).await {
-      Ok(response) => Ok(image_generation_output("text-to-image", response)),
+      Ok(response) => {
+        if let Some(ref out_path) = output_path
+          && let Some(b64) = response
+            .images
+            .first()
+            .and_then(|img| img.b64_json.as_deref())
+        {
+          let bytes = BASE64
+            .decode(b64)
+            .map_err(|err| ToolError::ExecutionFailed {
+              message: format!("failed to decode generated image base64: {err}"),
+            })?;
+          if let Some(parent) = Path::new(out_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+          {
+            tokio::fs::create_dir_all(parent)
+              .await
+              .map_err(|err| ToolError::ExecutionFailed {
+                message: format!(
+                  "failed to create output directory '{}': {err}",
+                  parent.display()
+                ),
+              })?;
+          }
+          tokio::fs::write(out_path, &bytes)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed {
+              message: format!("failed to write image to '{out_path}': {err}"),
+            })?;
+          return Ok(ToolOutput::success(
+            json!({
+              "output_path": out_path,
+              "bytes": bytes.len(),
+              "count": response.images.len(),
+            })
+            .to_string(),
+          ));
+        }
+        Ok(image_generation_output("text-to-image", response))
+      }
       Err(err) => Ok(ToolOutput::error(format!(
         "text-to-image generation failed: {err}"
       ))),

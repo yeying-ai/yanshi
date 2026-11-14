@@ -269,6 +269,7 @@ mod tests {
     let body = request_body(&Text2VideoRequest {
       model: "MiniMax-Hailuo-2.3".to_string(),
       prompt: "a fox".to_string(),
+      image: None,
       aspect_ratio: Some("16:9".to_string()),
       duration_seconds: Some(6),
       resolution: Some("1080p".to_string()),

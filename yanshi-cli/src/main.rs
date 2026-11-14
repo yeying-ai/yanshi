@@ -19,6 +19,8 @@ enum Commands {
   Config(commands::config::cli::ConfigArgs),
   /// Image generation and understanding commands
   Image(commands::image::cli::ImageArgs),
+  /// Video generation commands (text-to-video and image-to-video)
+  Video(commands::video::cli::VideoArgs),
   /// LLM model discovery commands
   Llm(commands::llm::cli::LlmArgs),
   /// Model Context Protocol (MCP) commands
@@ -86,6 +88,7 @@ async fn main() {
     Commands::Audio(args) => commands::audio::cli::dispatch(args).await,
     Commands::Config(args) => commands::config::cli::dispatch(args).await,
     Commands::Image(args) => commands::image::cli::dispatch(args).await,
+    Commands::Video(args) => commands::video::cli::dispatch(args).await,
     Commands::Llm(args) => commands::llm::cli::dispatch(args).await,
     Commands::Mcp(args) => commands::mcp::cli::dispatch(args).await,
     Commands::Memory(args) => commands::memory::cli::dispatch(args).await,

@@ -46,7 +46,7 @@ pub use image_to_image::{Image2ImageProvider, Image2ImageRequest};
 pub use text_to_image::{Text2ImageProvider, Text2ImageRequest};
 pub use text_to_video::{
   GeneratedVideo, Text2VideoProvider, Text2VideoRequest, VideoGenerationResponse,
-  VideoGenerationStatus, VideoGenerationTask,
+  VideoGenerationStatus, VideoGenerationTask, VideoInputImage,
 };
 pub use tts::{TtsProvider, TtsRequest, TtsResponse};
 

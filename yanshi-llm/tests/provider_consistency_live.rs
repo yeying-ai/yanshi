@@ -2371,6 +2371,7 @@ fn live_video_request(model: &str) -> yanshi_llm::providers::modality::Text2Vide
   yanshi_llm::providers::modality::Text2VideoRequest {
     model: model.to_string(),
     prompt: "A paper boat drifting on a calm pond, soft morning light".to_string(),
+    image: None,
     aspect_ratio: None,
     duration_seconds: None,
     resolution: None,

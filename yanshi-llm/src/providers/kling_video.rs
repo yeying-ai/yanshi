@@ -414,6 +414,7 @@ mod tests {
     let body = request_body(&Text2VideoRequest {
       model: "kling-v2-1-master".to_string(),
       prompt: "a fox".to_string(),
+      image: None,
       aspect_ratio: Some("16:9".to_string()),
       duration_seconds: Some(5),
       resolution: None,
@@ -433,6 +434,7 @@ mod tests {
     let body = request_body_v4(&Text2VideoRequest {
       model: "kling-4.0-flash".to_string(),
       prompt: "a fox".to_string(),
+      image: None,
       aspect_ratio: Some("9:16".to_string()),
       duration_seconds: Some(3),
       resolution: Some("720P".to_string()),

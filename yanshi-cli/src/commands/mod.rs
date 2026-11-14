@@ -21,4 +21,5 @@ pub mod restore;
 pub mod serve;
 pub mod skill;
 pub mod trace;
+pub mod video;
 pub mod workflow;

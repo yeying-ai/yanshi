@@ -16,6 +16,7 @@
 //! persisting video bytes is out of scope here, same as how the image
 //! modality traits only ever hand back the vendor's URL/base64 as-is.
 
+use super::google_endpoint::{GoogleEndpoint, strip_model_prefix};
 use super::modality::{
   GeneratedVideo, Text2VideoProvider, Text2VideoRequest, VideoGenerationResponse,
   VideoGenerationStatus, VideoGenerationTask,
@@ -29,7 +30,7 @@ use serde_json::{Value, json};
 pub struct GoogleVeoClient {
   client: Client,
   api_key: String,
-  base_url: String,
+  endpoint: GoogleEndpoint,
 }
 
 impl GoogleVeoClient {
@@ -46,37 +47,31 @@ impl GoogleVeoClient {
       });
     }
 
-    let base_url =
-      base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+    let endpoint = GoogleEndpoint::new(api_key, base_url);
 
     Ok(Self {
       client,
       api_key: api_key.to_string(),
-      base_url,
+      endpoint,
     })
   }
 
   fn build_headers(&self) -> Result<reqwest::header::HeaderMap> {
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    // Same rationale as `GoogleProvider::build_headers` (Q1.8.1): the
-    // key rides in a header, never a URL, so it can't leak into
-    // `reqwest::Error::to_string()` output.
-    headers.insert(
-      "x-goog-api-key",
-      HeaderValue::from_str(&self.api_key).map_err(|err| LLMError::ConfigurationError {
-        message: format!("Google API key contains non-ASCII bytes: {err}"),
-      })?,
-    );
-    crate::trace_context::inject_into_headers(&mut headers);
-    Ok(headers)
+    self.endpoint.build_headers(&self.api_key)
   }
 
   fn build_request_body(&self, request: &Text2VideoRequest) -> Value {
     let mut instance = serde_json::Map::new();
     instance.insert("prompt".to_string(), Value::String(request.prompt.clone()));
+    if let Some(ref image) = request.image {
+      instance.insert(
+        "image".to_string(),
+        json!({
+          "bytesBase64Encoded": image.bytes_base64_encoded,
+          "mimeType": image.mime_type,
+        }),
+      );
+    }
 
     let mut parameters = serde_json::Map::new();
     if let Some(ref aspect_ratio) = request.aspect_ratio {
@@ -114,13 +109,15 @@ struct SubmitResponse {
   name: String,
 }
 
-/// `GET .../{operation name}` response shape. `response`/`error` are
-/// mutually exclusive and only present once `done` is `true`.
+/// `GET .../{operation name}` (Gemini API) or `POST ...:fetchPredictOperation`
+/// (Vertex AI) response shape. `response`/`error` are mutually exclusive and
+/// only present once `done` is `true`.
 #[derive(Debug, Deserialize)]
 struct OperationResponse {
+  #[serde(default)]
   done: bool,
   #[serde(default)]
-  response: Option<GenerateVideoResponseEnvelope>,
+  response: Option<Value>,
   #[serde(default)]
   error: Option<OperationError>,
 }
@@ -130,31 +127,28 @@ struct OperationError {
   message: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct GenerateVideoResponseEnvelope {
-  #[serde(rename = "generateVideoResponse")]
-  generate_video_response: GenerateVideoResponse,
-}
-
-#[derive(Debug, Deserialize)]
-struct GenerateVideoResponse {
-  #[serde(default, rename = "generatedSamples")]
-  generated_samples: Vec<GeneratedSample>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeneratedSample {
-  video: VideoRef,
-}
-
-#[derive(Debug, Deserialize)]
-struct VideoRef {
-  uri: String,
+fn push_video_item(videos: &mut Vec<GeneratedVideo>, item: &Value) {
+  let b64 = item
+    .get("bytesBase64Encoded")
+    .and_then(Value::as_str)
+    .map(ToString::to_string);
+  let url = item
+    .get("uri")
+    .or_else(|| item.get("gcsUri"))
+    .and_then(Value::as_str)
+    .map(ToString::to_string);
+  if b64.is_some() || url.is_some() {
+    videos.push(GeneratedVideo {
+      url,
+      b64_data: b64,
+      duration_seconds: None,
+    });
+  }
 }
 
 /// Parse an [`OperationResponse`] into the trait's [`VideoGenerationStatus`].
-/// Pure function — no I/O — so it can be unit-tested directly against
-/// hand-written fixture JSON without a live API call.
+/// Supports both Gemini Developer API (`generateVideoResponse.generatedSamples`)
+/// and Vertex AI (`videos`, `generatedVideos`, `predictions`).
 fn parse_operation_response(op: OperationResponse) -> Result<VideoGenerationStatus> {
   if let Some(error) = op.error {
     return Ok(VideoGenerationStatus::Failed {
@@ -168,22 +162,49 @@ fn parse_operation_response(op: OperationResponse) -> Result<VideoGenerationStat
     message: "Veo operation marked done but carried neither `response` nor `error`".to_string(),
   })?;
 
-  let videos = response
-    .generate_video_response
-    .generated_samples
-    .into_iter()
-    .map(|sample| GeneratedVideo {
-      url: Some(sample.video.uri),
-      b64_data: None,
-      duration_seconds: None,
-    })
-    .collect();
+  let mut videos = Vec::new();
+  if let Some(samples) = response
+    .pointer("/generateVideoResponse/generatedSamples")
+    .and_then(Value::as_array)
+  {
+    for sample in samples {
+      if let Some(video) = sample.get("video") {
+        push_video_item(&mut videos, video);
+      }
+    }
+  }
+  if let Some(items) = response.get("videos").and_then(Value::as_array) {
+    for item in items {
+      push_video_item(&mut videos, item);
+    }
+  }
+  if let Some(items) = response.get("generatedVideos").and_then(Value::as_array) {
+    for item in items {
+      if let Some(video) = item.get("video") {
+        push_video_item(&mut videos, video);
+      } else {
+        push_video_item(&mut videos, item);
+      }
+    }
+  }
+  if let Some(items) = response.get("predictions").and_then(Value::as_array) {
+    for item in items {
+      push_video_item(&mut videos, item);
+    }
+  }
 
   Ok(VideoGenerationStatus::Completed(VideoGenerationResponse {
     created: 0,
     videos,
-    metadata: None,
+    metadata: Some(response),
   }))
+}
+
+fn parse_vertex_op_location_and_model(task_id: &str) -> (Option<&str>, Option<&str>) {
+  let parts: Vec<&str> = task_id.split('/').collect();
+  let location = parts.windows(2).find(|w| w[0] == "locations").map(|w| w[1]);
+  let model = parts.windows(2).find(|w| w[0] == "models").map(|w| w[1]);
+  (location, model)
 }
 
 #[async_trait]
@@ -193,10 +214,9 @@ impl Text2VideoProvider for GoogleVeoClient {
   }
 
   async fn submit(&self, request: Text2VideoRequest) -> Result<VideoGenerationTask> {
-    let url = format!(
-      "{}/v1beta/models/{}:predictLongRunning",
-      self.base_url, request.model
-    );
+    let url = self
+      .endpoint
+      .model_action_url(&request.model, "predictLongRunning", None);
     let body = self.build_request_body(&request);
 
     let response = self
@@ -219,19 +239,48 @@ impl Text2VideoProvider for GoogleVeoClient {
     let submitted: SubmitResponse = response.json().await?;
     Ok(VideoGenerationTask {
       task_id: submitted.name,
-      metadata: None,
+      metadata: Some(json!({
+        "model": strip_model_prefix(&request.model),
+      })),
     })
   }
 
   async fn poll(&self, task: &VideoGenerationTask) -> Result<VideoGenerationStatus> {
-    let url = format!("{}/v1beta/{}", self.base_url, task.task_id);
-
-    let response = self
-      .client
-      .get(&url)
-      .headers(self.build_headers()?)
-      .send()
-      .await?;
+    let response = if self.endpoint.is_vertex() || task.task_id.starts_with("projects/") {
+      let (op_loc, op_model) = parse_vertex_op_location_and_model(&task.task_id);
+      let meta_model = task
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("model"))
+        .and_then(Value::as_str);
+      let model = op_model
+        .or(meta_model)
+        .ok_or_else(|| LLMError::ConfigurationError {
+          message: format!(
+            "Cannot determine Vertex AI model for Veo operation '{}'",
+            task.task_id
+          ),
+        })?;
+      let poll_url =
+        self
+          .endpoint
+          .model_action_url_with_location(model, "fetchPredictOperation", None, op_loc);
+      self
+        .client
+        .post(&poll_url)
+        .headers(self.build_headers()?)
+        .json(&json!({ "operationName": task.task_id }))
+        .send()
+        .await?
+    } else {
+      let url = format!("{}/v1beta/{}", self.endpoint.base_url, task.task_id);
+      self
+        .client
+        .get(&url)
+        .headers(self.build_headers()?)
+        .send()
+        .await?
+    };
 
     if !response.status().is_success() {
       let status_code = response.status().as_u16();
@@ -282,7 +331,10 @@ mod tests {
   #[test]
   fn client_creation_defaults_base_url() {
     let client = GoogleVeoClient::new("test-key", None).unwrap();
-    assert_eq!(client.base_url, "https://generativelanguage.googleapis.com");
+    assert_eq!(
+      client.endpoint.base_url,
+      "https://generativelanguage.googleapis.com"
+    );
   }
 
   #[test]
@@ -356,6 +408,10 @@ mod tests {
     let request = Text2VideoRequest {
       model: "veo-3.1-generate-preview".to_string(),
       prompt: "a cat playing piano".to_string(),
+      image: Some(crate::VideoInputImage {
+        bytes_base64_encoded: "aGVsbG8=".to_string(),
+        mime_type: "image/png".to_string(),
+      }),
       aspect_ratio: Some("16:9".to_string()),
       duration_seconds: Some(8),
       resolution: Some("1080p".to_string()),
@@ -364,10 +420,44 @@ mod tests {
     };
     let body = client.build_request_body(&request);
     assert_eq!(body["instances"][0]["prompt"], "a cat playing piano");
+    assert_eq!(
+      body["instances"][0]["image"]["bytesBase64Encoded"],
+      "aGVsbG8="
+    );
+    assert_eq!(body["instances"][0]["image"]["mimeType"], "image/png");
     assert_eq!(body["parameters"]["aspectRatio"], "16:9");
     assert_eq!(body["parameters"]["durationSeconds"], 8);
     assert_eq!(body["parameters"]["resolution"], "1080p");
     assert_eq!(body["parameters"]["seed"], 42);
     assert_eq!(body["parameters"]["personGeneration"], "allow_adult");
+  }
+
+  #[test]
+  fn parses_vertex_completed_operation_with_inline_videos() {
+    let op: OperationResponse = serde_json::from_value(json!({
+      "done": true,
+      "response": {
+        "videos": [
+          { "bytesBase64Encoded": "AAAA", "mimeType": "video/mp4" }
+        ]
+      }
+    }))
+    .unwrap();
+    let status = parse_operation_response(op).unwrap();
+    match status {
+      VideoGenerationStatus::Completed(response) => {
+        assert_eq!(response.videos.len(), 1);
+        assert_eq!(response.videos[0].b64_data.as_deref(), Some("AAAA"));
+      }
+      other => panic!("expected Completed, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_vertex_op_location_and_model() {
+    let op_name = "projects/340214391376/locations/global/publishers/google/models/veo-3.1-fast-generate-001/operations/op-123";
+    let (loc, model) = parse_vertex_op_location_and_model(op_name);
+    assert_eq!(loc, Some("global"));
+    assert_eq!(model, Some("veo-3.1-fast-generate-001"));
   }
 }

@@ -1,3 +1,4 @@
+use super::google_endpoint::GoogleEndpoint;
 use super::line_buffer::LineBuffer;
 use crate::{
   LLMError, ResponseFormat, Result,
@@ -17,7 +18,7 @@ use tokio_stream::Stream;
 pub struct GoogleProvider {
   client: Client,
   api_key: String,
-  base_url: String,
+  endpoint: GoogleEndpoint,
 }
 
 impl GoogleProvider {
@@ -34,35 +35,17 @@ impl GoogleProvider {
       });
     }
 
-    let base_url =
-      base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+    let endpoint = GoogleEndpoint::new(api_key, base_url);
 
     Ok(Self {
       client,
       api_key: api_key.to_string(),
-      base_url,
+      endpoint,
     })
   }
 
   fn build_headers(&self) -> Result<reqwest::header::HeaderMap> {
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    // Q1.8.1: the API key used to live in the URL `?key=...` query
-    // string. Any `reqwest::Error::to_string()` carried that URL into
-    // `LLMError` messages, logs, and traces. Moving the key into a
-    // header (Google publicly documents `x-goog-api-key` as
-    // equivalent to the query-string form) keeps it out of the
-    // error surface.
-    headers.insert(
-      "x-goog-api-key",
-      HeaderValue::from_str(&self.api_key).map_err(|err| LLMError::ConfigurationError {
-        message: format!("Google API key contains non-ASCII bytes: {err}"),
-      })?,
-    );
-    crate::trace_context::inject_into_headers(&mut headers);
-    Ok(headers)
+    self.endpoint.build_headers(&self.api_key)
   }
 
   fn build_request_body(&self, request: &ProviderRequest) -> Value {
@@ -181,19 +164,11 @@ impl GoogleProvider {
     } else {
       "generateContent"
     };
-    // Q1.8.1: no `?key=` here anymore — the API key now travels in
-    // the `x-goog-api-key` header so it can't be picked up by a
-    // `reqwest::Error::to_string()` URL leak.
-    //
     // Without `alt=sse`, `streamGenerateContent` returns one pretty-printed
     // JSON array spread over many lines, which the line-oriented stream
-    // parser can't read: every line failed to parse and was dropped, so
-    // Google streams came back empty (eval 2026-10-07 L1).
-    let query = if stream { "?alt=sse" } else { "" };
-    format!(
-      "{}/v1beta/models/{}:{}{}",
-      self.base_url, model, method, query
-    )
+    // parser can't read (eval 2026-10-07 L1).
+    let query = if stream { Some("alt=sse") } else { None };
+    self.endpoint.model_action_url(model, method, query)
   }
 }
 
@@ -525,10 +500,31 @@ impl LLMProvider for GoogleProvider {
   }
 
   async fn validate_config(&self) -> Result<()> {
-    // Test with a simple model list request
-    // Q1.8.1: same treatment as `get_model_endpoint` — no `?key=` in
-    // the URL, the API key rides along in `x-goog-api-key`.
-    let url = format!("{}/v1beta/models", self.base_url);
+    if self.endpoint.is_vertex() {
+      let url = self
+        .endpoint
+        .model_action_url("gemini-3.5-flash-lite", "generateContent", None);
+      let body = json!({
+        "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+        "generationConfig": {"maxOutputTokens": 1}
+      });
+      let response = self
+        .client
+        .post(&url)
+        .headers(self.build_headers()?)
+        .json(&body)
+        .send()
+        .await?;
+      if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
+        return Err(LLMError::AuthenticationError {
+          provider: "google".to_string(),
+          message: "Invalid API key".to_string(),
+        });
+      }
+      return Ok(());
+    }
+
+    let url = format!("{}/v1beta/models", self.endpoint.base_url);
 
     let response = self
       .client
@@ -548,7 +544,7 @@ impl LLMProvider for GoogleProvider {
   }
 
   fn base_url(&self) -> &str {
-    &self.base_url
+    &self.endpoint.base_url
   }
 
   fn supported_models(&self) -> Vec<String> {

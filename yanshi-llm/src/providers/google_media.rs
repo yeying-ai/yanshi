@@ -17,9 +17,11 @@
 //! endpoint — audio input goes through `generateContent` as multimodal
 //! chat content, not an ASR-shaped request/response.
 
+use super::google_endpoint::GoogleEndpoint;
 use super::modality::{
-  GeneratedImage, ImageGenerationResponse, Text2ImageProvider, Text2ImageRequest, TtsProvider,
-  TtsRequest, TtsResponse,
+  GeneratedImage, Image2ImageProvider, Image2ImageRequest, ImageEditProvider, ImageEditRequest,
+  ImageGenerationResponse, Text2ImageProvider, Text2ImageRequest, TtsProvider, TtsRequest,
+  TtsResponse,
 };
 use crate::{LLMError, Result};
 use async_trait::async_trait;
@@ -28,16 +30,19 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const MAX_SOURCE_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
 pub struct GoogleMediaProvider {
   client: Client,
   api_key: String,
-  base_url: String,
+  endpoint: GoogleEndpoint,
 }
 
 impl std::fmt::Debug for GoogleMediaProvider {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("GoogleMediaProvider")
-      .field("base_url", &self.base_url)
+      .field("base_url", &self.endpoint.base_url)
+      .field("is_vertex", &self.endpoint.is_vertex())
       .field("api_key", &"<redacted>")
       .finish()
   }
@@ -56,44 +61,32 @@ impl GoogleMediaProvider {
         provider: "google".to_string(),
       });
     }
-    let base_url =
-      base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+    let endpoint = GoogleEndpoint::new(api_key, base_url);
     Ok(Self {
       client,
       api_key: api_key.to_string(),
-      base_url,
+      endpoint,
     })
   }
 
   fn build_headers(&self) -> Result<reqwest::header::HeaderMap> {
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    // Same rationale as `GoogleProvider::build_headers` (Q1.8.1): the
-    // key rides in a header, never a URL.
-    headers.insert(
-      "x-goog-api-key",
-      HeaderValue::from_str(&self.api_key).map_err(|err| LLMError::ConfigurationError {
-        message: format!("Google API key contains non-ASCII bytes: {err}"),
-      })?,
-    );
-    crate::trace_context::inject_into_headers(&mut headers);
-    Ok(headers)
+    self.endpoint.build_headers(&self.api_key)
   }
 
-  /// Shared core for both modalities: POST `generateContent` with a
-  /// single user-text part and the given `generation_config`, then
-  /// collect every response part carrying `inlineData`.
-  async fn generate_content_media(
+  /// Shared core for `generateContent`-backed media modalities: POST
+  /// `generateContent` with the given `parts` and `generation_config`,
+  /// then collect every response part carrying `inlineData`.
+  async fn generate_content_parts(
     &self,
     model: &str,
-    text: &str,
+    parts: Vec<Value>,
     generation_config: Value,
   ) -> Result<Vec<InlineDataPart>> {
-    let url = format!("{}/v1beta/models/{}:generateContent", self.base_url, model);
+    let url = self
+      .endpoint
+      .model_action_url(model, "generateContent", None);
     let body = json!({
-      "contents": [{"parts": [{"text": text}]}],
+      "contents": [{"role": "user", "parts": parts}],
       "generationConfig": generation_config,
     });
 
@@ -116,6 +109,17 @@ impl GoogleMediaProvider {
 
     parse_generate_content_media_response(&response.text().await?)
   }
+
+  async fn generate_content_media(
+    &self,
+    model: &str,
+    text: &str,
+    generation_config: Value,
+  ) -> Result<Vec<InlineDataPart>> {
+    self
+      .generate_content_parts(model, vec![json!({"text": text})], generation_config)
+      .await
+  }
 }
 
 /// A single `inlineData` part from a `generateContent` response.
@@ -130,11 +134,22 @@ pub(crate) struct InlineDataPart {
 struct GenerateContentResponse {
   #[serde(default)]
   candidates: Vec<Candidate>,
+  #[serde(default, rename = "promptFeedback")]
+  prompt_feedback: Option<PromptFeedback>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptFeedback {
+  #[serde(default, rename = "blockReason")]
+  block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Candidate {
-  content: CandidateContent,
+  #[serde(default)]
+  content: Option<CandidateContent>,
+  #[serde(default, rename = "finishReason")]
+  finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,30 +160,46 @@ struct CandidateContent {
 
 #[derive(Debug, Deserialize)]
 struct CandidatePart {
-  #[serde(default, rename = "inlineData")]
+  #[serde(default, rename = "inlineData", alias = "inline_data")]
   inline_data: Option<InlineData>,
 }
 
 #[derive(Debug, Deserialize)]
 struct InlineData {
   data: String,
-  #[serde(rename = "mimeType")]
+  #[serde(rename = "mimeType", alias = "mime_type")]
   mime_type: String,
 }
 
 /// Parse a `generateContent` response body, collecting every part that
-/// carries `inlineData`. Pure function, independently unit-tested —
-/// mirrors `openai_images::parse_image_response`'s style.
+/// carries `inlineData` (or `inline_data`). Pure function, independently
+/// unit-tested.
 pub(crate) fn parse_generate_content_media_response(body: &str) -> Result<Vec<InlineDataPart>> {
   let parsed: GenerateContentResponse =
     serde_json::from_str(body).map_err(|e| LLMError::ResponseParsingError {
       message: format!("Google generateContent media response JSON parse failed: {e}"),
     })?;
 
+  if let Some(reason) = parsed
+    .prompt_feedback
+    .as_ref()
+    .and_then(|f| f.block_reason.as_deref())
+  {
+    return Err(LLMError::ResponseParsingError {
+      message: format!("Google generateContent request blocked: {reason}"),
+    });
+  }
+
+  let finish_reason = parsed
+    .candidates
+    .first()
+    .and_then(|c| c.finish_reason.clone());
+
   let parts: Vec<InlineDataPart> = parsed
     .candidates
     .into_iter()
-    .flat_map(|c| c.content.parts)
+    .filter_map(|c| c.content)
+    .flat_map(|c| c.parts)
     .filter_map(|p| p.inline_data)
     .map(|inline| InlineDataPart {
       data: inline.data,
@@ -177,14 +208,95 @@ pub(crate) fn parse_generate_content_media_response(body: &str) -> Result<Vec<In
     .collect();
 
   if parts.is_empty() {
+    let reason_note = finish_reason
+      .map(|r| format!(" (finishReason: {r})"))
+      .unwrap_or_default();
     return Err(LLMError::ResponseParsingError {
       message: format!(
-        "Google generateContent response carried no inlineData media parts. Body: {body}"
+        "Google generateContent response carried no inlineData media parts{reason_note}. Body: {body}"
       ),
     });
   }
 
   Ok(parts)
+}
+
+fn size_to_aspect_ratio(size: Option<&str>) -> Option<&'static str> {
+  match size?.trim() {
+    "16:9" | "1920x1080" | "1280x720" | "1344x768" | "1792x1024" => Some("16:9"),
+    "9:16" | "1080x1920" | "720x1280" | "768x1344" | "1024x1792" => Some("9:16"),
+    "1:1" | "1024x1024" | "512x512" | "256x256" => Some("1:1"),
+    "4:3" | "1024x768" | "1152x896" => Some("4:3"),
+    "3:4" | "768x1024" | "896x1152" => Some("3:4"),
+    _ => None,
+  }
+}
+
+fn image_generation_config(size: Option<&str>) -> Value {
+  let mut cfg = serde_json::Map::new();
+  cfg.insert("responseModalities".to_string(), json!(["TEXT", "IMAGE"]));
+  if let Some(ratio) = size_to_aspect_ratio(size) {
+    cfg.insert("imageConfig".to_string(), json!({ "aspectRatio": ratio }));
+  }
+  Value::Object(cfg)
+}
+
+fn parts_to_image_response(parts: Vec<InlineDataPart>) -> ImageGenerationResponse {
+  let images = parts
+    .into_iter()
+    .map(|part| GeneratedImage {
+      url: None,
+      b64_json: Some(part.data),
+      seed: None,
+    })
+    .collect();
+
+  ImageGenerationResponse {
+    created: 0,
+    images,
+    metadata: None,
+  }
+}
+
+fn mime_from_filename(filename: &str) -> &'static str {
+  let lower = filename.to_ascii_lowercase();
+  if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+    "image/jpeg"
+  } else if lower.ends_with(".webp") {
+    "image/webp"
+  } else if lower.ends_with(".gif") {
+    "image/gif"
+  } else {
+    "image/png"
+  }
+}
+
+async fn resolve_source_image(client: &Client, source_url: &str) -> Result<(String, String)> {
+  if let Some(rest) = source_url.strip_prefix("data:") {
+    let (header, data) =
+      rest
+        .split_once(";base64,")
+        .ok_or_else(|| LLMError::ConfigurationError {
+          message: "data: URI for Google image-to-image must use ;base64,".to_string(),
+        })?;
+    let mime = if header.is_empty() {
+      "image/png"
+    } else {
+      header
+    };
+    return Ok((mime.to_string(), data.to_string()));
+  }
+
+  let bytes = super::modality::download_with_cap(
+    client,
+    source_url,
+    reqwest::header::HeaderMap::new(),
+    MAX_SOURCE_IMAGE_BYTES,
+  )
+  .await?;
+  let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+  let mime = mime_from_filename(source_url.split('?').next().unwrap_or(source_url));
+  Ok((mime.to_string(), b64))
 }
 
 #[async_trait]
@@ -194,25 +306,62 @@ impl Text2ImageProvider for GoogleMediaProvider {
   }
 
   async fn generate(&self, request: Text2ImageRequest) -> Result<ImageGenerationResponse> {
-    let generation_config = json!({ "responseModalities": ["IMAGE"] });
+    let generation_config = image_generation_config(request.size.as_deref());
     let parts = self
       .generate_content_media(&request.model, &request.prompt, generation_config)
       .await?;
+    Ok(parts_to_image_response(parts))
+  }
+}
 
-    let images = parts
-      .into_iter()
-      .map(|part| GeneratedImage {
-        url: None,
-        b64_json: Some(part.data),
-        seed: None,
-      })
-      .collect();
+#[async_trait]
+impl Image2ImageProvider for GoogleMediaProvider {
+  fn name(&self) -> &str {
+    "google"
+  }
 
-    Ok(ImageGenerationResponse {
-      created: 0,
-      images,
-      metadata: None,
-    })
+  async fn transform(&self, request: Image2ImageRequest) -> Result<ImageGenerationResponse> {
+    let (mime_type, b64_data) = resolve_source_image(&self.client, &request.source_url).await?;
+    let parts = vec![
+      json!({
+        "inlineData": {
+          "mimeType": mime_type,
+          "data": b64_data,
+        }
+      }),
+      json!({"text": request.prompt}),
+    ];
+    let generation_config = image_generation_config(request.size.as_deref());
+    let out_parts = self
+      .generate_content_parts(&request.model, parts, generation_config)
+      .await?;
+    Ok(parts_to_image_response(out_parts))
+  }
+}
+
+#[async_trait]
+impl ImageEditProvider for GoogleMediaProvider {
+  fn name(&self) -> &str {
+    "google"
+  }
+
+  async fn edit(&self, request: ImageEditRequest) -> Result<ImageGenerationResponse> {
+    let mime_type = mime_from_filename(&request.image_filename);
+    let b64_data = base64::engine::general_purpose::STANDARD.encode(&request.image_data);
+    let parts = vec![
+      json!({
+        "inlineData": {
+          "mimeType": mime_type,
+          "data": b64_data,
+        }
+      }),
+      json!({"text": request.prompt}),
+    ];
+    let generation_config = image_generation_config(request.size.as_deref());
+    let out_parts = self
+      .generate_content_parts(&request.model, parts, generation_config)
+      .await?;
+    Ok(parts_to_image_response(out_parts))
   }
 }
 

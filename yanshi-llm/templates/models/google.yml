@@ -673,7 +673,7 @@ models:
   gemini-3.1-flash-image:
     vendor: google
     type: text_to_image
-    accepts: [text]
+    accepts: [text, image]
     model_id: models/gemini-3.1-flash-image
     base_url: null
     temperature: 0.7
@@ -1049,7 +1049,7 @@ models:
   veo-3.1-generate-preview:
     vendor: google
     type: text_to_video
-    accepts: [text]
+    accepts: [text, image]
     model_id: models/veo-3.1-generate-preview
     base_url: null
     temperature: 0.7
@@ -1061,4 +1061,84 @@ models:
     supports_streaming: false
     supports_tools: false
     supports_multimodal: false
+    response_format: null
+  veo-3.1-fast-generate-001:
+    vendor: google
+    type: text_to_video
+    accepts: [text, image]
+    model_id: veo-3.1-fast-generate-001
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: false
+    supports_tools: false
+    supports_multimodal: false
+    response_format: null
+  veo-3.1-generate-001:
+    vendor: google
+    type: text_to_video
+    accepts: [text, image]
+    model_id: veo-3.1-generate-001
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: false
+    supports_tools: false
+    supports_multimodal: false
+    response_format: null
+  veo-3.0-fast-generate-001:
+    vendor: google
+    type: text_to_video
+    accepts: [text, image]
+    model_id: veo-3.0-fast-generate-001
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: false
+    supports_tools: false
+    supports_multimodal: false
+    response_format: null
+  gemini-4-hydrogen:
+    vendor: google
+    type: chat
+    accepts: [text, image, video]
+    model_id: gemini-4-hydrogen
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: true
+    supports_tools: true
+    supports_multimodal: true
+    response_format: null
+  gemini-3.5-flash-lite:
+    vendor: google
+    type: chat
+    accepts: [text, image, video]
+    model_id: gemini-3.5-flash-lite
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: true
+    supports_tools: true
+    supports_multimodal: true
     response_format: null

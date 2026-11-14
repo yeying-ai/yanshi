@@ -19,8 +19,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
-use yanshi_llm::{Text2VideoRequest, Yanshi};
+use std::path::Path;
+use yanshi_llm::{Text2VideoRequest, VideoInputImage, Yanshi};
 use yanshi_tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolOutputPart};
 
 use crate::common::{
@@ -93,6 +95,14 @@ impl Tool for Text2VideoTool {
           "type": "integer",
           "description": "Random seed for reproducible generation. Vendor support varies."
         },
+        "image_path": {
+          "type": "string",
+          "description": "Optional local image file path or data: URI to use as the first frame for Image-to-Video (I2V)."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Optional local file path to save the generated MP4 video instead of returning inline base64 data."
+        },
         "poll_interval_secs": {
           "type": "integer",
           "minimum": 1,
@@ -130,6 +140,12 @@ impl Tool for Text2VideoTool {
       MAX_WAIT_SECS,
     )?);
 
+    let image = match optional_str(&params, "image_path") {
+      Some(path_or_uri) => Some(load_input_image(&path_or_uri).await?),
+      None => None,
+    };
+    let output_path = optional_str(&params, "output_path");
+
     let provider = Yanshi::text2video_for(model)
       .await
       .map_err(|err| map_resolution_error("failed to resolve text-to-video model", err))?;
@@ -137,6 +153,7 @@ impl Tool for Text2VideoTool {
     let request = Text2VideoRequest {
       model: model.to_string(),
       prompt,
+      image,
       aspect_ratio: optional_str(&params, "aspect_ratio"),
       duration_seconds: optional_u32(&params, "duration_seconds"),
       resolution: optional_str(&params, "resolution"),
@@ -149,6 +166,51 @@ impl Tool for Text2VideoTool {
       .await
     {
       Ok(response) => {
+        if let Some(ref out_path) = output_path {
+          let Some(first_video) = response.videos.first() else {
+            return Ok(ToolOutput::error("video generation returned no videos"));
+          };
+          const MAX_TOOL_VIDEO_BYTES: u64 = 100 * 1024 * 1024;
+          let bytes = match provider
+            .fetch_video_bytes(first_video, MAX_TOOL_VIDEO_BYTES)
+            .await
+          {
+            Ok(b) => b,
+            Err(err) => {
+              return Ok(ToolOutput::error(format!(
+                "failed to fetch generated video: {err}"
+              )));
+            }
+          };
+          if let Some(parent) = Path::new(out_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+          {
+            tokio::fs::create_dir_all(parent)
+              .await
+              .map_err(|err| ToolError::ExecutionFailed {
+                message: format!(
+                  "failed to create output directory '{}': {err}",
+                  parent.display()
+                ),
+              })?;
+          }
+          tokio::fs::write(out_path, &bytes)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed {
+              message: format!("failed to write video to '{out_path}': {err}"),
+            })?;
+          return Ok(ToolOutput::success(
+            json!({
+              "output_path": out_path,
+              "bytes": bytes.len(),
+              "mime_type": "video/mp4",
+              "duration_seconds": first_video.duration_seconds,
+            })
+            .to_string(),
+          ));
+        }
+
         let count = response.videos.len();
         let parts: Vec<ToolOutputPart> = response
           .videos
@@ -177,6 +239,41 @@ impl Tool for Text2VideoTool {
       Err(err) => Ok(ToolOutput::error(format!("video generation failed: {err}"))),
     }
   }
+}
+
+async fn load_input_image(path_or_uri: &str) -> Result<VideoInputImage, ToolError> {
+  if let Some(rest) = path_or_uri.strip_prefix("data:") {
+    let (mime, b64) = rest
+      .split_once(";base64,")
+      .ok_or_else(|| ToolError::InvalidParams {
+        message: "data: URI for `image_path` must use ;base64,".to_string(),
+      })?;
+    return Ok(VideoInputImage {
+      bytes_base64_encoded: b64.to_string(),
+      mime_type: if mime.is_empty() {
+        "image/png".to_string()
+      } else {
+        mime.to_string()
+      },
+    });
+  }
+  let bytes = tokio::fs::read(path_or_uri)
+    .await
+    .map_err(|err| ToolError::InvalidParams {
+      message: format!("failed to read `image_path` '{path_or_uri}': {err}"),
+    })?;
+  let lower = path_or_uri.to_ascii_lowercase();
+  let mime_type = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+    "image/jpeg"
+  } else if lower.ends_with(".webp") {
+    "image/webp"
+  } else {
+    "image/png"
+  };
+  Ok(VideoInputImage {
+    bytes_base64_encoded: BASE64.encode(&bytes),
+    mime_type: mime_type.to_string(),
+  })
 }
 
 fn bounded_secs(

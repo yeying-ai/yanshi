@@ -23,6 +23,7 @@ fn request(model: &str) -> Text2VideoRequest {
   Text2VideoRequest {
     model: model.to_string(),
     prompt: "a fox in the snow".to_string(),
+    image: None,
     aspect_ratio: Some("16:9".to_string()),
     duration_seconds: Some(5),
     resolution: None,

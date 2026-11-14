@@ -12,6 +12,7 @@ pub mod anthropic;
 pub mod dashscope_media;
 pub mod glm_images;
 pub mod google;
+pub(crate) mod google_endpoint;
 pub mod google_media;
 pub mod google_veo;
 pub mod kling_video;

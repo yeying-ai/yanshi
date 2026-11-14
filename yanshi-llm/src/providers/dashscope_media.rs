@@ -573,6 +573,7 @@ mod tests {
     let body = video_request_body(&Text2VideoRequest {
       model: "wan2.7-t2v".to_string(),
       prompt: "a fox".to_string(),
+      image: None,
       aspect_ratio: Some("16:9".to_string()),
       duration_seconds: Some(5),
       resolution: Some("720p".to_string()),

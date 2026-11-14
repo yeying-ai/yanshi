@@ -13,13 +13,25 @@ use crate::{LLMError, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// Request to generate a video from a text prompt.
+/// Optional first-frame / reference image for Image-to-Video (I2V).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoInputImage {
+  /// Base64-encoded image bytes (without `data:...;base64,` prefix).
+  pub bytes_base64_encoded: String,
+  /// Image MIME type (e.g. `"image/png"`, `"image/jpeg"`).
+  pub mime_type: String,
+}
+
+/// Request to generate a video from a text prompt (and optional first-frame image).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Text2VideoRequest {
   /// Model identifier (e.g. `"veo-3.1-generate-preview"`).
   pub model: String,
   /// Text prompt describing the desired video.
   pub prompt: String,
+  /// Optional first-frame / reference image for Image-to-Video (I2V).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image: Option<VideoInputImage>,
   /// Output aspect ratio, vendor-specific format (e.g. `"16:9"`).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub aspect_ratio: Option<String>,

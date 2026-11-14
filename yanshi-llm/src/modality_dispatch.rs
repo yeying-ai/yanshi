@@ -51,7 +51,12 @@ async fn resolve_for_modality(
   let model_config = registry.get_model(model_name)?;
 
   let actual = model_config.granular_type();
-  if actual != expected {
+  let compatible_image_modality = actual == ModelType::Text2Image
+    && matches!(expected, ModelType::Image2Image | ModelType::ImageEdit)
+    && model_config
+      .accepts()
+      .contains(&crate::model_types::InputType::Image);
+  if actual != expected && !compatible_image_modality {
     return Err(LLMError::InvalidModelConfig {
       message: format!(
         "Model '{model_name}' has type '{}' but the requested modality requires type '{}'. \
@@ -113,6 +118,18 @@ fn build_google_text2image(
   api_key: &str,
   base_url: Option<String>,
 ) -> Result<Box<dyn Text2ImageProvider>> {
+  Ok(Box::new(GoogleMediaProvider::new(api_key, base_url)?))
+}
+fn build_google_image2image(
+  api_key: &str,
+  base_url: Option<String>,
+) -> Result<Box<dyn Image2ImageProvider>> {
+  Ok(Box::new(GoogleMediaProvider::new(api_key, base_url)?))
+}
+fn build_google_image_edit(
+  api_key: &str,
+  base_url: Option<String>,
+) -> Result<Box<dyn ImageEditProvider>> {
   Ok(Box::new(GoogleMediaProvider::new(api_key, base_url)?))
 }
 fn build_google_tts(api_key: &str, base_url: Option<String>) -> Result<Box<dyn TtsProvider>> {
@@ -226,11 +243,13 @@ const TEXT2IMAGE_PROVIDERS: &[(&str, Ctor<dyn Text2ImageProvider>)] = &[
 ];
 const IMAGE2IMAGE_PROVIDERS: &[(&str, Ctor<dyn Image2ImageProvider>)] = &[
   ("openai", build_openai_image2image),
+  ("google", build_google_image2image),
   ("dashscope", build_dashscope_image2image),
   ("mock", build_mock_image2image),
 ];
 const IMAGE_EDIT_PROVIDERS: &[(&str, Ctor<dyn ImageEditProvider>)] = &[
   ("openai", build_openai_image_edit),
+  ("google", build_google_image_edit),
   ("mock", build_mock_image_edit),
 ];
 const TEXT2VIDEO_PROVIDERS: &[(&str, Ctor<dyn Text2VideoProvider>)] = &[
@@ -474,10 +493,16 @@ mod tests {
   }
 
   #[test]
-  fn implemented_modalities_for_google_covers_tts_text_to_image_and_text_to_video() {
+  fn implemented_modalities_for_google_covers_tts_images_and_text_to_video() {
     assert_eq!(
       implemented_modalities_for("google"),
-      vec!["TTS", "text-to-image", "text-to-video"]
+      vec![
+        "TTS",
+        "text-to-image",
+        "image-to-image",
+        "image-edit",
+        "text-to-video"
+      ]
     );
   }
 

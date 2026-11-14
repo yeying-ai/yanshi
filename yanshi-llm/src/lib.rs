@@ -113,6 +113,7 @@ pub use providers::modality::{
   Image2ImageRequest, ImageEditProvider, ImageEditRequest, ImageGenerationResponse,
   Text2ImageProvider, Text2ImageRequest, Text2VideoProvider, Text2VideoRequest, TtsProvider,
   TtsRequest, TtsResponse, VideoGenerationResponse, VideoGenerationStatus, VideoGenerationTask,
+  VideoInputImage,
 };
 pub use registry::ModelRegistry;
 pub use thinking::{ThinkingConfig, ThinkingKind};

@@ -1,7 +1,13 @@
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use tokio::fs;
-use yanshi_llm::{Yanshi, providers::modality::Text2ImageRequest as ModalityText2ImageRequest};
+use yanshi_llm::{
+  Yanshi,
+  providers::modality::{
+    Image2ImageRequest as ModalityImage2ImageRequest,
+    Text2ImageRequest as ModalityText2ImageRequest,
+  },
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
@@ -36,51 +42,87 @@ pub async fn execute(
   }
   println!();
 
-  if strength.is_some() || input_image.is_some() {
-    // Image-to-image takes a different dispatcher path
-    // (`Yanshi::image2image`). The text-to-image CLI command stays
-    // text-only for now — wire `yanshi image generate-i2i` for the
-    // i2i case rather than overloading the same code path.
-    println!(
-      "⚠️  Warning: image-to-image (strength / input_image) is not handled by this command; \
-       use the dedicated image-to-image path. Text-to-image generation continues."
-    );
-  }
-
-  let provider = Yanshi::text2image_for(&model).await?;
-  println!(
-    "🖼️  Generating via provider '{}' (model '{}')...",
-    provider.name(),
-    model
-  );
-
-  let request = ModalityText2ImageRequest {
-    model: model.clone(),
-    prompt,
-    size: Some(size.clone()),
-    n: Some(1),
-    response_format: Some(format.clone()),
-    seed: seed.map(|s| s as i32),
-    steps: Some(steps),
-    cfg_scale: Some(cfg_scale),
-  };
-
   let start_time = std::time::Instant::now();
-  let response = match tokio::time::timeout(
-    std::time::Duration::from_secs(120),
-    provider.generate(request),
-  )
-  .await
-  {
-    Ok(result) => result.map_err(|e| {
+  let response = if let Some(input_path_or_url) = input_image {
+    let source_url = if input_path_or_url.starts_with("http://")
+      || input_path_or_url.starts_with("https://")
+      || input_path_or_url.starts_with("data:")
+    {
+      input_path_or_url
+    } else {
+      let bytes = fs::read(&input_path_or_url).await?;
+      let lower = input_path_or_url.to_ascii_lowercase();
+      let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+      } else if lower.ends_with(".webp") {
+        "image/webp"
+      } else {
+        "image/png"
+      };
+      format!(
+        "data:{mime};base64,{}",
+        general_purpose::STANDARD.encode(&bytes)
+      )
+    };
+
+    let provider = Yanshi::image2image(&model).await?;
+    println!(
+      "🖼️  Transforming via provider '{}' (model '{}')...",
+      provider.name(),
+      model
+    );
+    let request = ModalityImage2ImageRequest {
+      model: model.clone(),
+      prompt,
+      source_url,
+      source_weight: strength.unwrap_or(0.7),
+      size: Some(size.clone()),
+      n: Some(1),
+      response_format: Some(format.clone()),
+      seed: seed.map(|s| s as i32),
+      steps: Some(steps),
+      cfg_scale: Some(cfg_scale),
+    };
+    tokio::time::timeout(
+      std::time::Duration::from_secs(120),
+      provider.transform(request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Image-to-image generation timed out after 2 minutes"))?
+    .map_err(|e| anyhow::anyhow!("Image-to-image generation failed: {}", e))?
+  } else {
+    let provider = Yanshi::text2image_for(&model).await?;
+    println!(
+      "🖼️  Generating via provider '{}' (model '{}')...",
+      provider.name(),
+      model
+    );
+
+    let request = ModalityText2ImageRequest {
+      model: model.clone(),
+      prompt,
+      size: Some(size.clone()),
+      n: Some(1),
+      response_format: Some(format.clone()),
+      seed: seed.map(|s| s as i32),
+      steps: Some(steps),
+      cfg_scale: Some(cfg_scale),
+    };
+
+    tokio::time::timeout(
+      std::time::Duration::from_secs(120),
+      provider.generate(request),
+    )
+    .await
+    .map_err(|_| {
+      anyhow::anyhow!(
+        "Image generation timed out after 2 minutes. Try again with a simpler prompt or check your internet connection."
+      )
+    })?
+    .map_err(|e| {
       eprintln!("Error: Internal LLM error: {}", e);
       anyhow::anyhow!("Image generation failed: {}", e)
-    })?,
-    Err(_) => {
-      return Err(anyhow::anyhow!(
-        "Image generation timed out after 2 minutes. This may be due to:\n  - Network connectivity issues\n  - API server overload\n  - Complex prompt requiring more processing time\n\nTry again with a simpler prompt or check your internet connection."
-      ));
-    }
+    })?
   };
 
   let duration = start_time.elapsed();

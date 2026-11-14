@@ -36,6 +36,8 @@ pub struct TextToVideoNode {
   pub duration_seconds: Option<u32>,
   pub resolution: Option<String>,
   pub seed: Option<i64>,
+  /// Optional first-frame image path or `data:` URI for Image-to-Video (I2V).
+  pub image: Option<String>,
 
   // Workflow control
   pub dependencies: Vec<String>,
@@ -71,6 +73,7 @@ impl TextToVideoNode {
       duration_seconds: None,
       resolution: None,
       seed: None,
+      image: None,
       dependencies: Vec::new(),
       condition: None,
       timeout_ms: None,
@@ -111,6 +114,11 @@ impl TextToVideoNode {
 
   pub fn with_seed(mut self, seed: i64) -> Self {
     self.seed = Some(seed);
+    self
+  }
+
+  pub fn with_image(mut self, image: &str) -> Self {
+    self.image = Some(image.to_string());
     self
   }
 
@@ -195,9 +203,15 @@ impl TextToVideoNode {
           ),
         })?;
 
+    let image = match &self.image {
+      Some(path_or_uri) => Some(load_video_input_image(path_or_uri).await?),
+      None => None,
+    };
+
     let request = ModalityText2VideoRequest {
       model: model.clone(),
       prompt: prompt.to_string(),
+      image,
       aspect_ratio,
       duration_seconds,
       resolution: self.resolution.clone(),
@@ -257,6 +271,46 @@ impl TextToVideoNode {
     );
     Ok(result)
   }
+}
+
+async fn load_video_input_image(
+  path_or_uri: &str,
+) -> Result<yanshi_llm::VideoInputImage, YanshiError> {
+  use base64::{Engine as _, engine::general_purpose::STANDARD};
+  if let Some(rest) = path_or_uri.strip_prefix("data:") {
+    let (mime, b64) =
+      rest
+        .split_once(";base64,")
+        .ok_or_else(|| YanshiError::ConfigurationError {
+          message: "data: URI for TextToVideoNode image must use ;base64,".to_string(),
+        })?;
+    return Ok(yanshi_llm::VideoInputImage {
+      bytes_base64_encoded: b64.to_string(),
+      mime_type: if mime.is_empty() {
+        "image/png".to_string()
+      } else {
+        mime.to_string()
+      },
+    });
+  }
+  let bytes =
+    tokio::fs::read(path_or_uri)
+      .await
+      .map_err(|err| YanshiError::ConfigurationError {
+        message: format!("Failed to read TextToVideoNode input image '{path_or_uri}': {err}"),
+      })?;
+  let lower = path_or_uri.to_ascii_lowercase();
+  let mime_type = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+    "image/jpeg"
+  } else if lower.ends_with(".webp") {
+    "image/webp"
+  } else {
+    "image/png"
+  };
+  Ok(yanshi_llm::VideoInputImage {
+    bytes_base64_encoded: STANDARD.encode(&bytes),
+    mime_type: mime_type.to_string(),
+  })
 }
 
 #[async_trait]
