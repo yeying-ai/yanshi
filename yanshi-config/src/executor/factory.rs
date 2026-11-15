@@ -12,8 +12,8 @@ use yanshi_llm::Yanshi;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use yanshi_nodes::nodes::{
-  arxiv::ArxivNode, file::FileNode, http::HttpNode, markmap::MarkMapNode, template::TemplateNode,
-  web_search::WebSearchNode,
+  arxiv::ArxivNode, file::FileNode, http::HttpNode, markmap::MarkMapNode,
+  repo_snapshot::RepoSnapshotNode, template::TemplateNode, web_search::WebSearchNode,
 };
 use yanshi_nodes_ai::nodes::{
   asr::ASRNode, image_edit::ImageEditNode, image_to_image::ImageToImageNode,
@@ -93,6 +93,24 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
     }
     "http" => Ok(NodeType::Standard(Arc::new(HttpNode::default()))),
     "web_search" => Ok(NodeType::Standard(Arc::new(WebSearchNode::default()))),
+    "repo_snapshot" => {
+      let allowed_paths: Vec<PathBuf> = node_def
+        .parameters
+        .get("allowed_paths")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+          seq
+            .iter()
+            .filter_map(|v| v.as_str().map(PathBuf::from))
+            .collect()
+        })
+        .unwrap_or_default();
+      let policy = Arc::new(SandboxPolicy {
+        allowed_paths,
+        ..SandboxPolicy::default()
+      });
+      Ok(NodeType::Standard(Arc::new(RepoSnapshotNode::new(policy))))
+    }
     "file" => {
       // V0.2 closure: `FileNode::default()` denies every path
       // (`SandboxPolicy::default()`'s `allowed_paths` is empty), so a

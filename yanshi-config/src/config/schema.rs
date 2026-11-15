@@ -436,6 +436,14 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("max_results", ParamType::Integer),
       ParamSpec::optional("topic", ParamType::String),
     ]),
+    "repo_snapshot" => Some(vec![
+      ParamSpec::required_input("source", ParamType::String),
+      ParamSpec::optional("git_ref", ParamType::String),
+      ParamSpec::optional("subpath", ParamType::String),
+      ParamSpec::optional("max_bytes", ParamType::Integer),
+      ParamSpec::optional("max_files", ParamType::Integer),
+      ParamSpec::optional("allowed_paths", ParamType::Sequence),
+    ]),
     "file" => Some(vec![
       // V0.2 closure: `file` node requires explicit `allowed_paths` to
       // avoid permissive-by-default arbitrary filesystem read/write

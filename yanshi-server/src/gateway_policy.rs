@@ -143,7 +143,7 @@ impl GatewayPolicy {
           self.check_path(&format!("node '{id}' allowed_paths"), &path)?;
         }
       }
-      "file" => {
+      "file" | "repo_snapshot" | "pdf_extract" | "video_ingest" => {
         for path in string_list(node, "allowed_paths") {
           self.check_path(&format!("node '{id}' allowed_paths"), &path)?;
         }
@@ -167,7 +167,14 @@ fn reach_of(node_type: &str, key: &str) -> Option<Reach> {
     "allowed_paths" | "allowed_commands" => None,
     // `http` filters its target at run time; `arxiv` builds arxiv.org
     // URLs from the paper id it parses out of `url`.
-    "url" if matches!(node_type, "http" | "arxiv") => None,
+    "url"
+      if matches!(
+        node_type,
+        "http" | "arxiv" | "repo_snapshot" | "pdf_extract" | "video_ingest"
+      ) =>
+    {
+      None
+    }
     "url" | "endpoint" | "base_url" => Some(Reach::Url),
     "path" | "save_to_file" => Some(Reach::Path),
     _ if key.ends_with("_url") || key.ends_with("_endpoint") => Some(Reach::Url),
