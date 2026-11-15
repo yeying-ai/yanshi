@@ -653,7 +653,54 @@ impl LLMConfig {
     self.providers.get(provider_name)
   }
 
-  /// Get API key for a provider from environment variables
+  /// Resolve an explicit non-empty `<VENDOR>_BASE_URL` environment override
+  /// for `provider_name`, when set by the operator or container runtime.
+  pub fn env_base_url_for_vendor(provider_name: &str) -> Option<String> {
+    let env_vars: &[&str] = match provider_name.to_lowercase().as_str() {
+      "openai" => &["OPENAI_BASE_URL"],
+      "anthropic" => &["ANTHROPIC_BASE_URL"],
+      "google" | "gemini" => &["GEMINI_BASE_URL", "GOOGLE_BASE_URL"],
+      "moonshot" => &["MOONSHOT_BASE_URL"],
+      "stepfun" | "step" => &["STEPFUN_BASE_URL", "STEP_BASE_URL"],
+      "glm" | "bigmodel" | "zhipu" => &["GLM_BASE_URL", "BIGMODEL_BASE_URL", "ZHIPU_BASE_URL"],
+      "dashscope" => &["DASHSCOPE_BASE_URL"],
+      "deepseek" => &["DEEPSEEK_BASE_URL"],
+      "minimax" => &["MINIMAX_BASE_URL"],
+      "kling" => &["KLING_BASE_URL"],
+      _ => &[],
+    };
+
+    for env_var in env_vars {
+      if let Ok(raw) = env::var(env_var) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+          return Some(trimmed.to_string());
+        }
+      }
+    }
+    None
+  }
+
+  /// Resolve the effective base URL for `provider_name`: explicit non-empty
+  /// `<VENDOR>_BASE_URL` environment variable wins over `providers[name].base_url`.
+  pub fn get_provider_base_url(&self, provider_name: &str) -> Option<String> {
+    if let Some(env_url) = Self::env_base_url_for_vendor(provider_name) {
+      return Some(env_url);
+    }
+    self
+      .get_provider(provider_name)
+      .and_then(|p| p.base_url.as_deref())
+      .map(str::trim)
+      .filter(|u| !u.is_empty())
+      .map(ToOwned::to_owned)
+  }
+
+  /// Get API key for a provider from environment variables.
+  ///
+  /// Empty or whitespace-only values (commonly injected by Docker Compose
+  /// `${VAR:-}` interpolation when a host `.env` leaves optional provider keys
+  /// unset) are treated as missing so lenient initialization skips them
+  /// cleanly instead of passing `""` into provider constructors.
   pub fn get_api_key(&self, provider_name: &str) -> Result<String> {
     if provider_name.eq_ignore_ascii_case("mock") {
       return Ok("mock".to_string());
@@ -663,7 +710,10 @@ impl LLMConfig {
     if let Some(provider_config) = self.get_provider(provider_name)
       && let Ok(api_key) = env::var(&provider_config.api_key_env)
     {
-      return Ok(api_key);
+      let trimmed = api_key.trim();
+      if !trimmed.is_empty() {
+        return Ok(trimmed.to_string());
+      }
     }
 
     // Fallback to common environment variable patterns
@@ -683,7 +733,10 @@ impl LLMConfig {
 
     for env_var in common_env_vars {
       if let Ok(api_key) = env::var(env_var) {
-        return Ok(api_key);
+        let trimmed = api_key.trim();
+        if !trimmed.is_empty() {
+          return Ok(trimmed.to_string());
+        }
       }
     }
 
@@ -1391,5 +1444,57 @@ models:
 
     assert_eq!(source.kind, LLMConfigSourceKind::BuiltInDefault);
     assert!(source.path.is_none());
+  }
+
+  #[test]
+  fn empty_api_key_env_var_is_treated_as_missing() {
+    let yaml = r#"
+providers:
+  openai:
+    api_key_env: TEST_EMPTY_OPENAI_API_KEY
+  deepseek:
+    api_key_env: TEST_NONEMPTY_DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com/v1
+"#;
+    let config = LLMConfig::from_yaml(yaml).unwrap();
+
+    let prev_openai = env::var("OPENAI_API_KEY").ok();
+    let prev_openai_key = env::var("OPENAI_KEY").ok();
+    let prev_deepseek_url = env::var("DEEPSEEK_BASE_URL").ok();
+    unsafe {
+      env::set_var("TEST_EMPTY_OPENAI_API_KEY", "   ");
+      env::remove_var("OPENAI_API_KEY");
+      env::remove_var("OPENAI_KEY");
+      env::set_var("TEST_NONEMPTY_DEEPSEEK_API_KEY", " sk-deepseek-ok ");
+      env::set_var("DEEPSEEK_BASE_URL", " https://relay.example.com/v1 ");
+    }
+
+    let openai_res = config.get_api_key("openai");
+    let deepseek_res = config.get_api_key("deepseek");
+    let deepseek_url = config.get_provider_base_url("deepseek");
+
+    unsafe {
+      env::remove_var("TEST_EMPTY_OPENAI_API_KEY");
+      env::remove_var("TEST_NONEMPTY_DEEPSEEK_API_KEY");
+      match prev_openai {
+        Some(v) => env::set_var("OPENAI_API_KEY", v),
+        None => env::remove_var("OPENAI_API_KEY"),
+      }
+      match prev_openai_key {
+        Some(v) => env::set_var("OPENAI_KEY", v),
+        None => env::remove_var("OPENAI_KEY"),
+      }
+      match prev_deepseek_url {
+        Some(v) => env::set_var("DEEPSEEK_BASE_URL", v),
+        None => env::remove_var("DEEPSEEK_BASE_URL"),
+      }
+    }
+
+    assert!(matches!(openai_res, Err(LLMError::MissingApiKey { .. })));
+    assert_eq!(deepseek_res.unwrap(), "sk-deepseek-ok");
+    assert_eq!(
+      deepseek_url.as_deref(),
+      Some("https://relay.example.com/v1")
+    );
   }
 }

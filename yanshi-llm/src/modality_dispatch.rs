@@ -67,7 +67,15 @@ async fn resolve_for_modality(
     });
   }
 
-  Ok((model_config.vendor.clone(), model_config.base_url.clone()))
+  let base_url = model_config
+    .base_url
+    .as_deref()
+    .map(str::trim)
+    .filter(|u| !u.is_empty())
+    .map(ToOwned::to_owned)
+    .or_else(|| crate::config::LLMConfig::env_base_url_for_vendor(&model_config.vendor));
+
+  Ok((model_config.vendor.clone(), base_url))
 }
 
 /// Resolve the API key for `vendor` using the same precedence rules

@@ -264,8 +264,7 @@ impl ModelRegistry {
       })?;
       config_guard
         .as_ref()
-        .and_then(|c| c.providers.get(&model_config.vendor))
-        .and_then(|p| p.base_url.clone())
+        .and_then(|c| c.get_provider_base_url(&model_config.vendor))
     };
 
     let model_type = model_config.granular_type().to_legacy_string().to_string();
@@ -360,9 +359,24 @@ impl ModelRegistry {
       };
 
       let provider_config = config.get_provider(&provider_name);
-      let base_url = provider_config.and_then(|p| p.base_url.clone());
+      let base_url = config.get_provider_base_url(&provider_name);
 
-      let provider = create_provider(&provider_name, &api_key, base_url)?;
+      // Modality-only vendors (such as `kling`, which serves `text_to_video`
+      // via `modality_dispatch` and has no chat `LLMProvider`) return
+      // `UnsupportedProvider` here when their API key is set; skip chat-client
+      // registration for them rather than failing `Yanshi::init()`.
+      let provider = match create_provider(&provider_name, &api_key, base_url) {
+        Ok(provider) => provider,
+        Err(LLMError::UnsupportedProvider { .. })
+          if config.models.values().all(|m| {
+            m.vendor != provider_name
+              || !matches!(m.granular_type(), crate::model_types::ModelType::Chat)
+          }) =>
+        {
+          continue;
+        }
+        Err(other) => return Err(other),
+      };
       providers.insert(provider_name.clone(), Arc::from(provider));
 
       // P-LLM2.7: build a token bucket from this vendor's configured RPM
@@ -747,5 +761,63 @@ providers:
       Err(other) => panic!("expected MissingApiKey, got {other:?}"),
       Ok(_) => panic!("deepseek provider must not initialise — its key was unset"),
     }
+  }
+
+  #[tokio::test]
+  async fn empty_env_var_and_modality_only_vendor_do_not_abort_init() {
+    let prev_openai = env::var("OPENAI_API_KEY").ok();
+    let prev_openai_key = env::var("OPENAI_KEY").ok();
+    unsafe {
+      env::set_var("REG_EMPTY_OPENAI_KEY", "");
+      env::remove_var("OPENAI_API_KEY");
+      env::remove_var("OPENAI_KEY");
+      env::set_var("REG_LIVE_DEEPSEEK_KEY", "sk-live-deepseek");
+      env::set_var("REG_KLING_KEY", "sk-live-kling");
+    }
+
+    let yaml = r#"
+models:
+  gpt-4o:
+    vendor: openai
+    type: chat
+  deepseek-chat:
+    vendor: deepseek
+    type: chat
+  kling-v2-master:
+    vendor: kling
+    type: text_to_video
+
+providers:
+  openai:
+    api_key_env: "REG_EMPTY_OPENAI_KEY"
+  deepseek:
+    api_key_env: "REG_LIVE_DEEPSEEK_KEY"
+  kling:
+    api_key_env: "REG_KLING_KEY"
+"#;
+
+    let registry = ModelRegistry::new();
+    let load_res = registry.load_config_from_yaml(yaml).await;
+
+    unsafe {
+      env::remove_var("REG_EMPTY_OPENAI_KEY");
+      env::remove_var("REG_LIVE_DEEPSEEK_KEY");
+      env::remove_var("REG_KLING_KEY");
+      match prev_openai {
+        Some(v) => env::set_var("OPENAI_API_KEY", v),
+        None => env::remove_var("OPENAI_API_KEY"),
+      }
+      match prev_openai_key {
+        Some(v) => env::set_var("OPENAI_KEY", v),
+        None => env::remove_var("OPENAI_KEY"),
+      }
+    }
+
+    assert!(load_res.is_ok(), "load failed: {load_res:?}");
+    assert!(registry.get_provider("deepseek").is_ok());
+    assert!(matches!(
+      registry.get_provider("openai"),
+      Err(LLMError::MissingApiKey { .. })
+    ));
   }
 }
