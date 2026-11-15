@@ -8,6 +8,55 @@ import { NodeConfigEditor } from './NodeConfigEditor';
 import type { NodeRuntimeTelemetry } from './WorkflowGraphCanvas';
 
 type InspectorTab = 'io' | 'media' | 'config';
+type BeforeOverrideKind = 'input' | 'mock_output';
+
+export interface DebugResumeOverrides {
+  input_override?: Record<string, unknown>;
+  output_override?: Record<string, unknown>;
+}
+
+/**
+ * Unwraps `{ type: "json", value: ... }` envelopes into plain JSON values so
+ * editing captured inputs/outputs in the debug override editor stays ergonomic,
+ * while keeping `{ type: "file", ... }` and `{ type: "url", ... }` intact.
+ */
+export function unwrapCapturedFlowJson(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const rec = val as Record<string, unknown>;
+      if (rec.type === 'json' && 'value' in rec) {
+        out[key] = rec.value;
+        continue;
+      }
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
+export function parseDebugOverrideObject(rawText: string): {
+  value: Record<string, unknown> | null;
+  error: string | null;
+} {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return { value: null, error: '覆盖载荷不能为空，请输入合法 JSON 对象' };
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { value: null, error: '覆盖载荷顶层必须是 JSON 对象（如 {"output": "..."}）' };
+    }
+    return { value: parsed as Record<string, unknown>, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { value: null, error: `JSON 解析失败：${msg}` };
+  }
+}
 
 export interface NodeIoInspectorProps {
   runId: string;
@@ -22,8 +71,8 @@ export interface NodeIoInspectorProps {
   pausedAt: FlowDebugPause | null;
   hasBreakpoint: boolean;
   onToggleBreakpoint: (nodeId: string) => void;
-  onStepDebug: () => void;
-  onContinueDebug: () => void;
+  onStepDebug: (overrides?: DebugResumeOverrides) => void;
+  onContinueDebug: (overrides?: DebugResumeOverrides) => void;
   debugActionBusy: boolean;
   onApplyNodePatch?: (nodeId: string, patch: NodeUpdatePatch) => string | null;
   onDeleteNode?: (nodeId: string) => void;
@@ -51,6 +100,10 @@ export function NodeIoInspector({
   const [activeTab, setActiveTab] = useState<InspectorTab>(() =>
     !runId && onApplyNodePatch ? 'config' : 'io',
   );
+  const [overrideOpen, setOverrideOpen] = useState<boolean>(false);
+  const [beforeKind, setBeforeKind] = useState<BeforeOverrideKind>('input');
+  const [overrideJsonText, setOverrideJsonText] = useState<string>('{\n  "output": ""\n}');
+  const [overrideError, setOverrideError] = useState<string | null>(null);
 
   const mediaPreviews = useMemo(
     () => (node && runId ? extractNodeMediaPreviews(runId, node.id, capturedOutput) : []),
@@ -63,6 +116,25 @@ export function NodeIoInspector({
       setActiveTab((prev) => (prev === 'media' && mediaPreviews.length > 0 ? 'media' : 'io'));
     }
   }, [runId, pausedAt?.node_id, pausedAt?.phase]);
+
+  // Reset override draft whenever pause target or phase changes.
+  useEffect(() => {
+    setOverrideOpen(false);
+    setOverrideError(null);
+    if (!pausedAt || pausedAt.node_id !== node?.id) return;
+    if (pausedAt.phase === 'before_node') {
+      setBeforeKind('input');
+      const unwrapped = unwrapCapturedFlowJson(capturedInput);
+      setOverrideJsonText(JSON.stringify(unwrapped, null, 2));
+    } else {
+      const unwrapped = unwrapCapturedFlowJson(capturedOutput);
+      setOverrideJsonText(
+        Object.keys(unwrapped).length > 0
+          ? JSON.stringify(unwrapped, null, 2)
+          : '{\n  "output": ""\n}',
+      );
+    }
+  }, [pausedAt?.node_id, pausedAt?.phase, node?.id, capturedInput, capturedOutput]);
 
   // Keep user off an empty media tab when switching nodes.
   useEffect(() => {
@@ -87,6 +159,25 @@ export function NodeIoInspector({
   const isPausedHere = pausedAt?.node_id === node.id;
   const hasInput = capturedInput !== undefined;
   const hasOutput = capturedOutput !== undefined;
+
+  const triggerWithOverride = (mode: 'step' | 'continue') => {
+    if (!pausedAt) return;
+    const parsed = parseDebugOverrideObject(overrideJsonText);
+    if (parsed.error || !parsed.value) {
+      setOverrideError(parsed.error ?? 'JSON 格式无效');
+      return;
+    }
+    setOverrideError(null);
+    const overrides: DebugResumeOverrides =
+      pausedAt.phase === 'before_node' && beforeKind === 'input'
+        ? { input_override: parsed.value }
+        : { output_override: parsed.value };
+    if (mode === 'step') {
+      onStepDebug(overrides);
+    } else {
+      onContinueDebug(overrides);
+    }
+  };
 
   const tabs: { id: InspectorTab; label: string; badge?: number }[] = [
     { id: 'io', label: '运行 I/O 观测' },
@@ -144,8 +235,8 @@ export function NodeIoInspector({
             </strong>
             <p>
               {pausedAt.phase === 'before_node'
-                ? '调度器已完成上游模板与表达式求值，请核查下方「实际输入 Input」后再放行执行。'
-                : '请观测下方「实际输入 Input」与「实际输出 Output」是否符合预期。'}
+                ? '调度器已完成上游表达式求值，可核查下方输入直接放行，或修改输入 / Mock 输出跳过真实外部调用。'
+                : '请观测下方实际输入与输出；如需修正结果供下游消费，可展开数据注入覆盖本步输出。'}
               {pausedAt.next_nodes.length > 0 && (
                 <> 下一就绪节点：{pausedAt.next_nodes.join('、')}。</>
               )}
@@ -156,7 +247,7 @@ export function NodeIoInspector({
               type="button"
               className="studio-btn-primary studio-btn-sm"
               disabled={debugActionBusy}
-              onClick={onStepDebug}
+              onClick={() => onStepDebug()}
             >
               ▶ 单步下一步
             </button>
@@ -164,11 +255,96 @@ export function NodeIoInspector({
               type="button"
               className="studio-btn-secondary studio-btn-sm"
               disabled={debugActionBusy}
-              onClick={onContinueDebug}
+              onClick={() => onContinueDebug()}
             >
               ⏭ 继续跑完
             </button>
+            <button
+              type="button"
+              data-testid="toggle-debug-override-btn"
+              className="studio-btn-ghost studio-btn-sm"
+              aria-expanded={overrideOpen}
+              onClick={() => setOverrideOpen((prev) => !prev)}
+            >
+              {overrideOpen
+                ? '收起注入'
+                : pausedAt.phase === 'before_node'
+                  ? '🧪 改输入 / Mock 跳过'
+                  : '🧪 覆盖输出'}
+            </button>
           </div>
+
+          {overrideOpen && (
+            <div className="studio-override-panel" data-testid="debug-override-panel">
+              {pausedAt.phase === 'before_node' ? (
+                <div className="studio-override-modes">
+                  <button
+                    type="button"
+                    className={`studio-cat-pill ${beforeKind === 'input' ? 'active' : ''}`}
+                    onClick={() => {
+                      setBeforeKind('input');
+                      setOverrideError(null);
+                      setOverrideJsonText(JSON.stringify(unwrapCapturedFlowJson(capturedInput), null, 2));
+                    }}
+                  >
+                    ✏ 修改输入并执行 (input_override)
+                  </button>
+                  <button
+                    type="button"
+                    className={`studio-cat-pill ${beforeKind === 'mock_output' ? 'active' : ''}`}
+                    onClick={() => {
+                      setBeforeKind('mock_output');
+                      setOverrideError(null);
+                      setOverrideJsonText('{\n  "output": "mocked_value"\n}');
+                    }}
+                  >
+                    ⚡ Mock 输出跳过调用 (output_override)
+                  </button>
+                </div>
+              ) : (
+                <small className="studio-override-hint">
+                  将替换 #{node.id} 在状态池与 Checkpoint 中的输出，下游节点将读取下方 JSON：
+                </small>
+              )}
+
+              <textarea
+                rows={5}
+                aria-label="调试覆盖 JSON 载荷"
+                className="studio-mono-textarea studio-override-textarea"
+                value={overrideJsonText}
+                onChange={(ev) => setOverrideJsonText(ev.target.value)}
+              />
+
+              {overrideError && (
+                <p className="studio-override-error" role="alert">
+                  {overrideError}
+                </p>
+              )}
+
+              <div className="studio-pause-callout__actions">
+                <button
+                  type="button"
+                  data-testid="apply-override-step-btn"
+                  className="studio-btn-primary studio-btn-sm"
+                  disabled={debugActionBusy}
+                  onClick={() => triggerWithOverride('step')}
+                >
+                  {pausedAt.phase === 'before_node' && beforeKind === 'mock_output'
+                    ? '⚡ Mock 跳过并单步'
+                    : '▶ 注入并单步'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="apply-override-continue-btn"
+                  className="studio-btn-secondary studio-btn-sm"
+                  disabled={debugActionBusy}
+                  onClick={() => triggerWithOverride('continue')}
+                >
+                  ⏭ 注入并继续跑完
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

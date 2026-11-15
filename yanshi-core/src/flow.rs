@@ -532,8 +532,9 @@ impl<'f> FlowExecutor<'f> {
                 input: Self::outputs_to_json(&inputs),
                 timestamp: Instant::now(),
               });
-              if let Some(debug) = &execution_config.debug_controller
-                && let Err(err) = debug
+              let mut before_patch = crate::scheduler::DebugStepPatch::default();
+              if let Some(debug) = &execution_config.debug_controller {
+                before_patch = match debug
                   .gate(
                     node_id,
                     crate::events::DebugPausePhase::BeforeNode,
@@ -558,26 +559,45 @@ impl<'f> FlowExecutor<'f> {
                     },
                   )
                   .await
-              {
-                self.emit_event(WorkflowEvent::WorkflowCancelled {
+                {
+                  Ok(patch) => patch,
+                  Err(err) => {
+                    self.emit_event(WorkflowEvent::WorkflowCancelled {
+                      workflow_id: run_id.clone(),
+                      reason: "cancelled while paused at debug breakpoint".to_string(),
+                      duration: workflow_started_at.elapsed(),
+                      timestamp: Instant::now(),
+                    });
+                    return Err(err);
+                  }
+                };
+              }
+
+              if let Some(override_inputs) = before_patch.input_override {
+                inputs = override_inputs;
+                self.emit_event(WorkflowEvent::NodeInputCaptured {
                   workflow_id: run_id.clone(),
-                  reason: "cancelled while paused at debug breakpoint".to_string(),
-                  duration: workflow_started_at.elapsed(),
+                  node_id: node_id.clone(),
+                  input: Self::outputs_to_json(&inputs),
                   timestamp: Instant::now(),
                 });
-                return Err(err);
               }
+
               let node_started_at = Instant::now();
-              let result = self
-                .execute_node_with_reliability(
-                  &run_id,
-                  &run_dir,
-                  node_id,
-                  &graph_node.node_type,
-                  &inputs,
-                  &execution_config,
-                )
-                .await;
+              let result = if let Some(mock_outputs) = before_patch.output_override {
+                Ok(mock_outputs)
+              } else {
+                self
+                  .execute_node_with_reliability(
+                    &run_id,
+                    &run_dir,
+                    node_id,
+                    &graph_node.node_type,
+                    &inputs,
+                    &execution_config,
+                  )
+                  .await
+              };
               (result, node_started_at)
             }
             Err(error) => (Err(error), Instant::now()),
@@ -626,7 +646,7 @@ impl<'f> FlowExecutor<'f> {
         }
       }
 
-      let will_stop = (is_failure && execution_config.fail_fast)
+      let mut will_stop = (is_failure && execution_config.fail_fast)
         || (is_skip && !execution_config.continue_on_skip);
 
       if let Some(debug) = &execution_config.debug_controller {
@@ -642,7 +662,7 @@ impl<'f> FlowExecutor<'f> {
             .cloned()
             .collect()
         };
-        if let Err(err) = debug
+        let after_patch = match debug
           .gate(
             node_id,
             crate::events::DebugPausePhase::AfterNode,
@@ -668,13 +688,61 @@ impl<'f> FlowExecutor<'f> {
           )
           .await
         {
-          self.emit_event(WorkflowEvent::WorkflowCancelled {
-            workflow_id: run_id.clone(),
-            reason: "cancelled while paused after debug step".to_string(),
-            duration: workflow_started_at.elapsed(),
-            timestamp: Instant::now(),
-          });
-          return Err(err);
+          Ok(patch) => patch,
+          Err(err) => {
+            self.emit_event(WorkflowEvent::WorkflowCancelled {
+              workflow_id: run_id.clone(),
+              reason: "cancelled while paused after debug step".to_string(),
+              duration: workflow_started_at.elapsed(),
+              timestamp: Instant::now(),
+            });
+            return Err(err);
+          }
+        };
+
+        if let Some(override_outputs) = after_patch.output_override {
+          let overridden_result: AsyncNodeResult = Ok(override_outputs);
+          self.persist_step_result(&run_dir, node_id, &overridden_result)?;
+          last_completed_node = Some(node_id.clone());
+          if let Ok(ref outputs) = overridden_result {
+            self.emit_event(WorkflowEvent::NodeOutputCaptured {
+              workflow_id: run_id.clone(),
+              node_id: node_id.to_string(),
+              output: Self::outputs_to_json(outputs),
+              timestamp: Instant::now(),
+            });
+            if is_failure || is_skip {
+              self.emit_event(WorkflowEvent::NodeCompleted {
+                workflow_id: run_id.clone(),
+                node_id: node_id.to_string(),
+                duration: node_started_at.elapsed(),
+                timestamp: Instant::now(),
+              });
+            }
+          }
+          state_pool.insert(node_id.to_string(), overridden_result);
+          will_stop = false;
+          if self.flow.is_checkpoint_enabled()
+            && let Some(ref manager) = self.checkpoint_manager()
+          {
+            let checkpoint_state = self.state_pool_to_checkpoint_state(&state_pool);
+            if let Err(err) = manager
+              .save_checkpoint_with_metadata(
+                &run_id,
+                node_id,
+                &checkpoint_state,
+                WorkflowStatus::Running,
+                Self::checkpoint_metadata(&initial_inputs, &execution_config),
+              )
+              .await
+            {
+              tracing::warn!(
+                "Failed to update checkpoint after debug output override on '{}': {}",
+                node_id,
+                err
+              );
+            }
+          }
         }
       }
 
@@ -6414,5 +6482,176 @@ mod tests {
       .unwrap();
     assert!(matches!(outcome, Err(YanshiError::TaskCancelled)));
     assert!(debug.snapshot().paused_at.is_none());
+  }
+
+  #[tokio::test]
+  async fn debug_controller_supports_before_input_override_mock_skip_and_after_output_override() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct EchoUpperNode {
+      calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncNode for EchoUpperNode {
+      async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let msg = inputs
+          .get("msg")
+          .and_then(|v| match v {
+            FlowValue::Json(val) => val.as_str(),
+            _ => None,
+          })
+          .unwrap_or("default");
+        let mut out = HashMap::new();
+        out.insert(
+          "output".to_string(),
+          FlowValue::Json(json!(msg.to_uppercase())),
+        );
+        Ok(out)
+      }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_b = Arc::new(AtomicUsize::new(0));
+    let calls_c = Arc::new(AtomicUsize::new(0));
+    let calls_d = Arc::new(AtomicUsize::new(0));
+
+    let mut b_map = HashMap::new();
+    b_map.insert("msg".to_string(), ("a".to_string(), "output".to_string()));
+    let mut c_map = HashMap::new();
+    c_map.insert("msg".to_string(), ("b".to_string(), "output".to_string()));
+    let mut d_map = HashMap::new();
+    d_map.insert("msg".to_string(), ("c".to_string(), "output".to_string()));
+
+    let flow = Flow::new(vec![
+      GraphNode {
+        id: "a".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoUpperNode {
+          calls: Arc::clone(&calls_a),
+        })),
+        dependencies: vec![],
+        input_mapping: None,
+        run_if: None,
+        initial_inputs: HashMap::from([("msg".to_string(), FlowValue::Json(json!("original")))]),
+      },
+      GraphNode {
+        id: "b".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoUpperNode {
+          calls: Arc::clone(&calls_b),
+        })),
+        dependencies: vec!["a".to_string()],
+        input_mapping: Some(b_map),
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+      GraphNode {
+        id: "c".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoUpperNode {
+          calls: Arc::clone(&calls_c),
+        })),
+        dependencies: vec!["b".to_string()],
+        input_mapping: Some(c_map),
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+      GraphNode {
+        id: "d".to_string(),
+        node_type: NodeType::Standard(Arc::new(EchoUpperNode {
+          calls: Arc::clone(&calls_d),
+        })),
+        dependencies: vec!["c".to_string()],
+        input_mapping: Some(d_map),
+        run_if: None,
+        initial_inputs: HashMap::new(),
+      },
+    ]);
+
+    let debug = crate::FlowDebugController::new(true, ["a", "c"]);
+    let config = FlowExecutionConfig::serial()
+      .with_run_base_dir(temp_dir.path())
+      .with_debug_controller(debug.clone());
+
+    let handle = tokio::spawn(async move {
+      flow
+        .execute_from_inputs_with_config(HashMap::new(), config)
+        .await
+    });
+
+    let wait_pause = |expected_node: &str, expected_phase: crate::DebugPausePhase| {
+      let debug = debug.clone();
+      let expected_node = expected_node.to_string();
+      async move {
+        for _ in 0..100 {
+          if let Some(p) = debug.snapshot().paused_at
+            && p.node_id == expected_node
+            && p.phase == expected_phase
+          {
+            return;
+          }
+          tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+          "timed out waiting for pause ({expected_node}, {expected_phase:?}); got {:?}",
+          debug.snapshot().paused_at
+        );
+      }
+    };
+
+    // 1. Paused BEFORE `a`: override input `msg` to "injected"
+    wait_pause("a", crate::DebugPausePhase::BeforeNode).await;
+    assert!(
+      debug.step_with_patch(crate::DebugStepPatch::from_json_maps(
+        serde_json::json!({ "msg": "injected" })
+          .as_object()
+          .cloned(),
+        None,
+      ))
+    );
+
+    // 2. Paused AFTER `a`: `a` ran once; override its output to "after_patched" for `b`
+    wait_pause("a", crate::DebugPausePhase::AfterNode).await;
+    assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+    assert!(
+      debug.step_with_patch(crate::DebugStepPatch::from_json_maps(
+        None,
+        serde_json::json!({ "output": "after_patched" })
+          .as_object()
+          .cloned(),
+      ))
+    );
+
+    // 3. `b` runs normally using `a`'s overridden output ("after_patched" -> "AFTER_PATCHED")
+    wait_pause("b", crate::DebugPausePhase::AfterNode).await;
+    assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+    assert!(debug.step());
+
+    // 4. Paused BEFORE `c`: supply `output_override` to MOCK `c` (skipping real execution of `c`)
+    wait_pause("c", crate::DebugPausePhase::BeforeNode).await;
+    assert!(
+      debug.step_with_patch(crate::DebugStepPatch::from_json_maps(
+        None,
+        serde_json::json!({ "output": "mocked_c_value" })
+          .as_object()
+          .cloned(),
+      ))
+    );
+
+    // 5. Paused AFTER `c`: `calls_c` MUST still be 0! Continue to finish `d`.
+    wait_pause("c", crate::DebugPausePhase::AfterNode).await;
+    assert_eq!(calls_c.load(Ordering::SeqCst), 0);
+    assert!(debug.continue_run());
+
+    let state = handle.await.unwrap().unwrap();
+    assert_eq!(
+      state["b"].as_ref().expect("b succeeded").get("output"),
+      Some(&FlowValue::Json(json!("AFTER_PATCHED")))
+    );
+    assert_eq!(calls_d.load(Ordering::SeqCst), 1);
+    assert_eq!(
+      state["d"].as_ref().expect("d succeeded").get("output"),
+      Some(&FlowValue::Json(json!("MOCKED_C_VALUE")))
+    );
   }
 }

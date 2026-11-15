@@ -88,7 +88,7 @@ pub use resume::{
 pub use retry::{ErrorPattern, RetryContext, RetryPolicy, RetryStrategy};
 pub use retry_executor::{execute_with_retry, execute_with_retry_and_hook};
 pub use scheduler::{
-  FlowCancellationToken, FlowDebugController, FlowDebugPause, FlowDebugSnapshot,
+  DebugStepPatch, FlowCancellationToken, FlowDebugController, FlowDebugPause, FlowDebugSnapshot,
   FlowExecutionConfig, FlowExecutionMode,
 };
 pub use state_size::{StateSizeObserver, estimated_state_pool_bytes};

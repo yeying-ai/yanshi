@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NodeIoInspector } from '../components/NodeIoInspector';
+import {
+  type DebugResumeOverrides,
+  NodeIoInspector,
+} from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { SpaLink } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
@@ -909,18 +912,28 @@ export function WorkflowStudioPage({
     }
   };
 
-  const sendDebugAction = async (action: 'step' | 'continue') => {
+  const sendDebugAction = async (
+    action: 'step' | 'continue',
+    overrides?: DebugResumeOverrides,
+  ) => {
     if (!runId) return;
     setDebugActionBusy(true);
     setBannerError(null);
     try {
+      const payload: Record<string, unknown> = { action };
+      if (overrides?.input_override) {
+        payload.input_override = overrides.input_override;
+      }
+      if (overrides?.output_override) {
+        payload.output_override = overrides.output_override;
+      }
       const res = await apiFetch(
         `/v1/runs/${encodeURIComponent(runId)}:debug`,
         apiToken,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify(payload),
         },
         tenantId,
       );
@@ -1778,8 +1791,8 @@ export function WorkflowStudioPage({
               pausedAt={effectivePausedAt}
               hasBreakpoint={selectedNode ? breakpoints.includes(selectedNode.id) : false}
               onToggleBreakpoint={(nid) => void toggleBreakpoint(nid)}
-              onStepDebug={() => void sendDebugAction('step')}
-              onContinueDebug={() => void sendDebugAction('continue')}
+              onStepDebug={(overrides) => void sendDebugAction('step', overrides)}
+              onContinueDebug={(overrides) => void sendDebugAction('continue', overrides)}
               debugActionBusy={debugActionBusy}
               onApplyNodePatch={handleApplyNodePatch}
               onDeleteNode={

@@ -725,8 +725,18 @@ struct DebugStatusResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum DebugControlRequest {
-  Step,
-  Continue,
+  Step {
+    #[serde(default)]
+    input_override: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    output_override: Option<serde_json::Map<String, serde_json::Value>>,
+  },
+  Continue {
+    #[serde(default)]
+    input_override: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    output_override: Option<serde_json::Map<String, serde_json::Value>>,
+  },
   SetBreakpoints {
     #[serde(default)]
     breakpoints: Vec<String>,
@@ -809,8 +819,20 @@ async fn post_run_action(
     drop(guard);
 
     let resumed = match req {
-      DebugControlRequest::Step => ctrl.step(),
-      DebugControlRequest::Continue => ctrl.continue_run(),
+      DebugControlRequest::Step {
+        input_override,
+        output_override,
+      } => {
+        let patch = yanshi_core::DebugStepPatch::from_json_maps(input_override, output_override);
+        ctrl.step_with_patch(patch)
+      }
+      DebugControlRequest::Continue {
+        input_override,
+        output_override,
+      } => {
+        let patch = yanshi_core::DebugStepPatch::from_json_maps(input_override, output_override);
+        ctrl.continue_with_patch(patch)
+      }
       DebugControlRequest::SetBreakpoints {
         breakpoints,
         step_every_node,
@@ -1530,10 +1552,15 @@ nodes:
     }
     assert_eq!(paused_node.as_deref(), Some("first"));
 
-    // Continue run to completion
+    // Continue run to completion while overriding `first`'s output for `second`
     let cont_res = client
       .post(format!("{base_url}/v1/runs/{run_id}:debug"))
-      .json(&serde_json::json!({ "action": "continue" }))
+      .json(&serde_json::json!({
+        "action": "continue",
+        "output_override": {
+          "output": "Overridden Step 1"
+        }
+      }))
       .send()
       .await
       .expect("continue debug");
@@ -1569,6 +1596,13 @@ nodes:
       .expect("events json");
     assert!(events.iter().any(|e| e.kind == "node.input.captured"));
     assert!(events.iter().any(|e| e.kind == "node.output.captured"));
+    let second_outputs: Vec<_> = events
+      .iter()
+      .filter(|e| e.kind == "node.output.captured" && e.payload["node_id"] == "second")
+      .collect();
+    assert!(!second_outputs.is_empty());
+    let serialized = serde_json::to_string(&second_outputs.last()).expect("serialize second out");
+    assert!(serialized.contains("Step 2 from (Overridden Step 1)"));
   }
 
   #[tokio::test]

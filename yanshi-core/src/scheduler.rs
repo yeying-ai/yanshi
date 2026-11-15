@@ -1,9 +1,10 @@
 use crate::events::DebugPausePhase;
 use crate::resource_limits::ResourceLimits;
 use crate::retry::RetryPolicy;
+use crate::value::FlowValue;
 use serde::{Deserialize, Serialize};
 use std::{
-  collections::BTreeSet,
+  collections::{BTreeSet, HashMap},
   path::PathBuf,
   sync::{
     Arc, Mutex,
@@ -234,12 +235,94 @@ pub struct FlowDebugSnapshot {
   pub paused_at: Option<FlowDebugPause>,
 }
 
+/// Optional input/output override payload supplied when resuming a paused debug step.
+///
+/// - At [`DebugPausePhase::BeforeNode`]:
+///   - `input_override`: replaces the resolved `inputs` map passed into the node.
+///   - `output_override`: skips real node execution entirely (Mock injection) and
+///     records `Ok(output_override)` as the node's result.
+/// - At [`DebugPausePhase::AfterNode`]:
+///   - `output_override`: replaces the node's captured output in `state_pool`,
+///     on-disk step result, and checkpoint so downstream nodes consume the edited data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DebugStepPatch {
+  pub input_override: Option<HashMap<String, FlowValue>>,
+  pub output_override: Option<HashMap<String, FlowValue>>,
+}
+
+impl DebugStepPatch {
+  pub fn is_empty(&self) -> bool {
+    self.input_override.is_none() && self.output_override.is_none()
+  }
+
+  /// Convert optional JSON object maps (from HTTP debug endpoints) into [`FlowValue`] maps.
+  ///
+  /// Both tagged `FlowValue` envelopes (`{"type":"json","value":...}`,
+  /// `{"type":"file","path":...}`, `{"type":"url","url":...}`) and plain untagged
+  /// JSON values are accepted seamlessly.
+  pub fn from_json_maps(
+    input_override: Option<serde_json::Map<String, serde_json::Value>>,
+    output_override: Option<serde_json::Map<String, serde_json::Value>>,
+  ) -> Self {
+    Self {
+      input_override: input_override.map(json_object_to_flow_map),
+      output_override: output_override.map(json_object_to_flow_map),
+    }
+  }
+}
+
+fn json_object_to_flow_map(
+  obj: serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, FlowValue> {
+  obj
+    .into_iter()
+    .map(|(k, v)| (k, json_value_to_flow_value(v)))
+    .collect()
+}
+
+fn json_value_to_flow_value(val: serde_json::Value) -> FlowValue {
+  if let serde_json::Value::Object(ref map) = val {
+    match map.get("type").and_then(serde_json::Value::as_str) {
+      Some("json") if map.contains_key("value") => {
+        return FlowValue::Json(map.get("value").cloned().unwrap_or(serde_json::Value::Null));
+      }
+      Some("file") => {
+        if let Some(path) = map.get("path").and_then(serde_json::Value::as_str) {
+          let mime_type = map
+            .get("mime_type")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+          return FlowValue::File {
+            path: PathBuf::from(path),
+            mime_type,
+          };
+        }
+      }
+      Some("url") => {
+        if let Some(url) = map.get("url").and_then(serde_json::Value::as_str) {
+          let mime_type = map
+            .get("mime_type")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+          return FlowValue::Url {
+            url: url.to_string(),
+            mime_type,
+          };
+        }
+      }
+      _ => {}
+    }
+  }
+  FlowValue::Json(val)
+}
+
 #[derive(Debug)]
 struct DebugState {
   step_every_node: bool,
   breakpoints: BTreeSet<String>,
   paused_at: Option<FlowDebugPause>,
   resume_action: Option<&'static str>,
+  pending_patch: DebugStepPatch,
   aborted: bool,
 }
 
@@ -274,6 +357,7 @@ impl FlowDebugController {
         breakpoints: breakpoints.into_iter().map(Into::into).collect(),
         paused_at: None,
         resume_action: None,
+        pending_patch: DebugStepPatch::default(),
         aborted: false,
       })),
       notify: Arc::new(Notify::new()),
@@ -316,12 +400,19 @@ impl FlowDebugController {
   /// Advance one node boundary and keep single-step pausing active.
   /// Returns `true` if the controller was currently paused.
   pub fn step(&self) -> bool {
+    self.step_with_patch(DebugStepPatch::default())
+  }
+
+  /// Advance one node boundary applying `patch` to the currently paused gate.
+  /// Returns `true` if the controller was currently paused.
+  pub fn step_with_patch(&self, patch: DebugStepPatch) -> bool {
     let was_paused = {
       let mut guard = self.lock_state();
       let paused = guard.paused_at.take().is_some();
       guard.step_every_node = true;
       if paused {
         guard.resume_action = Some("step");
+        guard.pending_patch = patch;
       }
       paused
     };
@@ -335,12 +426,19 @@ impl FlowDebugController {
   /// (or the next explicit `BeforeNode` breakpoint).
   /// Returns `true` if the controller was currently paused.
   pub fn continue_run(&self) -> bool {
+    self.continue_with_patch(DebugStepPatch::default())
+  }
+
+  /// Switch out of single-step mode applying `patch` to the currently paused gate.
+  /// Returns `true` if the controller was currently paused.
+  pub fn continue_with_patch(&self, patch: DebugStepPatch) -> bool {
     let was_paused = {
       let mut guard = self.lock_state();
       let paused = guard.paused_at.take().is_some();
       guard.step_every_node = false;
       if paused {
         guard.resume_action = Some("continue");
+        guard.pending_patch = patch;
       }
       paused
     };
@@ -356,6 +454,7 @@ impl FlowDebugController {
       let mut guard = self.lock_state();
       guard.aborted = true;
       guard.paused_at = None;
+      guard.pending_patch = DebugStepPatch::default();
       guard.resume_action = Some("abort");
     }
     self.notify.notify_waiters();
@@ -370,7 +469,7 @@ impl FlowDebugController {
     cancellation_token: Option<&FlowCancellationToken>,
     on_paused: impl FnOnce(&FlowDebugPause),
     on_resumed: impl FnOnce(&'static str),
-  ) -> crate::Result<()> {
+  ) -> crate::Result<DebugStepPatch> {
     let pause_info = {
       let mut guard = self.lock_state();
       if guard.aborted {
@@ -381,7 +480,7 @@ impl FlowDebugController {
         DebugPausePhase::AfterNode => guard.step_every_node,
       };
       if !should_pause {
-        return Ok(());
+        return Ok(DebugStepPatch::default());
       }
       let pause = FlowDebugPause {
         node_id: node_id.to_string(),
@@ -390,24 +489,27 @@ impl FlowDebugController {
       };
       guard.paused_at = Some(pause.clone());
       guard.resume_action = None;
+      guard.pending_patch = DebugStepPatch::default();
       pause
     };
 
     on_paused(&pause_info);
 
-    let action = loop {
+    let (action, patch) = loop {
       let notified = self.notify.notified();
       {
         let mut guard = self.lock_state();
         if guard.aborted {
           guard.paused_at = None;
+          guard.pending_patch = DebugStepPatch::default();
           return Err(crate::YanshiError::TaskCancelled);
         }
         if let Some(act) = guard.resume_action.take() {
+          let patch = std::mem::take(&mut guard.pending_patch);
           if act == "abort" {
             return Err(crate::YanshiError::TaskCancelled);
           }
-          break act;
+          break (act, patch);
         }
       }
 
@@ -415,6 +517,7 @@ impl FlowDebugController {
         if token.is_cancelled() {
           let mut guard = self.lock_state();
           guard.paused_at = None;
+          guard.pending_patch = DebugStepPatch::default();
           return Err(crate::YanshiError::TaskCancelled);
         }
         tokio::select! {
@@ -422,6 +525,7 @@ impl FlowDebugController {
           _ = token.cancelled() => {
             let mut guard = self.lock_state();
             guard.paused_at = None;
+            guard.pending_patch = DebugStepPatch::default();
             return Err(crate::YanshiError::TaskCancelled);
           }
           _ = notified => {}
@@ -432,7 +536,7 @@ impl FlowDebugController {
     };
 
     on_resumed(action);
-    Ok(())
+    Ok(patch)
   }
 }
 

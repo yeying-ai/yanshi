@@ -1889,8 +1889,18 @@ pub async fn post_run_action(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DebugActionRequest {
-  Step,
-  Continue,
+  Step {
+    #[serde(default)]
+    input_override: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    output_override: Option<serde_json::Map<String, serde_json::Value>>,
+  },
+  Continue {
+    #[serde(default)]
+    input_override: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    output_override: Option<serde_json::Map<String, serde_json::Value>>,
+  },
   SetBreakpoints {
     #[serde(default)]
     breakpoints: Vec<String>,
@@ -1962,8 +1972,20 @@ async fn debug_run_action(
   })?;
 
   let resumed = match req {
-    DebugActionRequest::Step => Some(controller.step()),
-    DebugActionRequest::Continue => Some(controller.continue_run()),
+    DebugActionRequest::Step {
+      input_override,
+      output_override,
+    } => {
+      let patch = yanshi_core::DebugStepPatch::from_json_maps(input_override, output_override);
+      Some(controller.step_with_patch(patch))
+    }
+    DebugActionRequest::Continue {
+      input_override,
+      output_override,
+    } => {
+      let patch = yanshi_core::DebugStepPatch::from_json_maps(input_override, output_override);
+      Some(controller.continue_with_patch(patch))
+    }
     DebugActionRequest::SetBreakpoints {
       breakpoints,
       step_every_node,
