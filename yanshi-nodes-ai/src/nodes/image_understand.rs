@@ -80,17 +80,22 @@ impl AsyncNode for ImageUnderstandNode {
     }
 
     let response = request
-      .execute()
+      .execute_full()
       .await
       .map_err(|e| YanshiError::AsyncExecutionError {
         message: format!("LLM execution failed: {}", e),
       })?;
 
+    crate::cost::record(&self.model, |p| match &response.usage {
+      Some(u) => p.cost_for_call(u.prompt_tokens, u.completion_tokens),
+      None => 0.0,
+    })?;
+
     tracing::debug!("ImageUnderstandNode execution successful");
     let mut outputs = HashMap::new();
     outputs.insert(
       self.output_key.clone(),
-      FlowValue::Json(Value::String(response)),
+      FlowValue::Json(Value::String(response.content)),
     );
 
     Ok(outputs)

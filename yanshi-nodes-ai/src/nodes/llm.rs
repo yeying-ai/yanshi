@@ -40,7 +40,8 @@ impl AsyncNode for LlmNode {
         message: format!("Failed to initialize Yanshi LLM service: {}", e),
       })?;
 
-    let mut request = Yanshi::model(model.unwrap_or_default()).prompt(prompt);
+    let model_name = model.unwrap_or_default().to_string();
+    let mut request = Yanshi::model(&model_name).prompt(prompt);
 
     if let Some(sys) = system {
       request = request.system(sys);
@@ -80,6 +81,19 @@ impl AsyncNode for LlmNode {
         message: format!("LLM execution failed: {}", e),
       })?;
     tracing::debug!("LLM response received");
+
+    let image_count = response
+      .media
+      .iter()
+      .filter(|block| matches!(block, ContentBlock::Image { .. }))
+      .count();
+    crate::cost::record(&model_name, |p| {
+      let token_cost = match &response.usage {
+        Some(u) => p.cost_for_call(u.prompt_tokens, u.completion_tokens),
+        None => 0.0,
+      };
+      token_cost + p.cost_for_images(image_count)
+    })?;
 
     let output = match schema {
       Some(_) => parse_json_reply(&response.content)?,

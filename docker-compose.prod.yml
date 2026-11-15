@@ -35,7 +35,7 @@ services:
       YANSHI_TRACE_DIR: "/data/traces"
       YANSHI_HARNESS_MEMORY_DB: "/data/harness_memory.sqlite"
       YANSHI_PRICING_TABLE: ${YANSHI_PRICING_TABLE:-/etc/yanshi/pricing.yml}
-      YANSHI_GENERATE_MODEL: ${YANSHI_GENERATE_MODEL:-deepseek-chat}
+      YANSHI_GENERATE_MODEL: ${YANSHI_GENERATE_MODEL:-deepseek-v4-flash}
       YANSHI_GATEWAY_PATH_ROOTS: "/data"
       YANSHI_GATEWAY_HOST_NODE_TYPES: ${YANSHI_GATEWAY_HOST_NODE_TYPES:-file,agent,skill_agent,multi_agent,shell}
       YANSHI_GATEWAY_ALLOWED_COMMANDS: ${YANSHI_GATEWAY_ALLOWED_COMMANDS:-ffmpeg,ffprobe,typst,pandoc}

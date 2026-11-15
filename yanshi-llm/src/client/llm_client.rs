@@ -548,13 +548,12 @@ impl LLMClient {
   fn build_request(&self, model_config: &ModelConfig, streaming: bool) -> Result<ProviderRequest> {
     let mut params = HashMap::new();
 
-    // Apply model defaults
-    if let Some(temp) = model_config.temperature.or(self.temperature) {
-      let num =
-        serde_json::Number::from_f64(temp as f64).ok_or_else(|| LLMError::ConfigurationError {
-          message: format!("Invalid temperature value: {}", temp),
-        })?;
-      params.insert("temperature".to_string(), Value::Number(num));
+    // Apply caller overrides first, falling back to model defaults.
+    if let Some(temp) = self.temperature.or(model_config.temperature) {
+      params.insert(
+        "temperature".to_string(),
+        f32_to_json_number(temp, "temperature")?,
+      );
     }
 
     if let Some(tokens) = self.max_tokens.or(model_config.max_tokens) {
@@ -564,21 +563,15 @@ impl LLMClient {
       );
     }
 
-    if let Some(top_p) = model_config.top_p.or(self.top_p) {
-      let num =
-        serde_json::Number::from_f64(top_p as f64).ok_or_else(|| LLMError::ConfigurationError {
-          message: format!("Invalid top_p value: {}", top_p),
-        })?;
-      params.insert("top_p".to_string(), Value::Number(num));
+    if let Some(top_p) = self.top_p.or(model_config.top_p) {
+      params.insert("top_p".to_string(), f32_to_json_number(top_p, "top_p")?);
     }
 
-    if let Some(freq_penalty) = self.frequency_penalty {
-      let num = serde_json::Number::from_f64(freq_penalty as f64).ok_or_else(|| {
-        LLMError::ConfigurationError {
-          message: format!("Invalid frequency_penalty value: {}", freq_penalty),
-        }
-      })?;
-      params.insert("frequency_penalty".to_string(), Value::Number(num));
+    if let Some(freq_penalty) = self.frequency_penalty.or(model_config.frequency_penalty) {
+      params.insert(
+        "frequency_penalty".to_string(),
+        f32_to_json_number(freq_penalty, "frequency_penalty")?,
+      );
     }
 
     if let Some(stop_sequences) = &self.stop {
@@ -956,6 +949,27 @@ impl LLMClientBuilder {
   }
 }
 
+/// Convert a finite `f32` sampling parameter into a `serde_json::Value::Number`
+/// via its shortest decimal round-trip string (`0.7_f32` -> `"0.7"` -> `0.7_f64`)
+/// rather than `val as f64` (`0.699999988079071`), which strict OpenAI-compatible
+/// providers such as Zhipu GLM reject (`error 1210: temperature decimals > 2`).
+fn f32_to_json_number(val: f32, field: &str) -> Result<Value> {
+  if !val.is_finite() {
+    return Err(LLMError::ConfigurationError {
+      message: format!("Invalid {field} value: {val}"),
+    });
+  }
+  let decimal = val
+    .to_string()
+    .parse::<f64>()
+    .ok()
+    .and_then(serde_json::Number::from_f64)
+    .ok_or_else(|| LLMError::ConfigurationError {
+      message: format!("Invalid {field} value: {val}"),
+    })?;
+  Ok(Value::Number(decimal))
+}
+
 #[cfg(test)]
 mod retry_transient_tests {
   use super::*;
@@ -1195,6 +1209,51 @@ mod retry_transient_tests {
     assert!(
       matches!(futures::poll!(&mut call), std::task::Poll::Ready(Ok(()))),
       "the computed backoff must not exceed the cap"
+    );
+  }
+
+  #[test]
+  fn temperature_serializes_without_f32_binary_expansion_and_honors_caller_override() {
+    let config = crate::config::LLMConfig::from_yaml(
+      r#"
+models:
+  glm-4.5-flash:
+    vendor: glm
+    type: chat
+    temperature: 0.7
+    top_p: 0.9
+"#,
+    )
+    .unwrap();
+    let model_cfg = config.get_model("glm-4.5-flash").unwrap();
+
+    // Default model temperature (0.7_f32) must serialize to exact JSON "0.7"
+    // rather than "0.699999988079071" (which Zhipu GLM rejects with error 1210).
+    let default_client = LLMClientBuilder::new("glm-4.5-flash").prompt("ping").client;
+    let default_req = default_client.build_request(model_cfg, false).unwrap();
+    assert_eq!(
+      serde_json::to_string(&default_req.parameters["temperature"]).unwrap(),
+      "0.7"
+    );
+    assert_eq!(
+      serde_json::to_string(&default_req.parameters["top_p"]).unwrap(),
+      "0.9"
+    );
+
+    // Caller override must take precedence over model default.
+    let override_client = LLMClientBuilder::new("glm-4.5-flash")
+      .prompt("ping")
+      .temperature(0.25)
+      .top_p(0.8)
+      .client;
+    let override_req = override_client.build_request(model_cfg, false).unwrap();
+    assert_eq!(
+      serde_json::to_string(&override_req.parameters["temperature"]).unwrap(),
+      "0.25"
+    );
+    assert_eq!(
+      serde_json::to_string(&override_req.parameters["top_p"]).unwrap(),
+      "0.8"
     );
   }
 }

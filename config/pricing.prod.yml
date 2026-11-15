@@ -48,6 +48,15 @@ models:
   glm-4.5:
     input_per_1k: 0.00055
     output_per_1k: 0.00220
+  glm-4.5-flash:
+    input_per_1k: 0.00001
+    output_per_1k: 0.00001
+  glm-4.5v:
+    input_per_1k: 0.00035
+    output_per_1k: 0.00140
+  glm-5.1:
+    input_per_1k: 0.00070
+    output_per_1k: 0.00280
 
   # OpenAI
   gpt-4o:
@@ -72,6 +81,9 @@ models:
     output_per_1k: 0.00400
 
   # Moonshot / Kimi
+  kimi-k2.5:
+    input_per_1k: 0.00050
+    output_per_1k: 0.00200
   kimi-k2.6:
     input_per_1k: 0.00060
     output_per_1k: 0.00250
