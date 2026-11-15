@@ -14,9 +14,9 @@ ARG PACKAGE=yanshi-server
 ARG BIN=yanshi-server
 ARG CARGO_BUILD_JOBS=2
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/usr/local/cargo/git \
-  --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=yanshi-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+  --mount=type=cache,id=yanshi-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+  --mount=type=cache,id=yanshi-server-target,target=/app/target,sharing=locked \
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" cargo build --release -p "${PACKAGE}" --bin "${BIN}" \
   && mkdir -p /out \
   && cp "/app/target/release/${BIN}" /out/yanshi

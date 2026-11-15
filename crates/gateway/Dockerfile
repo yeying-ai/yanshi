@@ -11,8 +11,8 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 
 ARG CARGO_BUILD_JOBS=2
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=yanshi-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+  --mount=type=cache,id=yanshi-gateway-target,target=/src/target,sharing=locked \
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" cargo build --release \
   && mkdir -p /out \
   && cp /src/target/release/yanshi-gateway /out/yanshi-gateway

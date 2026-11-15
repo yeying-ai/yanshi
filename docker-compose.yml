@@ -50,7 +50,7 @@ services:
       # V3.1: bearer auth for /v1/* routes. Replace placeholder in production!
       YANSHI_API_TOKEN: ${YANSHI_API_TOKEN:-local-dev-change-me}
     ports:
-      - "3000:3000"
+      - "${YANSHI_HOST_BIND:-0.0.0.0}:${YANSHI_HOST_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy

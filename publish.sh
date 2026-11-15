@@ -207,7 +207,13 @@ fi
 cd "$REMOTE_SRC_DIR"
 DOCKER_BUILDKIT=1 docker compose --env-file "$ENV_FILE" \
   -f docker-compose.yml -f docker-compose.prod.yml \
-  up -d --build --remove-orphans
+  build gateway
+DOCKER_BUILDKIT=1 docker compose --env-file "$ENV_FILE" \
+  -f docker-compose.yml -f docker-compose.prod.yml \
+  build yanshi-server
+DOCKER_BUILDKIT=1 docker compose --env-file "$ENV_FILE" \
+  -f docker-compose.yml -f docker-compose.prod.yml \
+  up -d --remove-orphans
 
 docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" | grep -E "NAMES|yanshi-"
 EOF

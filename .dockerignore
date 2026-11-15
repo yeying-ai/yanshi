@@ -16,3 +16,7 @@ TODOs.md
 **/.env
 **/.env.*
 !/.env.prod.example
+Dockerfile
+docker-compose*.yml
+publish.sh
+
