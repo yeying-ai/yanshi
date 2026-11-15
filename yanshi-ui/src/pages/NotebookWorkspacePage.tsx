@@ -435,9 +435,16 @@ export function NotebookWorkspacePage({
       try {
         const res = await apiFetch('/v1/notebooks', apiToken, {}, tenantId);
         if (!res.ok) {
+          if (res.status === 401) {
+            setErrorBanner(
+              '🔐 当前网关已启用访问鉴权（HTTP 401）：请在右上角「Token」输入框填入服务端 YANSHI_API_TOKEN。',
+            );
+            return;
+          }
           const text = await res.text();
           throw new Error(`加载笔记本列表失败 (${res.status}): ${text}`);
         }
+        setErrorBanner((prev) => (prev && prev.includes('HTTP 401') ? null : prev));
         const env = await parseJsonResponse(
           ListNotebooksEnvelopeSchema,
           res,

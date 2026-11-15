@@ -23,8 +23,8 @@ import {
 import { readStorage, writeStorage } from '../lib/storage';
 
 const harnessFormStarterPrompt = '请用一句话总结当前工作区。';
-const harnessFormStarterWorkspace = '/tmp';
-const harnessFormStarterModel = 'kimi-k2.6';
+const harnessFormStarterWorkspace = '/data/workspace';
+const harnessFormStarterModel = '';
 
 export function HarnessSubmitForm({
   apiToken,
@@ -104,8 +104,11 @@ export function HarnessSubmitForm({
         tenant_id: tenantId.trim() || 'default',
         profile,
         runtime_kind: runtimeKind,
-        model: model.trim() || harnessFormStarterModel,
       };
+      const modelTrimmed = model.trim();
+      if (modelTrimmed) {
+        body.model = modelTrimmed;
+      }
       const skillTrimmed = skillName.trim();
       if (skillTrimmed) {
         body.skill_name = skillTrimmed;
@@ -226,12 +229,12 @@ export function HarnessSubmitForm({
 
         <section className="create-row">
           <label className="harness-grow">
-            <span>Model</span>
+            <span>Model (optional)</span>
             <input
               data-testid="harness-new-model"
               value={model}
               onChange={(event) => setModel(event.target.value)}
-              placeholder="kimi-k2.6"
+              placeholder="留空使用服务端默认模型（如 deepseek-chat）"
             />
           </label>
           <label className="harness-grow">
@@ -249,7 +252,7 @@ export function HarnessSubmitForm({
               data-testid="harness-new-workspace"
               value={workspaceRoot}
               onChange={(event) => setWorkspaceRoot(event.target.value)}
-              placeholder="/path/to/workspace"
+              placeholder="/data/workspace (server) or /tmp (local)"
             />
           </label>
         </section>

@@ -397,6 +397,7 @@ export function WorkflowStudioPage({
     readStorage(apiBaseUrlKey, ''),
   );
   const [showConnPopover, setShowConnPopover] = useState<boolean>(false);
+  const [authRequired, setAuthRequired] = useState<boolean>(false);
   const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
   const [showYamlEditor, setShowYamlEditor] = useState<boolean>(true);
   const [yamlModalOpen, setYamlModalOpen] = useState<boolean>(false);
@@ -531,6 +532,9 @@ export function WorkflowStudioPage({
           tenantId,
         );
         if (!res.ok || cancelled) {
+          if (res.status === 401 && !cancelled) {
+            setAuthRequired(true);
+          }
           return;
         }
         const parsed = await parseJsonResponse(
@@ -539,6 +543,7 @@ export function WorkflowStudioPage({
           'POST /v1/workflows/inspect',
         );
         if (!cancelled) {
+          setAuthRequired(false);
           setInspected(parsed);
           setInspectSource('server');
         }
@@ -561,7 +566,13 @@ export function WorkflowStudioPage({
         {},
         tenantId,
       );
-      if (!res.ok) return;
+      if (!res.ok) {
+        if (res.status === 401) {
+          setAuthRequired(true);
+        }
+        return;
+      }
+      setAuthRequired(false);
       const list = await parseJsonResponse(ListRunsEnvelopeSchema, res, 'GET /v1/runs');
       setRecentRuns(list.runs);
     } catch {
@@ -1039,9 +1050,15 @@ export function WorkflowStudioPage({
         tenantId,
       );
       if (!res.ok) {
+        if (res.status === 401) {
+          setAuthRequired(true);
+          setShowConnPopover(true);
+          throw new Error('启动运行失败 (HTTP 401)：请在右上角弹出的「网关与凭据配置」中填写 Bearer Token');
+        }
         const detail = await res.text().catch(() => '');
         throw new Error(`启动运行失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 180)}` : ''}`);
       }
+      setAuthRequired(false);
       const created = await parseJsonResponse(
         CreateRunEnvelopeSchema,
         res,
@@ -1438,13 +1455,14 @@ export function WorkflowStudioPage({
   };
 
   const activeBase = getApiBaseUrl();
-  const connectionBadge = customBaseUrl.trim()
+  const baseBadge = customBaseUrl.trim()
     ? `远端网关 · ${customBaseUrl.trim().replace(/^https?:\/\//, '')}`
     : typeof window !== 'undefined' && window.__YANSHI_API_BASE__
       ? '桌面内置引擎'
       : isTauriRuntime()
         ? '移动端 · 待配网关'
         : 'Web 同源网关';
+  const connectionBadge = authRequired ? `${baseBadge} · 待鉴权` : baseBadge;
 
   const renderTypedInputsForm = (compact: boolean) => {
     if (inspected.inputs.length === 0) {
@@ -1578,7 +1596,11 @@ export function WorkflowStudioPage({
               aria-expanded={showConnPopover}
               onClick={() => setShowConnPopover((v) => !v)}
             >
-              <span className={`studio-conn-dot ${activeBase || !isTauriRuntime() ? 'on' : 'warn'}`} />
+              <span
+                className={`studio-conn-dot ${
+                  !authRequired && (activeBase || !isTauriRuntime()) ? 'on' : 'warn'
+                }`}
+              />
               {connectionBadge}
             </button>
 
@@ -1650,6 +1672,26 @@ export function WorkflowStudioPage({
           </nav>
         </div>
       </header>
+
+      {authRequired && (
+        <div
+          className="studio-alert studio-alert--warn"
+          role="alert"
+          data-testid="studio-auth-required-alert"
+        >
+          <span>
+            🔐 当前网关已启用访问鉴权（HTTP 401）：请填入服务端 <code>YANSHI_API_TOKEN</code>{' '}
+            以开启 Rust 引擎静态校验、运行历史与在线执行。
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowConnPopover(true)}
+            data-testid="studio-open-token-popover"
+          >
+            填写 Bearer Token
+          </button>
+        </div>
+      )}
 
       {bannerError && (
         <div className="studio-alert studio-alert--error" role="alert">
