@@ -1,0 +1,499 @@
+# Daily Workflow 3 — `backend_project_planner`: Multi-Turn HITL Chat Clarification -> Backend Spec -> System Arch + Module Dep + UML Class + UML Sequence + Flowchart + DB ER + PostgreSQL DDL + Mindmap + PDF Spec.
+#
+#   yanshi workflow run examples/generators/backend_project_planner.yml \
+#     --input idea "设计一个支持高并发秒杀与多租户库存隔离的订单履约后端系统" --output-dir out
+name: backend_project_planner
+description: "通过多轮交互问答深入澄清用户想法（着重后端架构），自动生成系统架构图、模块依赖图、UML 类图与时序图套图、业务流程图、数据库 ER 图、PostgreSQL DDL、思维导图与详细设计说明书 PDF"
+
+inputs:
+  idea:
+    description: "初始项目想法或业务需求简述"
+    default: "设计一个支持高并发秒杀、多租户库存隔离与异步履约对账的电商订单后端系统"
+  tech_preference:
+    description: "后端技术栈偏好（如 Rust Axum + PostgreSQL + Redis + Kafka，留空则由架构师结合沟通推荐）"
+    default: "Rust (Axum + Tokio + SQLx) + PostgreSQL + Redis + 消息队列"
+  interactive:
+    description: "是否开启多轮交互式澄清聊天（true 时在工作台弹出问答卡片向用户追问细节；false 时按行业最佳实践自动决策）"
+    default: true
+  max_questions:
+    description: "多轮交互最多追问轮数（1-5）"
+    default: 2
+  export_pdf:
+    description: "同时导出完整《后端架构与详细设计说明书》PDF"
+    default: true
+
+nodes:
+  - id: ref_query
+    type: template
+    parameters:
+      template: "{{ idea }} 后端系统架构 领域模型 高并发一致性 数据库设计 最佳实践"
+
+  - id: industry_ref
+    type: web_search
+    dependencies: ["ref_query"]
+    input_mapping:
+      query: "{{ nodes.ref_query.outputs.output }}"
+    parameters:
+      max_results: 5
+
+  - id: agent_brief
+    type: template
+    dependencies: ["industry_ref"]
+    input_mapping:
+      refs: "{{ nodes.industry_ref.outputs.markdown }}"
+    parameters:
+      template: |
+        用户的初始项目构想如下：
+        「{{ idea }}」
+        技术栈倾向：{{ tech_preference }}
+
+        你的任务是以首席后端系统架构师的身份，围绕后端核心边界（并发规模与读写比、核心业务闭环与一致性保障、多租户/鉴权隔离、关键外部集成或数据存储诉求）与用户充分对齐需求：
+        - 如开启了交互模式且初始信息存在关键架构分叉点，请调用 `ask_user` 工具向用户提出聚焦、具体、易回答的澄清问题（每次合并提出最关键的 2-3 个子问题并提供推荐默认选项，最多不超过 {{ max_questions }} 轮，切勿反复追问琐碎细节）；
+        - 在获得用户答复（或无需继续追问）后，综合行业参考实践，输出一份详尽、落地的《后端需求澄清与总体技术规格纪要》，涵盖：业务目标与非功能指标（QPS/延迟/可用性）、领域边界与核心聚合、服务/模块划分、核心 API 与异步事件流、状态机与异常补偿、数据库核心表规划。
+
+        行业架构参考资料：
+        {{ refs | truncate(length=10000) }}
+
+  - id: clarify_requirements
+    type: agent
+    dependencies: ["agent_brief"]
+    input_mapping:
+      prompt: "{{ nodes.agent_brief.outputs.output }}"
+    parameters:
+      system: "你是资深后端系统架构师，擅长通过精炼的多轮沟通把模糊想法转化为严密的后端工程规格（高内聚低耦合、数据一致性、可观测性与演进路径）。"
+      tools: ["web_search"]
+      max_steps: 8
+
+  - id: spec_prompt
+    type: template
+    dependencies: ["clarify_requirements"]
+    input_mapping:
+      clarified: "{{ nodes.clarify_requirements.outputs.output }}"
+      qa_log: "{{ nodes.clarify_requirements.outputs.qa_history }}"
+    parameters:
+      template: |
+        请基于以下与用户充分沟通确认后的《后端需求澄清与总体技术规格纪要》，输出结构化的后端工程设计蓝图 JSON，以便下游并行编译全套工程图谱与数据库脚本。
+
+        要求（着重后端深度）：
+        1. `project_name`、`tagline`、`architecture_overview`（详述网关接入、业务服务层、缓存/消息中间件、存储与可观测性设计）；
+        2. `non_functional_targets`：并发吞吐、P99 延迟、一致性级别、高可用与容灾指标；
+        3. `backend_modules`：后端模块清单（`name`、`layer`、`responsibility`、`dependencies`、`key_apis`）；
+        4. `postgresql_ddl`：可直接执行的生产级 PostgreSQL 建表 SQL（含主键、外键引用、唯一约束、复合索引、状态枚举检查与关键字段注释）；
+        5. `mindmap_tree`：项目全景思维导图树（根节点 `label` 为项目名，3 层以内分支涵盖：业务域划分、后端技术架构、核心接口与流程、数据库与缓存、稳定性与运维）；
+        6. 为 6 张 D2 工程图分别提供精准、无歧义的结构描述：
+           - `arch_d2_brief`：系统总体架构图（网关、微服务/核心进程、缓存、MQ、DB、可观测体系分层容器与链路）；
+           - `module_d2_brief`：后端模块依赖图（各业务模块/Crate/Package 之间的单向依赖拓扑，严禁循环依赖）；
+           - `uml_class_d2_brief`：核心领域模型与服务接口 UML 类图（明确 4-6 个核心聚合根/实体/DomainService 的字段类型、方法签名与关联关系，使用 D2 `shape: class`）；
+           - `uml_seq_d2_brief`：核心写路径业务链路 UML 时序图（如客户端 -> API 网关 -> 鉴权 -> 应用服务 -> Redis/DB/MQ 异步投递与回调，使用 D2 `shape: sequence_diagram`）；
+           - `flowchart_d2_brief`：核心业务状态流转与异常幂等补偿流程图（含判定分支、成功闭环与失败回滚/死信重试分支）；
+           - `er_d2_brief`：数据库物理表 ER 关系图（4-7 张核心业务表的主键 `primary_key`、外键 `foreign_key`、唯一约束 `unique` 及表间 `table_a.col -> table_b.id` 关系，与 `postgresql_ddl` 完全一致，使用 D2 `shape: sql_table`）。
+
+        需求沟通问答记录：
+        {{ qa_log | json_encode() }}
+
+        确认后的架构纪要：
+        {{ clarified }}
+
+  - id: structure_spec
+    type: llm
+    dependencies: ["spec_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.spec_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 16384
+      system: "你是严谨的首席后端架构师，仅输出符合 JSON Schema 的完整工程设计 JSON。"
+      json_schema:
+        type: object
+        required:
+          - project_name
+          - tagline
+          - architecture_overview
+          - non_functional_targets
+          - backend_modules
+          - api_endpoints
+          - postgresql_ddl
+          - mindmap_tree
+          - arch_d2_brief
+          - module_d2_brief
+          - uml_class_d2_brief
+          - uml_seq_d2_brief
+          - flowchart_d2_brief
+          - er_d2_brief
+        properties:
+          project_name: { type: string }
+          tagline: { type: string }
+          architecture_overview: { type: string }
+          non_functional_targets:
+            type: array
+            items: { type: string }
+          backend_modules:
+            type: array
+            minItems: 2
+            items:
+              type: object
+              required: [name, layer, responsibility, dependencies, key_apis]
+              properties:
+                name: { type: string }
+                layer: { type: string }
+                responsibility: { type: string }
+                dependencies:
+                  type: array
+                  items: { type: string }
+                key_apis:
+                  type: array
+                  items: { type: string }
+          api_endpoints:
+            type: array
+            items:
+              type: object
+              required: [method, path, summary, idempotency_and_auth]
+              properties:
+                method: { type: string }
+                path: { type: string }
+                summary: { type: string }
+                idempotency_and_auth: { type: string }
+          postgresql_ddl: { type: string }
+          mindmap_tree:
+            type: object
+            required: [label, children]
+            properties:
+              label: { type: string }
+              children: { type: array }
+          arch_d2_brief: { type: string }
+          module_d2_brief: { type: string }
+          uml_class_d2_brief: { type: string }
+          uml_seq_d2_brief: { type: string }
+          flowchart_d2_brief: { type: string }
+          er_d2_brief: { type: string }
+
+  - id: arch_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        绘制项目「{{ spec.project_name }}」的后端系统总体架构图（D2 嵌套容器分层，direction: down，清晰区分接入网关层、核心领域服务层、异步消息与缓存层、持久化存储与可观测层）：
+        {{ spec.arch_d2_brief }}
+
+  - id: arch_diagram
+    type: figure
+    dependencies: ["arch_desc"]
+    input_mapping:
+      description: "{{ nodes.arch_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: module_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        绘制项目「{{ spec.project_name }}」的后端模块依赖拓扑图（D2 有向无环图，direction: right，展示各层模块及单向依赖边）：
+        {{ spec.module_d2_brief }}
+
+  - id: module_diagram
+    type: figure
+    dependencies: ["module_desc"]
+    input_mapping:
+      description: "{{ nodes.module_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: uml_class_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        使用 D2 的 `shape: class` 语法绘制项目「{{ spec.project_name }}」的核心领域聚合与后端服务 UML 类图（字段类型与方法签名必须用双引号包裹键值，并用有向边标注聚合/组合/调用关系）：
+        {{ spec.uml_class_d2_brief }}
+
+  - id: uml_class_diagram
+    type: figure
+    dependencies: ["uml_class_desc"]
+    input_mapping:
+      description: "{{ nodes.uml_class_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: uml_seq_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        使用 D2 的 `shape: sequence_diagram` 语法绘制项目「{{ spec.project_name }}」的核心后端接口与异步事务 UML 时序图（先声明各参与者角色，再按时间顺序编写请求、校验、落库、缓存/消息投递与响应消息）：
+        {{ spec.uml_seq_d2_brief }}
+
+  - id: uml_sequence_diagram
+    type: figure
+    dependencies: ["uml_seq_desc"]
+    input_mapping:
+      description: "{{ nodes.uml_seq_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: flowchart_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        使用 D2 绘制项目「{{ spec.project_name }}」的核心业务状态流转与异常幂等补偿流程图（direction: down，判定节点使用 `shape: diamond`，起止节点使用 `shape: oval`，清晰标出成功主链路与超时/库存不足/对账补偿分支）：
+        {{ spec.flowchart_d2_brief }}
+
+  - id: business_flowchart
+    type: figure
+    dependencies: ["flowchart_desc"]
+    input_mapping:
+      description: "{{ nodes.flowchart_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: er_desc
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      template: |
+        使用 D2 的 `shape: sql_table` 语法绘制项目「{{ spec.project_name }}」的数据库物理表 ER 关系图（每张表列出真实字段与类型，标注 `{constraint: primary_key}`、`{constraint: foreign_key}`、`{constraint: unique}`，并用 `child_table.fk_col -> parent_table.id` 绘制外键关联连线）：
+        {{ spec.er_d2_brief }}
+
+  - id: db_er_diagram
+    type: figure
+    dependencies: ["er_desc"]
+    input_mapping:
+      description: "{{ nodes.er_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: mindmap_extract
+    type: template
+    dependencies: ["structure_spec"]
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+    parameters:
+      output_format: json
+      template: "{{ spec.mindmap_tree | json_encode() }}"
+
+  - id: mindmap_svg
+    type: render_mindmap
+    dependencies: ["mindmap_extract"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_extract.outputs.output }}"
+
+  - id: mindmap_png
+    type: render_svg
+    dependencies: ["mindmap_svg"]
+    input_mapping:
+      svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+    parameters:
+      width: 1600
+
+  - id: mindmap_html
+    type: render_mindmap
+    dependencies: ["mindmap_extract"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_extract.outputs.output }}"
+    parameters:
+      format: html
+
+  - id: assemble_spec_doc
+    type: template
+    dependencies:
+      - clarify_requirements
+      - structure_spec
+      - arch_diagram
+      - module_diagram
+      - uml_class_diagram
+      - uml_sequence_diagram
+      - business_flowchart
+      - db_er_diagram
+      - mindmap_png
+    input_mapping:
+      qa_log: "{{ nodes.clarify_requirements.outputs.qa_history }}"
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+      arch_png: "{{ nodes.arch_diagram.outputs.arch_diagram_png }}"
+      mod_png: "{{ nodes.module_diagram.outputs.module_diagram_png }}"
+      uml_cls_png: "{{ nodes.uml_class_diagram.outputs.uml_class_diagram_png }}"
+      uml_seq_png: "{{ nodes.uml_sequence_diagram.outputs.uml_sequence_diagram_png }}"
+      flow_png: "{{ nodes.business_flowchart.outputs.business_flowchart_png }}"
+      er_png: "{{ nodes.db_er_diagram.outputs.db_er_diagram_png }}"
+      mm_png: "{{ nodes.mindmap_png.outputs.mindmap_png_output }}"
+    parameters:
+      template: |
+        # {{ spec.project_name }} — 后端架构与全套工程图设计说明书
+
+        > **项目定位**：{{ spec.tagline }}
+        > **推荐技术栈**：{{ tech_preference }}
+
+        {% if qa_log and qa_log | length > 0 %}
+        ## 1. 需求澄清与架构决策记录
+
+        {% for item in qa_log %}
+        - **架构师追问 {{ item.round }}**：{{ item.question }}
+          - **确认决策**：{{ item.answer }}
+        {% endfor %}
+        {% endif %}
+
+        ## 2. 项目全景思维导图
+
+        ![项目全景思维导图]({{ mm_png }})
+
+        ## 3. 总体后端系统架构设计
+
+        {{ spec.architecture_overview }}
+
+        ### 非功能与稳定性指标
+        {% for t in spec.non_functional_targets %}- {{ t }}
+        {% endfor %}
+
+        ![后端系统总体架构图]({{ arch_png }})
+
+        ## 4. 后端模块划分与依赖拓扑
+
+        ![后端模块依赖图]({{ mod_png }})
+
+        | 模块名称 | 所属分层 | 核心职责 | 依赖模块 | 代表接口/组件 |
+        | --- | --- | --- | --- | --- |
+        {% for m in spec.backend_modules %}| `{{ m.name }}` | {{ m.layer }} | {{ m.responsibility }} | {% if m.dependencies | length > 0 %}{{ m.dependencies | join(sep=", ") }}{% else %}—{% endif %} | {{ m.key_apis | join(sep="; ") }} |
+        {% endfor %}
+
+        ## 5. 领域模型与后端接口设计（UML 套图）
+
+        ### 5.1 核心领域聚合与服务 UML 类图
+
+        ![UML 类图]({{ uml_cls_png }})
+
+        ### 5.2 核心业务链路 UML 时序图
+
+        ![UML 时序图]({{ uml_seq_png }})
+
+        ### 5.3 核心后端 REST / RPC 接口契约
+
+        | 方法 | 路径 | 功能说明 | 鉴权与幂等保障 |
+        | --- | --- | --- | --- |
+        {% for api in spec.api_endpoints %}| `{{ api.method }}` | `{{ api.path }}` | {{ api.summary }} | {{ api.idempotency_and_auth }} |
+        {% endfor %}
+
+        ## 6. 核心业务状态流转与异常补偿流程图
+
+        ![业务与状态补偿流程图]({{ flow_png }})
+
+        ## 7. 数据库 ER 图与生产级 PostgreSQL DDL
+
+        ### 7.1 数据库物理表 ER 关系图
+
+        ![数据库 ER 关系图]({{ er_png }})
+
+        ### 7.2 PostgreSQL 建表与索引脚本
+
+        ```sql
+        {{ spec.postgresql_ddl }}
+        ```
+
+  - id: spec_md
+    type: render_markdown
+    dependencies: ["assemble_spec_doc"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_spec_doc.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: spec_html
+    type: render_markdown
+    dependencies: ["assemble_spec_doc"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_spec_doc.outputs.output }}"
+
+  - id: pdf_flag
+    type: template
+    parameters:
+      output_format: json
+      template: '{"want_pdf": {{ export_pdf }}}'
+
+  - id: spec_pdf
+    type: render_document
+    dependencies: ["assemble_spec_doc", "pdf_flag"]
+    run_if: "{{ nodes.pdf_flag.outputs.want_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.assemble_spec_doc.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies:
+      - structure_spec
+      - arch_diagram
+      - module_diagram
+      - uml_class_diagram
+      - uml_sequence_diagram
+      - business_flowchart
+      - db_er_diagram
+      - mindmap_svg
+      - mindmap_html
+      - spec_md
+      - spec_html
+      - spec_pdf
+    input_mapping:
+      spec: "{{ nodes.structure_spec.outputs.output }}"
+      arch_svg: "{{ nodes.arch_diagram.outputs.arch_diagram_svg }}"
+      mod_svg: "{{ nodes.module_diagram.outputs.module_diagram_svg }}"
+      cls_svg: "{{ nodes.uml_class_diagram.outputs.uml_class_diagram_svg }}"
+      seq_svg: "{{ nodes.uml_sequence_diagram.outputs.uml_sequence_diagram_svg }}"
+      flow_svg: "{{ nodes.business_flowchart.outputs.business_flowchart_svg }}"
+      er_svg: "{{ nodes.db_er_diagram.outputs.db_er_diagram_svg }}"
+      mm_svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+      mm_html: "{{ nodes.mindmap_html.outputs.mindmap_html_output }}"
+      md: "{{ nodes.spec_md.outputs.spec_md_output }}"
+      html: "{{ nodes.spec_html.outputs.spec_html_output }}"
+      pdf: "{{ nodes.spec_pdf.outputs.spec_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "backend_project_plan",
+          "title": {{ spec.project_name | json_encode() }},
+          "content": {{ spec | json_encode() }},
+          "citations": [],
+          "files": [
+            {"node_id": "arch_diagram", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "module_diagram", "name": {{ mod_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "uml_class_diagram", "name": {{ cls_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "uml_sequence_diagram", "name": {{ seq_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "business_flowchart", "name": {{ flow_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "db_er_diagram", "name": {{ er_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
+            {"node_id": "spec_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "spec_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "spec_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

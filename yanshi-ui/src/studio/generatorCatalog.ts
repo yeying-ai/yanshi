@@ -1,13 +1,18 @@
 import audioOverviewYaml from '../../../examples/generators/audio_overview.yml?raw';
+import backendProjectPlannerYaml from '../../../examples/generators/backend_project_planner.yml?raw';
 import circuitDiagramYaml from '../../../examples/generators/circuit_diagram.yml?raw';
 import flashcardsYaml from '../../../examples/generators/flashcards.yml?raw';
+import illustratedSlidesYaml from '../../../examples/generators/illustrated_slides.yml?raw';
 import infographicYaml from '../../../examples/generators/infographic.yml?raw';
 import mindmapYaml from '../../../examples/generators/mindmap.yml?raw';
+import paperReaderYaml from '../../../examples/generators/paper_reader.yml?raw';
 import quizYaml from '../../../examples/generators/quiz.yml?raw';
+import repoArchitectureYaml from '../../../examples/generators/repo_architecture.yml?raw';
 import reportYaml from '../../../examples/generators/report.yml?raw';
 import slidesYaml from '../../../examples/generators/slides.yml?raw';
 import techSlidesVideoYaml from '../../../examples/generators/tech_slides_video.yml?raw';
 import videoOverviewYaml from '../../../examples/generators/video_overview.yml?raw';
+import videoSummarizerYaml from '../../../examples/generators/video_summarizer.yml?raw';
 
 export type PresetCategory =
   | '课件与视频'
@@ -51,6 +56,46 @@ export function personalTemplateYamlKey(id: string): string {
 export const TECH_SLIDES_VIDEO_RAW_YAML = techSlidesVideoYaml;
 
 export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
+  {
+    id: 'illustrated_slides',
+    title: '主题调研与精美配图 PPT (Illustrated Slides)',
+    subtitle: '联网检索 → 规划大纲 → 按讲解风格填充 → AI 定制插图 + D2 架构图 → HTML / PPTX / PDF',
+    badge: '日常生产力',
+    category: '课件与视频',
+    yaml: illustratedSlidesYaml,
+  },
+  {
+    id: 'repo_architecture',
+    title: '源码 / GitHub 仓库架构与依赖图 (Repo Architecture)',
+    subtitle: '自动扫描代码树、Manifest 与依赖边 → D2 系统分层架构图 + 模块依赖 DAG 图 + 深度报告',
+    badge: '日常生产力',
+    category: '导图与工程图',
+    yaml: repoArchitectureYaml,
+  },
+  {
+    id: 'backend_project_planner',
+    title: '多轮对话后端项目全套规划 (Backend Planner)',
+    subtitle: '多轮交互澄清需求 → 系统架构图 / 模块图 / UML 类图与时序图 / 流程图 / ER 图 + PG DDL + 导图',
+    badge: '日常生产力',
+    category: '导图与工程图',
+    yaml: backendProjectPlannerYaml,
+  },
+  {
+    id: 'paper_reader',
+    title: '学术论文双语精读与实验数据提取 (Paper Reader)',
+    subtitle: '支持 PDF 文件或 arXiv 链接 → 双语精译 + 核心思想论点 + 实验数据表格 XLSX/CSV + 导图 + PDF',
+    badge: '日常生产力',
+    category: '研究报告与信息图',
+    yaml: paperReaderYaml,
+  },
+  {
+    id: 'video_summarizer',
+    title: '视频观点提炼与字幕导图生成 (Video Summarizer)',
+    subtitle: '支持视频 URL 或本地文件 → 原生字幕直提或 FFmpeg+ASR 生成 .srt → 时间轴观点精要 + 思维导图',
+    badge: '日常生产力',
+    category: '课件与视频',
+    yaml: videoSummarizerYaml,
+  },
   {
     id: 'tech_slides_video',
     title: 'PPT 级技术精讲视频生成',

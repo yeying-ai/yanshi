@@ -425,4 +425,56 @@ mod tests {
         .is_err()
     );
   }
+
+  #[test]
+  fn all_official_generator_workflows_validate_build_and_pass_default_gateway_policy() {
+    let generators_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .expect("workspace root")
+      .join("examples/generators");
+    let daily_suite = [
+      "illustrated_slides.yml",
+      "repo_architecture.yml",
+      "backend_project_planner.yml",
+      "paper_reader.yml",
+      "video_summarizer.yml",
+    ];
+    let policy = GatewayPolicy::default();
+    let mut count = 0usize;
+
+    for entry in std::fs::read_dir(&generators_dir).expect("read examples/generators") {
+      let path = entry.expect("dir entry").path();
+      if path.extension().and_then(|s| s.to_str()) != Some("yml") {
+        continue;
+      }
+      count += 1;
+      let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+      let yaml = std::fs::read_to_string(&path).expect("read generator yaml");
+      let def: FlowDefinitionV2 = serde_yaml::from_str(&yaml)
+        .unwrap_or_else(|e| panic!("{file_name} failed YAML parse: {e}"));
+      let report = yanshi_config::config::schema::validate_flow_definition(&def);
+      assert!(
+        report.issues.is_empty(),
+        "{file_name} has schema issues: {:?}",
+        report.issues
+      );
+      if daily_suite.contains(&file_name) {
+        assert!(
+          report.warnings.is_empty(),
+          "{file_name} has schema warnings: {:?}",
+          report.warnings
+        );
+      }
+      yanshi_config::executor::build_flow_from_definition(&def, Some("gemini-2.5-flash"))
+        .unwrap_or_else(|e| panic!("{file_name} failed to build runnable Flow: {e}"));
+      policy
+        .check_workflow(&def)
+        .unwrap_or_else(|e| panic!("{file_name} rejected by GatewayPolicy::default(): {e}"));
+    }
+
+    assert!(count >= 15, "expected at least 15 generator workflows");
+  }
 }

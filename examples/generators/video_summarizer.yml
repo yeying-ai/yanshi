@@ -1,0 +1,299 @@
+# Daily Workflow 5 — `video_summarizer`: Video URL / Local Video File -> Native Subtitles or FFmpeg + ASR (.srt) -> Key Viewpoints & Timestamped Chapters + Mindmap + SRT Subtitles + PDF/HTML Summary.
+#
+#   yanshi workflow run examples/generators/video_summarizer.yml \
+#     --input source "https://www.youtube.com/watch?v=..." --output-dir out
+name: video_summarizer
+description: "输入在线视频链接或上传本地音视频文件，优先提取内封/平台字幕并自动回退 FFmpeg 音轨抽取 + ASR 语音转写生成标准 .srt 字幕，提炼核心观点、时间戳章节纪要、思维导图与精要 PDF"
+
+inputs:
+  source:
+    description: "在线视频 URL（支持 yt-dlp 站点与直链 MP4/WebM）或本地视频/音频文件（支持 Studio 一键选择本地文件）"
+    default: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
+  subtitle_langs:
+    description: "优先抓取的原生字幕语言列表（逗号分隔）"
+    default: "zh-Hans,zh,en"
+  asr_model:
+    description: "无现成字幕时使用的语音识别模型（如 gemini-2.5-flash、glm-asr、whisper-1）"
+    default: "gemini-2.5-flash"
+  summary_lang:
+    description: "观点总结与双语润色字幕的目标语言"
+    default: "简体中文"
+  polish_bilingual_srt:
+    description: "是否额外生成一份按时间轴校对润色的目标语言 .srt 字幕文件"
+    default: true
+  export_pdf:
+    description: "同时导出排版精美的视频总结报告 PDF"
+    default: true
+
+nodes:
+  - id: ingest
+    type: video_ingest
+    parameters:
+      prefer_subtitles: true
+      max_duration_seconds: 5400
+
+  - id: asr_opts
+    type: template
+    parameters:
+      output_format: json
+      template: '{"asr_model": {{ asr_model | json_encode() }}, "polish_srt": {{ polish_bilingual_srt }}, "want_pdf": {{ export_pdf }}}'
+
+  - id: transcribe
+    type: asr
+    dependencies: ["ingest", "asr_opts"]
+    input_mapping:
+      model: "{{ nodes.asr_opts.outputs.asr_model }}"
+      audio_source: "{{ nodes.ingest.outputs.media_or_subtitles }}"
+    parameters:
+      response_format: srt
+
+  - id: summary_prompt
+    type: template
+    dependencies: ["ingest", "transcribe"]
+    input_mapping:
+      video_title: "{{ nodes.ingest.outputs.title }}"
+      duration_secs: "{{ nodes.ingest.outputs.duration_seconds }}"
+      raw_srt: "{{ nodes.transcribe.outputs.srt }}"
+      plain_text: "{{ nodes.transcribe.outputs.text }}"
+    parameters:
+      template: |
+        请针对视频《{{ video_title }}》（时长约 {{ duration_secs | default(value=0) | round }} 秒）的字幕与转写文稿，使用「{{ summary_lang }}」深度提炼结构化视频精要：
+        1. `video_title`：规范化后的视频标题；
+        2. `executive_summary`：200-350 字高密度全景摘要，交代核心主题、背景脉络与最终结论；
+        3. `key_viewpoints`：提炼 4-8 条核心观点，每条包含 `viewpoint`、`supporting_detail`（具体论据/案例/数据）与 `timestamp_hint`（对应出现的大致时间点，如 `01:25`）；
+        4. `chapters`：按时间推进划分的章节大纲（`time_range`、`heading`、`summary`）；
+        5. `memorable_quotes`：视频中最具启发性的金句或关键结论原话精译；
+        6. `actionable_takeaways`：面向听众的可执行启发与落地建议；
+        7. `mindmap_tree`：概括全片脉络的思维导图树（根节点为视频主题，3 层以内分支，标签简明凝练）。
+
+        带时间轴的原始 SRT 字幕：
+        {{ raw_srt | truncate(length=42000) }}
+
+        纯文本参考：
+        {{ plain_text | truncate(length=12000) }}
+
+  - id: summarize_video
+    type: llm
+    dependencies: ["summary_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.summary_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 10240
+      system: "你是专业的内容主编与知识萃取专家，严格依据视频真实字幕内容提炼观点与时间点，仅输出合法 JSON。"
+      json_schema:
+        type: object
+        required:
+          - video_title
+          - executive_summary
+          - key_viewpoints
+          - chapters
+          - actionable_takeaways
+          - mindmap_tree
+        properties:
+          video_title: { type: string }
+          executive_summary: { type: string }
+          key_viewpoints:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [viewpoint, supporting_detail, timestamp_hint]
+              properties:
+                viewpoint: { type: string }
+                supporting_detail: { type: string }
+                timestamp_hint: { type: string }
+          chapters:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [time_range, heading, summary]
+              properties:
+                time_range: { type: string }
+                heading: { type: string }
+                summary: { type: string }
+          memorable_quotes:
+            type: array
+            items: { type: string }
+          actionable_takeaways:
+            type: array
+            items: { type: string }
+          mindmap_tree:
+            type: object
+            required: [label, children]
+            properties:
+              label: { type: string }
+              children: { type: array }
+
+  - id: polish_srt_prompt
+    type: template
+    dependencies: ["transcribe", "asr_opts"]
+    run_if: "{{ nodes.asr_opts.outputs.polish_srt }}"
+    input_mapping:
+      raw_srt: "{{ nodes.transcribe.outputs.srt }}"
+    parameters:
+      template: |
+        请将以下原始 SRT 字幕校对、断句优化并翻译/润色为标准「{{ summary_lang }}」SRT 字幕格式（严格保持 `序号` + `HH:MM:SS,mmm --> HH:MM:SS,mmm` + `字幕正文` + 空行的标准 SubRip 格式，不要包裹代码块标记）：
+
+        {{ raw_srt | truncate(length=28000) }}
+
+  - id: polish_srt_llm
+    type: llm
+    dependencies: ["polish_srt_prompt", "asr_opts"]
+    run_if: "{{ nodes.asr_opts.outputs.polish_srt }}"
+    input_mapping:
+      prompt: "{{ nodes.polish_srt_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 8192
+      system: "你只输出严格合法的标准 SubRip (.srt) 字幕纯文本，绝不输出任何额外解释或 Markdown 代码围栏。"
+
+  - id: mindmap_tree_json
+    type: template
+    dependencies: ["summarize_video"]
+    input_mapping:
+      summary: "{{ nodes.summarize_video.outputs.output }}"
+    parameters:
+      output_format: json
+      template: "{{ summary.mindmap_tree | json_encode() }}"
+
+  - id: mindmap_svg
+    type: render_mindmap
+    dependencies: ["mindmap_tree_json"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+
+  - id: mindmap_png
+    type: render_svg
+    dependencies: ["mindmap_svg"]
+    input_mapping:
+      svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+    parameters:
+      width: 1600
+
+  - id: mindmap_html
+    type: render_mindmap
+    dependencies: ["mindmap_tree_json"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+    parameters:
+      format: html
+
+  - id: assemble_report
+    type: template
+    dependencies: ["ingest", "transcribe", "summarize_video", "mindmap_png", "polish_srt_llm"]
+    input_mapping:
+      has_native_subs: "{{ nodes.ingest.outputs.has_subtitles }}"
+      duration_secs: "{{ nodes.ingest.outputs.duration_seconds }}"
+      summary: "{{ nodes.summarize_video.outputs.output }}"
+      mm_png: "{{ nodes.mindmap_png.outputs.mindmap_png_output }}"
+      polished_srt: "{{ nodes.polish_srt_llm.outputs.output }}"
+      raw_srt: "{{ nodes.transcribe.outputs.srt }}"
+    parameters:
+      template: |
+        # {{ summary.video_title }} — 视频核心观点与字幕精要
+
+        > **时长**：约 {{ duration_secs | default(value=0) | round }} 秒 · **字幕来源**：{% if has_native_subs %}原生内嵌/平台字幕直提{% else %}FFmpeg 音轨抽取 + ASR 语音转写 (`{{ asr_model }}`){% endif %}
+
+        ## 1. 全片核心摘要
+
+        {{ summary.executive_summary }}
+
+        ## 2. 知识脉络思维导图
+
+        ![视频脉络思维导图]({{ mm_png }})
+
+        ## 3. 核心观点与论据提炼
+
+        | 时间点 | 核心观点 | 关键论据 / 细节支撑 |
+        | --- | --- | --- |
+        {% for v in summary.key_viewpoints %}| `{{ v.timestamp_hint }}` | **{{ v.viewpoint }}** | {{ v.supporting_detail }} |
+        {% endfor %}
+
+        ## 4. 时间轴章节纪要
+
+        {% for ch in summary.chapters %}
+        ### `{{ ch.time_range }}` {{ ch.heading }}
+
+        {{ ch.summary }}
+        {% endfor %}
+
+        {% if summary.memorable_quotes and summary.memorable_quotes | length > 0 %}
+        ## 5. 关键金句摘录
+
+        {% for q in summary.memorable_quotes %}> "{{ q }}"
+
+        {% endfor %}
+        {% endif %}
+
+        {% if summary.actionable_takeaways and summary.actionable_takeaways | length > 0 %}
+        ## 6. 实践启发与行动清单
+
+        {% for a in summary.actionable_takeaways %}- {{ a }}
+        {% endfor %}
+        {% endif %}
+
+        ## 7. 完整时间轴字幕（SRT）
+
+        ```srt
+        {% if polished_srt %}{{ polished_srt }}{% else %}{{ raw_srt }}{% endif %}
+        ```
+
+  - id: summary_md
+    type: render_markdown
+    dependencies: ["assemble_report"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: summary_html
+    type: render_markdown
+    dependencies: ["assemble_report"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+
+  - id: summary_pdf
+    type: render_document
+    dependencies: ["assemble_report", "asr_opts"]
+    run_if: "{{ nodes.asr_opts.outputs.want_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies:
+      - transcribe
+      - summarize_video
+      - mindmap_svg
+      - mindmap_html
+      - summary_md
+      - summary_html
+      - summary_pdf
+    input_mapping:
+      srt_path: "{{ nodes.transcribe.outputs.srt_file }}"
+      summary: "{{ nodes.summarize_video.outputs.output }}"
+      mm_svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+      mm_html: "{{ nodes.mindmap_html.outputs.mindmap_html_output }}"
+      md: "{{ nodes.summary_md.outputs.summary_md_output }}"
+      html: "{{ nodes.summary_html.outputs.summary_html_output }}"
+      pdf: "{{ nodes.summary_pdf.outputs.summary_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "video_summarizer",
+          "title": {{ summary.video_title | json_encode() }},
+          "content": {{ summary | json_encode() }},
+          "citations": [],
+          "files": [
+            {"node_id": "transcribe", "name": {{ srt_path | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "primary"},
+            {"node_id": "summary_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
+            {"node_id": "summary_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "summary_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

@@ -11,8 +11,13 @@ import {
 import { inspectYamlLocally, WORKFLOW_PRESETS } from './presets';
 
 describe('generatorCatalog & WORKFLOW_PRESETS', () => {
-  it('loads all 10 official Content Studio generator templates from examples/generators', () => {
+  it('loads all 15 official Content Studio generator templates from examples/generators', () => {
     const expectedIds = [
+      'illustrated_slides',
+      'repo_architecture',
+      'backend_project_planner',
+      'paper_reader',
+      'video_summarizer',
       'tech_slides_video',
       'slides',
       'video_overview',
@@ -38,12 +43,14 @@ describe('generatorCatalog & WORKFLOW_PRESETS', () => {
 
   it('exposes official generators plus zero-key instant demos in WORKFLOW_PRESETS', () => {
     const allIds = WORKFLOW_PRESETS.map((p) => p.id);
+    expect(allIds).toContain('illustrated_slides');
+    expect(allIds).toContain('backend_project_planner');
     expect(allIds).toContain('tech_slides_video');
     expect(allIds).toContain('report');
     expect(allIds).toContain('audio_overview');
     expect(allIds).toContain('instant_slide_render_demo');
     expect(allIds).toContain('instant_step_debug_demo');
-    expect(WORKFLOW_PRESETS.length).toBe(12);
+    expect(WORKFLOW_PRESETS.length).toBe(17);
   });
 
   it('builds safe .yml download filenames from workflow names', () => {

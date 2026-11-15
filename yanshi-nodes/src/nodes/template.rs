@@ -440,4 +440,54 @@ No tasks found.
       panic!("Expected string output");
     }
   }
+
+  #[test]
+  fn all_generator_template_nodes_compile_in_tera() {
+    fn check_nodes(tera: &mut Tera, prefix: &str, nodes: &[Value]) {
+      for node in nodes {
+        let id = node.get("id").and_then(Value::as_str).unwrap_or("?");
+        let ntype = node.get("type").and_then(Value::as_str).unwrap_or("");
+        if ntype == "template"
+          && let Some(tpl) = node
+            .get("parameters")
+            .and_then(|p| p.get("template"))
+            .and_then(Value::as_str)
+        {
+          let name = format!("{prefix}/{id}");
+          tera
+            .add_raw_template(&name, tpl)
+            .unwrap_or_else(|e| panic!("Tera parse error in {name}: {e}"));
+        }
+        if ntype == "map"
+          && let Some(sub) = node
+            .get("parameters")
+            .and_then(|p| p.get("template"))
+            .and_then(Value::as_array)
+        {
+          check_nodes(tera, &format!("{prefix}/{id}"), sub);
+        }
+      }
+    }
+
+    let mut tera = Tera::default();
+    register_custom_filters(&mut tera);
+    register_custom_functions(&mut tera);
+
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .expect("workspace root")
+      .join("examples/generators");
+    for entry in std::fs::read_dir(dir).expect("read generators") {
+      let path = entry.expect("entry").path();
+      if path.extension().and_then(|s| s.to_str()) != Some("yml") {
+        continue;
+      }
+      let fname = path.file_name().unwrap().to_string_lossy().to_string();
+      let raw = std::fs::read_to_string(&path).expect("read yaml");
+      let doc: Value = serde_yaml::from_str(&raw).expect("parse yaml");
+      if let Some(nodes) = doc.get("nodes").and_then(Value::as_array) {
+        check_nodes(&mut tera, &fname, nodes);
+      }
+    }
+  }
 }

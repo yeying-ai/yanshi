@@ -1,0 +1,261 @@
+# Daily Workflow 2 — `repo_architecture`: GitHub / Source Code Snapshot -> Architecture Summary + System Architecture Diagram (D2) + Module Dependency Graph (D2) + PDF/HTML/Markdown Report.
+#
+#   yanshi workflow run examples/generators/repo_architecture.yml \
+#     --input source "https://github.com/tokio-rs/axum" --output-dir out
+name: repo_architecture
+description: "输入 GitHub 仓库链接或受控源码目录，自动扫描目录树、构建配置与内部依赖拓扑，生成编译校验的 D2 系统分层架构图、模块依赖图与深度架构分析报告"
+
+inputs:
+  source:
+    description: "GitHub 仓库链接（如 https://github.com/owner/repo）或受控本地源码目录"
+    default: "https://github.com/tokio-rs/axum"
+  git_ref:
+    description: "可选 Git 分支、Tag 或 Commit SHA（留空自动取默认主分支）"
+    default: ""
+  subpath:
+    description: "可选子目录路径（大型 Monorepo 可聚焦子目录）"
+    default: ""
+  focus:
+    description: "架构提炼关注重点"
+    default: "整体分层架构、核心模块职责边界、数据/请求流转链路与模块间依赖拓扑"
+  export_pdf:
+    description: "同时导出排版精美的 PDF 架构报告"
+    default: true
+
+nodes:
+  - id: snapshot
+    type: repo_snapshot
+    parameters:
+      max_files: 28
+      max_bytes: 180000
+
+  - id: analysis_prompt
+    type: template
+    dependencies: ["snapshot"]
+    input_mapping:
+      repo_md: "{{ nodes.snapshot.outputs.markdown }}"
+    parameters:
+      template: |
+        你是一位首席软件架构师。请基于下方从真实代码仓库提取的目录树、构建清单（Cargo.toml / package.json / go.mod / pyproject.toml 等）、静态扫描到的模块依赖边与关键入口源码，围绕「{{ focus }}」对该项目进行深度逆向架构提炼。
+
+        输出要求：
+        1. `project_title`：项目名称与一句话架构定位；
+        2. `executive_summary`：2-3 段系统性总结项目的核心解决的问题、设计哲学与整体分层模型；
+        3. `layers`：提炼出清晰的架构分层列表（每层含 `name`、`responsibility`、`modules`）；
+        4. `modules`：核心模块职责清单（含 `name`、`path`、`role`、`depends_on`）；
+        5. `request_or_data_flow`：核心执行链路或请求生命周期拆解；
+        6. `system_arch_d2_brief`：用于交给 D2 绘图引擎生成「系统分层与运行时架构图」的精确结构描述（明确各层嵌套容器、核心子系统及关键交互流向，严格忠于真实模块名）；
+        7. `module_dep_d2_brief`：用于交给 D2 绘图引擎生成「项目模块依赖有向拓扑图（DAG）」的精确结构描述（列出真实 crate / package / 模块节点及 `A -> B` 依赖关系，严禁臆造不存在的包名）。
+
+        代码仓库快照：
+        {{ repo_md | truncate(length=48000) }}
+
+  - id: analyze_repo
+    type: llm
+    dependencies: ["analysis_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.analysis_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 12288
+      system: "你是严谨的系统架构分析师，所有模块名与依赖关系必须严格基于仓库真实清单与源码，仅输出合法 JSON。"
+      json_schema:
+        type: object
+        required:
+          - project_title
+          - executive_summary
+          - layers
+          - modules
+          - request_or_data_flow
+          - system_arch_d2_brief
+          - module_dep_d2_brief
+        properties:
+          project_title: { type: string }
+          executive_summary: { type: string }
+          layers:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [name, responsibility, modules]
+              properties:
+                name: { type: string }
+                responsibility: { type: string }
+                modules:
+                  type: array
+                  items: { type: string }
+          modules:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [name, path, role, depends_on]
+              properties:
+                name: { type: string }
+                path: { type: string }
+                role: { type: string }
+                depends_on:
+                  type: array
+                  items: { type: string }
+          request_or_data_flow: { type: string }
+          architectural_highlights:
+            type: array
+            items: { type: string }
+          system_arch_d2_brief: { type: string }
+          module_dep_d2_brief: { type: string }
+
+  - id: arch_fig_prompt
+    type: template
+    dependencies: ["analyze_repo"]
+    input_mapping:
+      spec: "{{ nodes.analyze_repo.outputs.output }}"
+    parameters:
+      template: |
+        为项目「{{ spec.project_title }}」绘制一张高可读性的 D2 系统分层架构图（建议 `direction: down`，每个架构层使用 D2 容器 `{ label: "..." ... }` 包裹对应子模块，并用带简短动词标签的有向边连接核心数据/调用链路）：
+
+        {{ spec.system_arch_d2_brief }}
+
+  - id: system_arch_diagram
+    type: figure
+    dependencies: ["arch_fig_prompt"]
+    input_mapping:
+      description: "{{ nodes.arch_fig_prompt.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: dep_fig_prompt
+    type: template
+    dependencies: ["analyze_repo", "snapshot"]
+    input_mapping:
+      spec: "{{ nodes.analyze_repo.outputs.output }}"
+      hints: "{{ nodes.snapshot.outputs.dependency_hints }}"
+    parameters:
+      template: |
+        为项目「{{ spec.project_title }}」绘制一张精确的 D2 模块/包依赖拓扑图（建议 `direction: right` 或 `direction: down`，按真实模块分组，使用有向边 `caller -> dependency` 表达依赖方向，保持节点命名与真实包名/目录名一致）：
+
+        架构师依赖说明：
+        {{ spec.module_dep_d2_brief }}
+
+        静态扫描到的真实依赖边参考：
+        {{ hints | json_encode() }}
+
+  - id: module_dep_diagram
+    type: figure
+    dependencies: ["dep_fig_prompt"]
+    input_mapping:
+      description: "{{ nodes.dep_fig_prompt.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: assemble_report
+    type: template
+    dependencies: ["analyze_repo", "system_arch_diagram", "module_dep_diagram"]
+    input_mapping:
+      spec: "{{ nodes.analyze_repo.outputs.output }}"
+      arch_png: "{{ nodes.system_arch_diagram.outputs.system_arch_diagram_png }}"
+      dep_png: "{{ nodes.module_dep_diagram.outputs.module_dep_diagram_png }}"
+    parameters:
+      template: |
+        # {{ spec.project_title }} — 架构与模块依赖深度解析
+
+        > **源码来源**：`{{ source }}`{% if git_ref != "" %} (`{{ git_ref }}`){% endif %}{% if subpath != "" %} · 子路径 `{{ subpath }}`{% endif %}
+
+        ## 1. 架构总览
+
+        {{ spec.executive_summary }}
+
+        ![系统分层架构图]({{ arch_png }})
+
+        ## 2. 分层架构模型
+
+        {% for layer in spec.layers %}
+        ### {{ loop.index }}. {{ layer.name }}
+        - **核心职责**：{{ layer.responsibility }}
+        - **包含模块**：{% for m in layer.modules %}`{{ m }}`{% if not loop.last %}、{% endif %}{% endfor %}
+        {% endfor %}
+
+        ## 3. 模块依赖拓扑与职责矩阵
+
+        ![模块依赖拓扑图]({{ dep_png }})
+
+        | 模块名称 | 源码路径 | 核心职责 | 直接依赖模块 |
+        | --- | --- | --- | --- |
+        {% for m in spec.modules %}| `{{ m.name }}` | `{{ m.path }}` | {{ m.role }} | {% if m.depends_on | length > 0 %}{% for d in m.depends_on %}`{{ d }}`{% if not loop.last %}, {% endif %}{% endfor %}{% else %}—{% endif %} |
+        {% endfor %}
+
+        ## 4. 核心执行与数据流链路
+
+        {{ spec.request_or_data_flow }}
+
+        {% if spec.architectural_highlights and spec.architectural_highlights | length > 0 %}
+        ## 5. 关键工程设计亮点
+
+        {% for h in spec.architectural_highlights %}- {{ h }}
+        {% endfor %}
+        {% endif %}
+
+  - id: report_md
+    type: render_markdown
+    dependencies: ["assemble_report"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: report_html
+    type: render_markdown
+    dependencies: ["assemble_report"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+
+  - id: pdf_flag
+    type: template
+    parameters:
+      output_format: json
+      template: '{"want_pdf": {{ export_pdf }}}'
+
+  - id: report_pdf
+    type: render_document
+    dependencies: ["assemble_report", "pdf_flag"]
+    run_if: "{{ nodes.pdf_flag.outputs.want_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.assemble_report.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies: ["analyze_repo", "system_arch_diagram", "module_dep_diagram", "report_md", "report_html", "report_pdf"]
+    input_mapping:
+      spec: "{{ nodes.analyze_repo.outputs.output }}"
+      arch_svg: "{{ nodes.system_arch_diagram.outputs.system_arch_diagram_svg }}"
+      arch_png: "{{ nodes.system_arch_diagram.outputs.system_arch_diagram_png }}"
+      dep_svg: "{{ nodes.module_dep_diagram.outputs.module_dep_diagram_svg }}"
+      dep_png: "{{ nodes.module_dep_diagram.outputs.module_dep_diagram_png }}"
+      md: "{{ nodes.report_md.outputs.report_md_output }}"
+      html: "{{ nodes.report_html.outputs.report_html_output }}"
+      pdf: "{{ nodes.report_pdf.outputs.report_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "repo_architecture",
+          "title": {{ spec.project_title | json_encode() }},
+          "content": {{ spec | json_encode() }},
+          "citations": [],
+          "files": [
+            {"node_id": "system_arch_diagram", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "system_arch_diagram", "name": {{ arch_png | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "preview"},
+            {"node_id": "module_dep_diagram", "name": {{ dep_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
+            {"node_id": "module_dep_diagram", "name": {{ dep_png | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "preview"},
+            {"node_id": "report_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "report_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"}{% if pdf %},
+            {"node_id": "report_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

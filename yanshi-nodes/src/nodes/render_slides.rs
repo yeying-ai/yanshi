@@ -128,6 +128,13 @@ pub enum Panel {
     title: Option<String>,
     root: Value,
   },
+  Image {
+    #[serde(default)]
+    title: Option<String>,
+    src: String,
+    #[serde(default)]
+    caption: Option<String>,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +454,7 @@ fn panel_item_count(panel: &Panel) -> usize {
       .get("children")
       .and_then(Value::as_array)
       .map_or(1, |c| c.len().max(1)),
+    Panel::Image { .. } => 1,
   }
 }
 
@@ -905,6 +913,89 @@ fn render_panel(
       let inner = render_panel_shell(svg, r, title.as_deref(), p);
       render_mindmap_panel(svg, inner, root, reveal, p);
     }
+    Panel::Image {
+      title,
+      src,
+      caption,
+    } => {
+      let inner = render_panel_shell(svg, r, title.as_deref(), p);
+      render_image_panel(svg, inner, src, caption.as_deref(), p);
+    }
+  }
+}
+
+fn resolve_artifact_image_data_uri(src: &str) -> Option<String> {
+  let trimmed = src.trim();
+  if trimmed.starts_with("data:image/") {
+    return Some(trimmed.to_string());
+  }
+  let root = yanshi_core::run_context::current_artifact_root()?;
+  let canonical_root = root.canonicalize().ok()?;
+  let canonical_file = Path::new(trimmed).canonicalize().ok()?;
+  if !canonical_file.starts_with(&canonical_root) {
+    return None;
+  }
+  let bytes = std::fs::read(&canonical_file).ok()?;
+  let ext = canonical_file
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("png")
+    .to_ascii_lowercase();
+  let mime = match ext.as_str() {
+    "jpg" | "jpeg" => "image/jpeg",
+    "webp" => "image/webp",
+    "gif" => "image/gif",
+    "svg" => "image/svg+xml",
+    _ => "image/png",
+  };
+  use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+  Some(format!("data:{mime};base64,{}", B64.encode(&bytes)))
+}
+
+fn render_image_panel(svg: &mut String, r: Rect, src: &str, caption: Option<&str>, p: &Palette) {
+  let caption_text = caption.map(str::trim).filter(|s| !s.is_empty());
+  let caption_h = if caption_text.is_some() { 38.0 } else { 0.0 };
+  let img_h = (r.h - caption_h).max(80.0);
+  let clip_id = format!("img-clip-{}-{}", r.x as i32, r.y as i32);
+  let _ = writeln!(
+    svg,
+    "<defs><clipPath id=\"{clip_id}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\"/></clipPath></defs>",
+    r.x, r.y, r.w, img_h
+  );
+  let _ = writeln!(
+    svg,
+    "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.2\"/>",
+    r.x, r.y, r.w, img_h, p.surface_alt, p.border
+  );
+  if let Some(data_uri) = resolve_artifact_image_data_uri(src) {
+    let pad = 6.0;
+    let _ = writeln!(
+      svg,
+      "<image x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" preserveAspectRatio=\"xMidYMid meet\" clip-path=\"url(#{clip_id})\" href=\"{}\"/>",
+      r.x + pad,
+      r.y + pad,
+      (r.w - pad * 2.0).max(20.0),
+      (img_h - pad * 2.0).max(20.0),
+      xml_escape(&data_uri)
+    );
+  } else {
+    let _ = writeln!(
+      svg,
+      "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{SANS_FONT}\" font-size=\"18\" fill=\"{}\">插图资源已就绪</text>",
+      r.x + r.w * 0.5,
+      r.y + img_h * 0.5,
+      p.text_muted
+    );
+  }
+  if let Some(cap) = caption_text {
+    let _ = writeln!(
+      svg,
+      "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{SANS_FONT}\" font-size=\"15\" fill=\"{}\">{}</text>",
+      r.x + r.w * 0.5,
+      r.y + img_h + 26.0,
+      p.text_sub,
+      xml_escape(cap)
+    );
   }
 }
 
@@ -2208,6 +2299,16 @@ fn collect_editable_markdown(panel: &Panel, out: &mut String) {
       }
       out.push('\n');
     }
+    Panel::Image { src, caption, .. } => {
+      if let Some(root) = yanshi_core::run_context::current_artifact_root()
+        && let (Ok(canon_root), Ok(canon_src)) =
+          (root.canonicalize(), Path::new(src.trim()).canonicalize())
+        && canon_src.starts_with(&canon_root)
+      {
+        let cap = caption.as_deref().unwrap_or("");
+        let _ = writeln!(out, "![{cap}]({})\n", canon_src.display());
+      }
+    }
     _ => {}
   }
 }
@@ -2707,5 +2808,64 @@ mod tests {
     let md = std::fs::read_to_string(md_path).expect("md");
     assert!(md.contains("静态分发 vs &dyn Trait 胖指针"));
     assert!(md.contains("::: notes"));
+  }
+
+  #[tokio::test]
+  async fn renders_image_panel_from_run_artifact_and_blocks_outside_paths() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside");
+    let mut pix = resvg::tiny_skia::Pixmap::new(64, 64).expect("pixmap");
+    pix.fill(resvg::tiny_skia::Color::from_rgba8(56, 189, 248, 255));
+    let png_bytes = pix.encode_png().expect("png");
+    let inside_img = tmp.path().join("illus.png");
+    let outside_img = outside.path().join("secret.png");
+    std::fs::write(&inside_img, &png_bytes).expect("write inside");
+    std::fs::write(&outside_img, &png_bytes).expect("write outside");
+
+    let deck = json!({
+      "title": "插图面板校验",
+      "slides": [
+        {
+          "title": "主题配图与安全边界",
+          "left": {
+            "kind": "image",
+            "title": "AI 概念插图",
+            "src": inside_img.to_string_lossy(),
+            "caption": "沙箱内产物插图"
+          },
+          "right": {
+            "kind": "image",
+            "title": "越界路径拦截",
+            "src": outside_img.to_string_lossy()
+          },
+          "notes": "验证插图内嵌。"
+        }
+      ]
+    });
+
+    let inputs = HashMap::from([
+      ("deck".to_string(), FlowValue::Json(deck)),
+      ("progressive".to_string(), FlowValue::Json(json!(false))),
+    ]);
+    let outputs = run_context::with_artifact_root(
+      tmp.path().to_path_buf(),
+      RenderSlidesNode::new("illus").execute(&inputs),
+    )
+    .await
+    .expect("image slide renders");
+
+    let FlowValue::Json(Value::Array(slides)) = &outputs["illus_slides"] else {
+      panic!("expected illus_slides");
+    };
+    let svg_path = slides[0]["svg"].as_str().expect("svg path");
+    let svg_text = std::fs::read_to_string(svg_path).expect("svg text");
+    assert!(
+      svg_text.contains("data:image/png;base64,"),
+      "inside artifact embeds as data URI"
+    );
+    assert!(
+      svg_text.contains("插图资源已就绪"),
+      "outside path must not be read"
+    );
   }
 }

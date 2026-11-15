@@ -1,0 +1,466 @@
+# Daily Workflow 4 — `paper_reader`: PDF URL / arXiv / Local PDF -> Translation + Core Thesis & Claims + Detailed Experimental Data Extraction (XLSX/CSV) + Method Diagram (D2) + Mindmap + PDF Dossier.
+#
+#   yanshi workflow run examples/generators/paper_reader.yml \
+#     --input source "https://arxiv.org/abs/1706.03762" --output-dir out
+name: paper_reader
+description: "输入论文 PDF 文件、arXiv 链接或 PDF URL，完成核心章节双语精译、核心思想与论点提炼、详细实验数据表格提取（XLSX/CSV）、算法架构图、思维导图与精读报告 PDF"
+
+inputs:
+  source:
+    description: "论文 arXiv 链接、PDF URL 或本地上传 PDF（支持 Studio 一键选择本地 PDF）"
+    default: "https://arxiv.org/abs/1706.03762"
+  target_lang:
+    description: "翻译与精读报告目标语言"
+    default: "简体中文"
+  max_pages:
+    description: "最大解析页数上限（含正文、实验表与关键附录）"
+    default: 24
+  focus:
+    description: "重点研读方向"
+    default: "问题动机、核心方法创新、数学/架构机制、消融与主实验数据对比、局限性"
+  export_pdf:
+    description: "同时导出完整论文精读报告 PDF"
+    default: true
+
+nodes:
+  - id: extract
+    type: pdf_extract
+    parameters:
+      max_chars: 120000
+
+  - id: context_query
+    type: template
+    dependencies: ["extract"]
+    input_mapping:
+      paper_text: "{{ nodes.extract.outputs.output }}"
+    parameters:
+      template: "{{ paper_text | truncate(length=200) | trim }} paper key contributions benchmarks"
+
+  - id: scholarly_context
+    type: web_search
+    dependencies: ["context_query"]
+    input_mapping:
+      query: "{{ nodes.context_query.outputs.output }}"
+    parameters:
+      max_results: 5
+
+  - id: translation_prompt
+    type: template
+    dependencies: ["extract"]
+    input_mapping:
+      paper_text: "{{ nodes.extract.outputs.output }}"
+    parameters:
+      template: |
+        你是一位资深计算机与科学文献双语译者。请针对以下提取自论文原件的文本，面向「{{ target_lang }}」读者完成高质量忠实精译（信、达、专有名词保留英文括注，公式符号保持原样）：
+        1. `paper_title_original` 与 `paper_title_translated`；
+        2. `abstract_bilingual`：摘要原文与{{ target_lang }}逐段对照精译；
+        3. `section_translations`：按论文核心章节顺序（引言、核心方法/模型设计、关键理论/架构细节、结论），输出每一节的精准{{ target_lang }}全文级精译与术语批注。
+
+        论文全文提取内容：
+        {{ paper_text | truncate(length=52000) }}
+
+  - id: translate_paper
+    type: llm
+    dependencies: ["translation_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.translation_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 12288
+      system: "你是严谨的学术论文翻译专家，术语准确、逻辑忠实于原文，仅输出合法 JSON。"
+      json_schema:
+        type: object
+        required: [paper_title_original, paper_title_translated, abstract_bilingual, section_translations]
+        properties:
+          paper_title_original: { type: string }
+          paper_title_translated: { type: string }
+          authors_and_venue: { type: string }
+          abstract_bilingual: { type: string }
+          section_translations:
+            type: array
+            minItems: 2
+            items:
+              type: object
+              required: [section_heading, translated_markdown, key_terms]
+              properties:
+                section_heading: { type: string }
+                translated_markdown: { type: string }
+                key_terms:
+                  type: array
+                  items: { type: string }
+
+  - id: thesis_prompt
+    type: template
+    dependencies: ["extract", "scholarly_context"]
+    input_mapping:
+      paper_text: "{{ nodes.extract.outputs.output }}"
+      web_ctx: "{{ nodes.scholarly_context.outputs.markdown }}"
+    parameters:
+      template: |
+        请以顶会审稿人与领域研究者的视角，围绕「{{ focus }}」深度精读以下论文，并用「{{ target_lang }}」提炼：
+        1. `one_sentence_insight`：一句话直击论文最本质的核心思想突破；
+        2. `problem_and_bottleneck`：既有方法面临的根本瓶颈与本文切入点；
+        3. `core_claims`：论文提出的 3-6 条核心论点，每条论点给出对应的理论推导或实验证据支撑（注明章节/图表出处）；
+        4. `method_mechanics`：算法/架构关键机制拆解（含关键公式含义与复杂度权衡）；
+        5. `limitations_and_future`：边界条件、局限性与后续演进脉络；
+        6. `method_d2_brief`：用于 D2 绘制「论文核心算法/模型数据流架构图」的精确结构说明；
+        7. `mindmap_tree`：论文全景知识思维导图树（根节点为论文简称，含研究动机、核心思想、关键方法、实验证据、启发与局限等分支，深度不超过 3 层）。
+
+        论文正文：
+        {{ paper_text | truncate(length=52000) }}
+
+        学术背景补充：
+        {{ web_ctx | truncate(length=6000) }}
+
+  - id: analyze_thesis
+    type: llm
+    dependencies: ["thesis_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.thesis_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 12288
+      system: "你是严谨的顶会审稿人，一切论点与数据必须严格忠于论文原文，严禁编造数值，仅输出合法 JSON。"
+      json_schema:
+        type: object
+        required:
+          - one_sentence_insight
+          - problem_and_bottleneck
+          - core_claims
+          - method_mechanics
+          - limitations_and_future
+          - method_d2_brief
+          - mindmap_tree
+        properties:
+          one_sentence_insight: { type: string }
+          problem_and_bottleneck: { type: string }
+          core_claims:
+            type: array
+            minItems: 2
+            items:
+              type: object
+              required: [claim, evidence_in_paper, source_section]
+              properties:
+                claim: { type: string }
+                evidence_in_paper: { type: string }
+                source_section: { type: string }
+          method_mechanics: { type: string }
+          limitations_and_future: { type: string }
+          method_d2_brief: { type: string }
+          mindmap_tree:
+            type: object
+            required: [label, children]
+            properties:
+              label: { type: string }
+              children: { type: array }
+
+  - id: experiments_prompt
+    type: template
+    dependencies: ["extract"]
+    input_mapping:
+      paper_text: "{{ nodes.extract.outputs.output }}"
+    parameters:
+      template: |
+        请从以下论文全文中完整、逐项提取支撑论文论点的所有关键实验设置与定量对比数据（包括主实验、基线对比、消融实验 Ablation Study、吞吐/参数量/开销对比）：
+        1. `experimental_setup`：数据集、评价指标、训练/推理硬件与关键超参数总结；
+        2. `ablation_findings`：关键消融实验发现与变量贡献度解读；
+        3. `metrics_rows`：结构化实验数据行数组，每行包含统一字段：
+           - `table_or_figure`（原论文图表编号，如 "Table 1" / "Table 3"）
+           - `task_or_dataset`（任务或数据集名称）
+           - `model_or_variant`（对比基线或本文模型变体）
+           - `metric_name`（指标名称，如 BLEU / Accuracy / Latency / Params）
+           - `metric_value`（论文原始数值字符串，原样保留）
+           - `delta_vs_baseline`（相对最强基线或基准变体的提升/变化说明）
+           - `supports_claim`（该组数据支撑的核心论点）
+
+        论文全文：
+        {{ paper_text | truncate(length=56000) }}
+
+  - id: extract_experiments
+    type: llm
+    dependencies: ["experiments_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.experiments_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 10240
+      system: "你是定量科学数据分析专家，严格提取论文真实实验表格与正文报告的原始数据，绝不虚构指标，仅输出合法 JSON。"
+      json_schema:
+        type: object
+        required: [experimental_setup, ablation_findings, metrics_rows]
+        properties:
+          experimental_setup: { type: string }
+          ablation_findings: { type: string }
+          metrics_rows:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required:
+                - table_or_figure
+                - task_or_dataset
+                - model_or_variant
+                - metric_name
+                - metric_value
+                - delta_vs_baseline
+                - supports_claim
+              properties:
+                table_or_figure: { type: string }
+                task_or_dataset: { type: string }
+                model_or_variant: { type: string }
+                metric_name: { type: string }
+                metric_value: { type: string }
+                delta_vs_baseline: { type: string }
+                supports_claim: { type: string }
+
+  - id: exp_rows_json
+    type: template
+    dependencies: ["extract_experiments"]
+    input_mapping:
+      exp: "{{ nodes.extract_experiments.outputs.output }}"
+    parameters:
+      output_format: json
+      template: "{{ exp.metrics_rows | json_encode() }}"
+
+  - id: experiments_xlsx
+    type: render_table
+    dependencies: ["exp_rows_json"]
+    input_mapping:
+      rows: "{{ nodes.exp_rows_json.outputs.output }}"
+    parameters:
+      format: xlsx
+      columns:
+        - table_or_figure
+        - task_or_dataset
+        - model_or_variant
+        - metric_name
+        - metric_value
+        - delta_vs_baseline
+        - supports_claim
+
+  - id: experiments_csv
+    type: render_table
+    dependencies: ["exp_rows_json"]
+    input_mapping:
+      rows: "{{ nodes.exp_rows_json.outputs.output }}"
+    parameters:
+      format: csv
+      columns:
+        - table_or_figure
+        - task_or_dataset
+        - model_or_variant
+        - metric_name
+        - metric_value
+        - delta_vs_baseline
+        - supports_claim
+
+  - id: method_fig_desc
+    type: template
+    dependencies: ["analyze_thesis", "translate_paper"]
+    input_mapping:
+      thesis: "{{ nodes.analyze_thesis.outputs.output }}"
+      trans: "{{ nodes.translate_paper.outputs.output }}"
+    parameters:
+      template: |
+        为论文《{{ trans.paper_title_original }}》绘制一张清晰展示其核心模型/算法数据流机制的 D2 架构图（direction: right，8-14 个关键模块节点，标注张量/数据流转换关系）：
+        {{ thesis.method_d2_brief }}
+
+  - id: method_diagram
+    type: figure
+    dependencies: ["method_fig_desc"]
+    input_mapping:
+      description: "{{ nodes.method_fig_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1800
+      max_attempts: 4
+
+  - id: mindmap_tree_json
+    type: template
+    dependencies: ["analyze_thesis"]
+    input_mapping:
+      thesis: "{{ nodes.analyze_thesis.outputs.output }}"
+    parameters:
+      output_format: json
+      template: "{{ thesis.mindmap_tree | json_encode() }}"
+
+  - id: mindmap_svg
+    type: render_mindmap
+    dependencies: ["mindmap_tree_json"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+
+  - id: mindmap_png
+    type: render_svg
+    dependencies: ["mindmap_svg"]
+    input_mapping:
+      svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+    parameters:
+      width: 1600
+
+  - id: mindmap_html
+    type: render_mindmap
+    dependencies: ["mindmap_tree_json"]
+    input_mapping:
+      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+    parameters:
+      format: html
+
+  - id: assemble_dossier
+    type: template
+    dependencies:
+      - extract
+      - translate_paper
+      - analyze_thesis
+      - extract_experiments
+      - method_diagram
+      - mindmap_png
+    input_mapping:
+      pages: "{{ nodes.extract.outputs.page_count }}"
+      trans: "{{ nodes.translate_paper.outputs.output }}"
+      thesis: "{{ nodes.analyze_thesis.outputs.output }}"
+      exp: "{{ nodes.extract_experiments.outputs.output }}"
+      method_png: "{{ nodes.method_diagram.outputs.method_diagram_png }}"
+      mm_png: "{{ nodes.mindmap_png.outputs.mindmap_png_output }}"
+    parameters:
+      template: |
+        # {{ trans.paper_title_translated }}
+
+        > **原文标题**：*{{ trans.paper_title_original }}*
+        {% if trans.authors_and_venue %}> **作者与出处**：{{ trans.authors_and_venue }}{% endif %}
+        > **解析页数**：共 {{ pages }} 页
+
+        ## 1. 一句话核心思想与知识思维导图
+
+        > **核心突破**：{{ thesis.one_sentence_insight }}
+
+        ![论文全景思维导图]({{ mm_png }})
+
+        ## 2. 研究问题与核心论点链条
+
+        ### 2.1 既有瓶颈与问题定义
+
+        {{ thesis.problem_and_bottleneck }}
+
+        ### 2.2 核心论点与原文证据映射
+
+        | 序号 | 核心论点 (Claim) | 论文实验/理论证据支撑 | 原文位置 |
+        | --- | --- | --- | --- |
+        {% for c in thesis.core_claims %}| {{ loop.index }} | **{{ c.claim }}** | {{ c.evidence_in_paper }} | `{{ c.source_section }}` |
+        {% endfor %}
+
+        ## 3. 核心算法与架构机制深度拆解
+
+        ![核心方法架构图]({{ method_png }})
+
+        {{ thesis.method_mechanics }}
+
+        ## 4. 详细实验设置与定量数据提取
+
+        ### 4.1 实验设置与基准说明
+
+        {{ exp.experimental_setup }}
+
+        ### 4.2 定量实验结果对比总表
+
+        | 来源图表 | 任务 / 数据集 | 模型 / 变体 | 指标 | 数值 | 相对基线变化 | 支撑论点 |
+        | --- | --- | --- | --- | --- | --- | --- |
+        {% for r in exp.metrics_rows %}| `{{ r.table_or_figure }}` | {{ r.task_or_dataset }} | `{{ r.model_or_variant }}` | {{ r.metric_name }} | **{{ r.metric_value }}** | {{ r.delta_vs_baseline }} | {{ r.supports_claim }} |
+        {% endfor %}
+
+        ### 4.3 消融实验与关键规律解读
+
+        {{ exp.ablation_findings }}
+
+        ## 5. 摘要双语对照与核心章节精译
+
+        ### 5.1 摘要双语对照
+
+        {{ trans.abstract_bilingual }}
+
+        {% for sec in trans.section_translations %}
+        ### 5.{{ loop.index + 1 }} {{ sec.section_heading }}
+
+        {{ sec.translated_markdown }}
+        {% if sec.key_terms | length > 0 %}
+        - **关键术语对照**：{{ sec.key_terms | join(sep=" · ") }}
+        {% endif %}
+        {% endfor %}
+
+        ## 6. 局限性与后续研究启发
+
+        {{ thesis.limitations_and_future }}
+
+  - id: dossier_md
+    type: render_markdown
+    dependencies: ["assemble_dossier"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_dossier.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: dossier_html
+    type: render_markdown
+    dependencies: ["assemble_dossier"]
+    input_mapping:
+      markdown: "{{ nodes.assemble_dossier.outputs.output }}"
+
+  - id: pdf_flag
+    type: template
+    parameters:
+      output_format: json
+      template: '{"want_pdf": {{ export_pdf }}}'
+
+  - id: dossier_pdf
+    type: render_document
+    dependencies: ["assemble_dossier", "pdf_flag"]
+    run_if: "{{ nodes.pdf_flag.outputs.want_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.assemble_dossier.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies:
+      - translate_paper
+      - analyze_thesis
+      - extract_experiments
+      - experiments_xlsx
+      - experiments_csv
+      - method_diagram
+      - mindmap_svg
+      - mindmap_html
+      - dossier_md
+      - dossier_html
+      - dossier_pdf
+    input_mapping:
+      trans: "{{ nodes.translate_paper.outputs.output }}"
+      thesis: "{{ nodes.analyze_thesis.outputs.output }}"
+      exp: "{{ nodes.extract_experiments.outputs.output }}"
+      xlsx: "{{ nodes.experiments_xlsx.outputs.experiments_xlsx_output }}"
+      csv: "{{ nodes.experiments_csv.outputs.experiments_csv_output }}"
+      fig_svg: "{{ nodes.method_diagram.outputs.method_diagram_svg }}"
+      mm_svg: "{{ nodes.mindmap_svg.outputs.mindmap_svg_output }}"
+      mm_html: "{{ nodes.mindmap_html.outputs.mindmap_html_output }}"
+      md: "{{ nodes.dossier_md.outputs.dossier_md_output }}"
+      html: "{{ nodes.dossier_html.outputs.dossier_html_output }}"
+      pdf: "{{ nodes.dossier_pdf.outputs.dossier_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "paper_reader",
+          "title": {{ trans.paper_title_translated | json_encode() }},
+          "content": {"thesis": {{ thesis | json_encode() }}, "experiments": {{ exp | json_encode() }}},
+          "citations": [],
+          "files": [
+            {"node_id": "dossier_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
+            {"node_id": "dossier_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "experiments_xlsx", "name": {{ xlsx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "role": "primary"},
+            {"node_id": "experiments_csv", "name": {{ csv | split(pat="/") | last | json_encode() }}, "mime_type": "text/csv", "role": "asset"},
+            {"node_id": "method_diagram", "name": {{ fig_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "dossier_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

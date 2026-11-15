@@ -507,6 +507,11 @@ impl FigureNode {
     language: Language,
     domain: Option<&str>,
   ) -> Result<String, YanshiError> {
+    Yanshi::ensure_init()
+      .await
+      .map_err(|e| YanshiError::ConfigurationError {
+        message: format!("{}: failed to initialize Yanshi LLM service: {e}", self.id),
+      })?;
     let mut system = format!(
       "You draw figures by writing source code. {} Reply with exactly one fenced code block \
        containing the complete source and nothing else.",
@@ -568,9 +573,9 @@ impl AsyncNode for FigureNode {
       }
     };
     let domain_text = domain.as_ref().map(Domain::instructions);
-    let can_generate = description.is_some() && model.is_some();
+    let can_generate = description.is_some();
     if string_input(inputs, "source").is_none() && !can_generate {
-      return Err(self.input_error("give 'source', or 'description' and 'model'"));
+      return Err(self.input_error("give 'source' or 'description'"));
     }
 
     let mut source = match string_input(inputs, "source") {
