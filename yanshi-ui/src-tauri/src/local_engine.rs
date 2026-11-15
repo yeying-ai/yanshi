@@ -20,7 +20,7 @@ use axum::{
   extract::{Path as RoutePath, Query, State},
   http::{HeaderMap, HeaderValue, StatusCode, header},
   response::{
-    IntoResponse, Response,
+    Html, IntoResponse, Redirect, Response,
     sse::{Event as SseEvent, KeepAlive, Sse},
   },
   routing::{get, post},
@@ -359,6 +359,10 @@ pub(crate) async fn ensure_llm_initialized() -> anyhow::Result<()> {
   Ok(())
 }
 
+const EMBEDDED_INDEX_HTML: &str = include_str!("../../dist/index.html");
+const EMBEDDED_APP_JS: &str = include_str!("../../dist/assets/app.js");
+const EMBEDDED_STYLES_CSS: &str = include_str!("../../dist/assets/styles.css");
+
 /// Start the embedded loopback engine on `127.0.0.1:0` and return its base URL
 /// (e.g. `http://127.0.0.1:54123`).
 pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::Result<String> {
@@ -375,9 +379,33 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
   Ok(format!("http://127.0.0.1:{}", addr.port()))
 }
 
+/// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) until Ctrl-C / termination.
+///
+/// Non-loopback bind addresses are rejected fail-closed because the local
+/// engine runs without bearer-token authentication.
+pub async fn bind_local_web_listener(
+  bind: SocketAddr,
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(tokio::net::TcpListener, Router)> {
+  if !bind.ip().is_loopback() {
+    anyhow::bail!(
+      "refusing to bind unauthenticated local web engine on non-loopback address {bind}; \
+       use 127.0.0.1:<port> or [::1]:<port> (or `yanshi serve` with YANSHI_API_TOKEN)"
+    );
+  }
+  let base_dir = custom_base_dir.unwrap_or_else(default_studio_runs_dir);
+  tokio::fs::create_dir_all(&base_dir).await?;
+  let state = LocalEngineState::new(base_dir);
+  let app = build_local_router(state);
+  let listener = tokio::net::TcpListener::bind(bind).await?;
+  Ok((listener, app))
+}
+
 pub fn build_local_router(state: LocalEngineState) -> Router {
   let harness_router = crate::local_harness::build_harness_router(state.harness.clone());
   let notebooks_router = crate::local_notebooks::build_notebooks_router(state.clone());
+  let ui_router = build_embedded_ui_router();
   Router::new()
     .route("/health", get(health))
     .route("/v1/diagnostics", get(get_diagnostics))
@@ -407,7 +435,57 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
     .with_state(state)
     .merge(harness_router)
     .merge(notebooks_router)
+    .merge(ui_router)
     .layer(CorsLayer::permissive())
+}
+
+fn build_embedded_ui_router() -> Router {
+  Router::new()
+    .route("/", get(|| async { Redirect::temporary("/ui/studio") }))
+    .route("/ui", get(embedded_index_html))
+    .route("/ui/", get(embedded_index_html))
+    .route("/ui/studio", get(embedded_index_html))
+    .route("/ui/studio/", get(embedded_index_html))
+    .route("/ui/notebooks", get(embedded_index_html))
+    .route("/ui/notebooks/", get(embedded_index_html))
+    .route("/ui/notebooks/:id", get(embedded_index_html))
+    .route("/ui/app", get(embedded_index_html))
+    .route("/ui/app/", get(embedded_index_html))
+    .route("/ui/console", get(embedded_index_html))
+    .route("/ui/console/", get(embedded_index_html))
+    .route("/ui/runs/new", get(embedded_index_html))
+    .route("/ui/runs/:id/compare", get(embedded_index_html))
+    .route("/ui/harness/sessions", get(embedded_index_html))
+    .route("/ui/harness/sessions/", get(embedded_index_html))
+    .route("/ui/harness/sessions/new", get(embedded_index_html))
+    .route("/ui/harness/sessions/:id", get(embedded_index_html))
+    .route("/ui/diagnostics", get(embedded_index_html))
+    .route("/ui/assets/app.js", get(embedded_app_js))
+    .route("/ui/assets/styles.css", get(embedded_styles_css))
+}
+
+async fn embedded_index_html() -> Html<&'static str> {
+  Html(EMBEDDED_INDEX_HTML)
+}
+
+async fn embedded_app_js() -> Response {
+  embedded_asset_response(EMBEDDED_APP_JS, "application/javascript; charset=utf-8")
+}
+
+async fn embedded_styles_css() -> Response {
+  embedded_asset_response(EMBEDDED_STYLES_CSS, "text/css; charset=utf-8")
+}
+
+fn embedded_asset_response(body: &'static str, content_type: &'static str) -> Response {
+  (
+    StatusCode::OK,
+    [
+      (header::CONTENT_TYPE, content_type),
+      (header::CACHE_CONTROL, "no-cache"),
+    ],
+    Body::from(body),
+  )
+    .into_response()
 }
 
 async fn health() -> impl IntoResponse {
@@ -2936,5 +3014,75 @@ nodes:
       .post(format!("{base_url}/v1/runs/{run_id}:cancel"))
       .send()
       .await;
+  }
+
+  #[tokio::test]
+  async fn local_engine_serves_embedded_spa_routes_and_rejects_public_bind() {
+    let public_addr: SocketAddr = "0.0.0.0:18080".parse().expect("valid socket addr");
+    let rejected = bind_local_web_listener(public_addr, None).await;
+    assert!(
+      rejected.is_err(),
+      "non-loopback bind must be rejected fail-closed"
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let loopback_addr: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
+    let (listener, app) = bind_local_web_listener(loopback_addr, Some(temp.path().to_path_buf()))
+      .await
+      .expect("bind loopback web listener");
+    let bound = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+      let _ = axum::serve(listener, app).await;
+    });
+
+    let base_url = format!("http://127.0.0.1:{}", bound.port());
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .redirect(reqwest::redirect::Policy::none())
+      .build()
+      .expect("test client");
+
+    let root_res = client
+      .get(format!("{base_url}/"))
+      .send()
+      .await
+      .expect("root");
+    assert_eq!(root_res.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+      root_res
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok()),
+      Some("/ui/studio")
+    );
+
+    for path in ["/ui/studio", "/ui/notebooks", "/ui/notebooks/demo-nb"] {
+      let res = client
+        .get(format!("{base_url}{path}"))
+        .send()
+        .await
+        .expect("spa route");
+      assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "route {path} should return 200"
+      );
+      let html = res.text().await.expect("html text");
+      assert!(html.contains("yanshi-debugger"));
+    }
+
+    let js_res = client
+      .get(format!("{base_url}/ui/assets/app.js"))
+      .send()
+      .await
+      .expect("app.js");
+    assert_eq!(js_res.status(), StatusCode::OK);
+    assert_eq!(
+      js_res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()),
+      Some("application/javascript; charset=utf-8")
+    );
   }
 }
