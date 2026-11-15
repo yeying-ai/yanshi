@@ -311,7 +311,7 @@ fn extract_edges(nodes: &[NodeDefinitionV2]) -> Vec<InspectedEdge> {
 
     // 1. Explicit `input_mapping` edges carry rich field-binding labels.
     let mut mapping_keys: Vec<(&String, &String)> = node.input_mapping.iter().collect();
-    mapping_keys.sort_by(|(ka, _), (kb, _)| ka.cmp(kb));
+    mapping_keys.sort_by_key(|(ka, _)| *ka);
 
     let mut labels_by_source: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (target_input, expr) in mapping_keys {
