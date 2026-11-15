@@ -25,6 +25,7 @@ FROM debian:bookworm-slim AS runtime
 
 ARG INSTALL_MULTIMODAL_TOOLS=1
 ARG TYPST_VERSION=0.13.1
+ARG PANDOC_VERSION=3.6.4
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -37,13 +38,20 @@ RUN apt-get update \
     apt-get install -y --no-install-recommends \
       ffmpeg \
       fonts-noto-cjk \
-      pandoc \
     && dpkg_arch="$(dpkg --print-architecture)" \
     && case "${dpkg_arch}" in \
-      amd64) typst_arch="x86_64" ;; \
-      arm64) typst_arch="aarch64" ;; \
-      *) typst_arch="" ;; \
+      amd64) typst_arch="x86_64"; pandoc_arch="amd64" ;; \
+      arm64) typst_arch="aarch64"; pandoc_arch="arm64" ;; \
+      *) typst_arch=""; pandoc_arch="" ;; \
     esac \
+    && if [ -n "${pandoc_arch}" ]; then \
+      curl -fsSL --retry 3 "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${pandoc_arch}.deb" \
+        -o /tmp/pandoc.deb \
+      && dpkg -i /tmp/pandoc.deb \
+      && rm -f /tmp/pandoc.deb; \
+    else \
+      apt-get install -y --no-install-recommends pandoc; \
+    fi \
     && if [ -n "${typst_arch}" ]; then \
       curl -fsSL --retry 3 "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${typst_arch}-unknown-linux-musl.tar.xz" \
         -o /tmp/typst.tar.xz \
@@ -55,9 +63,18 @@ RUN apt-get update \
   && apt-get purge -y --auto-remove xz-utils \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --uid 10001 --shell /usr/sbin/nologin yanshi \
-  && mkdir -p /data/runs \
-  && chown -R yanshi:yanshi /data
+  && mkdir -p \
+    /data/runs \
+    /data/traces \
+    /data/workspace \
+    /etc/yanshi \
+    /home/yanshi/.yanshi/traces \
+    /home/yanshi/.yanshi/marketplace/cache \
+    /home/yanshi/.yanshi/skills \
+    /home/yanshi/.yanshi/plugins \
+  && chown -R yanshi:yanshi /data /home/yanshi/.yanshi
 
+COPY config/pricing.prod.yml /etc/yanshi/pricing.yml
 COPY --from=builder /out/yanshi /usr/local/bin/yanshi
 
 USER yanshi

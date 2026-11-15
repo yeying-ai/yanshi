@@ -69,8 +69,19 @@ const DEFAULT_PROFILE: &str = "local";
 const DEFAULT_RUNTIME_KIND: &str = "react";
 
 /// Default model handle the stub executor records on the session row.
-/// Real executor will sniff this from the request body or skill config.
+/// When `YANSHI_GENERATE_MODEL` is configured on the gateway, blank/omitted
+/// session `model` fields inherit that operator default before falling back
+/// to `"stub"`.
 const DEFAULT_MODEL: &str = "stub";
+
+fn resolve_session_model(requested: Option<&str>, gateway_default: Option<&str>) -> String {
+  requested
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+    .or_else(|| gateway_default.map(str::trim).filter(|m| !m.is_empty()))
+    .unwrap_or(DEFAULT_MODEL)
+    .to_string()
+}
 
 /// Wire shape published over SSE. Mirrors `yanshi_db::HarnessSessionEvent`
 /// but stays minimal so we don't tie SSE consumers to DB columns.
@@ -847,7 +858,8 @@ pub async fn submit_harness_session(
       "skill-backed sessions run ReAct; 'plan_execute' cannot be combined with skill_name".into(),
     ));
   }
-  let model = req.model.unwrap_or_else(|| DEFAULT_MODEL.into());
+  let env_default_model = std::env::var("YANSHI_GENERATE_MODEL").ok();
+  let model = resolve_session_model(req.model.as_deref(), env_default_model.as_deref());
 
   let session = state
     .repos
@@ -1755,5 +1767,19 @@ mod tests {
       None,
       "channel entry survives (run not finalised) but has zero active receivers"
     );
+  }
+
+  #[test]
+  fn resolve_session_model_prefers_explicit_then_gateway_default_then_stub() {
+    assert_eq!(
+      resolve_session_model(Some(" gemini-2.5-flash "), Some("deepseek-chat")),
+      "gemini-2.5-flash"
+    );
+    assert_eq!(
+      resolve_session_model(Some("   "), Some(" deepseek-chat ")),
+      "deepseek-chat"
+    );
+    assert_eq!(resolve_session_model(None, Some("")), "stub");
+    assert_eq!(resolve_session_model(None, None), "stub");
   }
 }

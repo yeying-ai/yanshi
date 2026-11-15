@@ -1,0 +1,80 @@
+# Baseline USD pricing sheet bundled in the production container (`/etc/yanshi/pricing.yml`).
+# Rates are USD per 1,000 tokens (or per image / per second where applicable).
+# Operators can override via `YANSHI_PRICING_TABLE=/data/pricing.yml`.
+
+default:
+  input_per_1k: 0.0005
+  output_per_1k: 0.0015
+
+models:
+  # DeepSeek
+  deepseek-chat:
+    input_per_1k: 0.00027
+    output_per_1k: 0.00110
+  deepseek-reasoner:
+    input_per_1k: 0.00055
+    output_per_1k: 0.00219
+  deepseek-v4-flash:
+    input_per_1k: 0.00015
+    output_per_1k: 0.00060
+  deepseek-v4-pro:
+    input_per_1k: 0.00055
+    output_per_1k: 0.00219
+
+  # Google Gemini
+  gemini-2.5-flash:
+    input_per_1k: 0.00015
+    output_per_1k: 0.00060
+  gemini-2.5-pro:
+    input_per_1k: 0.00125
+    output_per_1k: 0.01000
+  gemini-2.0-flash:
+    input_per_1k: 0.00010
+    output_per_1k: 0.00040
+  gemini-1.5-flash:
+    input_per_1k: 0.000075
+    output_per_1k: 0.00030
+  gemini-1.5-pro:
+    input_per_1k: 0.00125
+    output_per_1k: 0.00500
+
+  # Zhipu / BigModel GLM
+  glm-4-flash:
+    input_per_1k: 0.00001
+    output_per_1k: 0.00001
+  glm-4-plus:
+    input_per_1k: 0.00070
+    output_per_1k: 0.00070
+  glm-4.5:
+    input_per_1k: 0.00055
+    output_per_1k: 0.00220
+
+  # OpenAI
+  gpt-4o:
+    input_per_1k: 0.00250
+    output_per_1k: 0.01000
+  gpt-4o-mini:
+    input_per_1k: 0.00015
+    output_per_1k: 0.00060
+  gpt-4.1:
+    input_per_1k: 0.00200
+    output_per_1k: 0.00800
+  gpt-4.1-mini:
+    input_per_1k: 0.00040
+    output_per_1k: 0.00160
+
+  # Anthropic
+  claude-sonnet-4-6:
+    input_per_1k: 0.00300
+    output_per_1k: 0.01500
+  claude-haiku-4-5:
+    input_per_1k: 0.00080
+    output_per_1k: 0.00400
+
+  # Moonshot / Kimi
+  kimi-k2.6:
+    input_per_1k: 0.00060
+    output_per_1k: 0.00250
+  moonshot-v1-8k:
+    input_per_1k: 0.00020
+    output_per_1k: 0.00100

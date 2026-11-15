@@ -290,4 +290,15 @@ models:
     assert_eq!(table.lookup("gpt-image-1").per_image, 0.04);
     assert_eq!(table.lookup("gpt-4o").per_image, 0.0);
   }
+
+  #[test]
+  fn bundled_production_pricing_sheet_parses_cleanly() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest_dir.join("../config/pricing.prod.yml");
+    let table = PricingTable::load_from_yaml(&path).expect("pricing.prod.yml parses");
+    assert!(table.default.is_some());
+    assert!(table.models.contains_key("deepseek-chat"));
+    assert!(table.models.contains_key("gemini-2.5-flash"));
+    assert!(table.models.contains_key("glm-4-flash"));
+  }
 }

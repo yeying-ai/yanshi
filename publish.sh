@@ -90,7 +90,7 @@ fi
 ok "TLS certificate/key pair verified ($(openssl x509 -in "$LOCAL_CERT" -noout -enddate | cut -d= -f2))"
 
 log "Preparing remote directories on ${REMOTE_HOST}:${REMOTE_BASE}"
-rssh "mkdir -p '${REMOTE_SRC_DIR}' '${REMOTE_CERT_DIR}' '${REMOTE_DATA_DIR}/runs' && chmod 700 '${REMOTE_CERT_DIR}' && chown -R 10001:10001 '${REMOTE_DATA_DIR}'"
+rssh "mkdir -p '${REMOTE_SRC_DIR}' '${REMOTE_CERT_DIR}' '${REMOTE_DATA_DIR}/runs' '${REMOTE_DATA_DIR}/traces' '${REMOTE_DATA_DIR}/workspace' && chmod 700 '${REMOTE_CERT_DIR}' && chown -R 10001:10001 '${REMOTE_DATA_DIR}'"
 
 scp "${SSH_OPTS[@]}" "$LOCAL_CERT" "${REMOTE_HOST}:${REMOTE_CERT_DIR}/${CERT_DOMAIN}.cert"
 scp "${SSH_OPTS[@]}" "$LOCAL_KEY" "${REMOTE_HOST}:${REMOTE_CERT_DIR}/${CERT_DOMAIN}.key"
@@ -164,6 +164,7 @@ YANSHI_CORS_ALLOWED_ORIGINS=${SITE_URL}
 YANSHI_API_TOKEN=${API_TOK}
 YANSHI_GATEWAY_HOST_NODE_TYPES=file,agent,skill_agent,multi_agent,shell
 YANSHI_GATEWAY_ALLOWED_COMMANDS=ffmpeg,ffprobe,typst,pandoc
+YANSHI_GENERATE_MODEL=deepseek-chat
 YANSHI_RUN_MAX_CONCURRENCY=4
 CARGO_BUILD_JOBS=2
 RUST_LOG=info
@@ -252,11 +253,12 @@ rm -f /tmp/yanshi_ui_check.$$
 echo "HTTPS / -> /ui/studio SPA verified (HTTP ${ui_code})"
 
 api_token="$(grep -E '^YANSHI_API_TOKEN=' "${REMOTE_BASE}/.env" | head -n 1 | cut -d= -f2-)"
-diag_code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+diag_json="$(curl -fsS \
   --resolve "${SITE_HOST}:443:127.0.0.1" \
   -H "Authorization: Bearer ${api_token}" \
   "${SITE_URL}/v1/diagnostics")"
-echo "HTTPS /v1/diagnostics authenticated check: HTTP ${diag_code}"
+diag_status="$(printf '%s' "${diag_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status","unknown"), "pricing_models="+str(d.get("pricing",{}).get("models",0)))')"
+echo "HTTPS /v1/diagnostics authenticated check: ${diag_status}"
 EOF
 ok "Remote loopback & Pingora TLS verification passed"
 
