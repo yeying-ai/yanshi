@@ -38,7 +38,7 @@ services:
       YANSHI_GENERATE_MODEL: ${YANSHI_GENERATE_MODEL:-deepseek-v4-flash}
       YANSHI_GATEWAY_PATH_ROOTS: "/data"
       YANSHI_GATEWAY_HOST_NODE_TYPES: ${YANSHI_GATEWAY_HOST_NODE_TYPES:-file,agent,skill_agent,multi_agent,shell}
-      YANSHI_GATEWAY_ALLOWED_COMMANDS: ${YANSHI_GATEWAY_ALLOWED_COMMANDS:-ffmpeg,ffprobe,typst,pandoc}
+      YANSHI_GATEWAY_ALLOWED_COMMANDS: ${YANSHI_GATEWAY_ALLOWED_COMMANDS:-ffmpeg,ffprobe,typst,pandoc,d2,pdftotext,yt-dlp}
       YANSHI_RUN_MAX_CONCURRENCY: ${YANSHI_RUN_MAX_CONCURRENCY:-4}
       # Optional LLM provider credentials injected from host `.env`:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

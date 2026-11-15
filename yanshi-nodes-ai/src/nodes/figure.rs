@@ -116,9 +116,16 @@ impl Language {
          There is no network: only packages already cached (such as @preview/cetz) can be imported."
       }
       Self::D2 => {
-        "Write one D2 diagram (d2lang.com): shapes as `id: Label`, connections as \
-         `a -> b: label`. Layout is automatic, so give no positions. No imports and no \
-         icons or images (there is no network)."
+        "Write one valid D2 diagram (d2lang.com — NEVER use Mermaid keywords like graph, \
+         flowchart, sequenceDiagram, classDiagram or erDiagram). Rules:\n\
+         - Shapes/containers: `api: \"API Gateway\" { auth: \"JWT Filter\" }`, edges: `a -> b: \"label\"`.\n\
+         - Always double-quote labels or keys containing colons, parentheses, brackets, slashes or spaces.\n\
+         - Direction: `direction: right` or `direction: down` at top level.\n\
+         - UML classes: `Order: { shape: class; \"+id\": \"UUID\"; \"+create(cmd)\": \"Result\" }`.\n\
+         - Sequence diagrams: wrap in `flow: { shape: sequence_diagram; client; api; db; client -> api: \"POST /v1\" }`.\n\
+         - SQL ER tables: `users: { shape: sql_table; id: bigint {constraint: primary_key}; email: varchar {constraint: unique} }` \
+           and foreign-key edges `orders.user_id -> users.id`.\n\
+         - Layout is automatic; give no positions, no imports, and no external icons/images (sandbox has no network)."
       }
       Self::Python => {
         "Write one complete Python 3 script that draws the figure and saves it as SVG to \
@@ -509,15 +516,19 @@ impl FigureNode {
       system.push_str("\n\n");
       system.push_str(domain);
     }
-    let reply = Yanshi::model(model)
+    let response = Yanshi::model(model)
       .system(&system)
       .prompt(&prompt)
-      .execute()
+      .execute_full()
       .await
       .map_err(|e| YanshiError::NodeExecutionFailed {
         message: format!("{}: the model call failed: {e}", self.id),
       })?;
-    Ok(extract_source(&reply))
+    crate::cost::record(model, |p| match &response.usage {
+      Some(u) => p.cost_for_call(u.prompt_tokens, u.completion_tokens),
+      None => 0.0,
+    })?;
+    Ok(extract_source(&response.content))
   }
 }
 
@@ -536,6 +547,7 @@ impl AsyncNode for FigureNode {
     let model = string_input(inputs, "model");
     let max_attempts = match inputs.get("max_attempts") {
       Some(FlowValue::Json(Value::Number(n))) => n.as_u64().unwrap_or(DEFAULT_MAX_ATTEMPTS),
+      Some(FlowValue::Json(Value::String(s))) => s.trim().parse().unwrap_or(DEFAULT_MAX_ATTEMPTS),
       _ => DEFAULT_MAX_ATTEMPTS,
     }
     .clamp(1, 10);
@@ -717,5 +729,62 @@ mod tests {
     assert!(prompt.contains("an RC circuit"));
     assert!(prompt.contains("\\bad") && prompt.contains("! Undefined"));
     assert!(prompt.contains("corrected, complete tikz source"));
+  }
+
+  #[tokio::test]
+  async fn renders_d2_uml_class_sequence_and_sql_er_when_d2_is_installed() {
+    if sandboxed::find_tool("d2").is_none() {
+      return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d2_source = r#"
+direction: right
+
+Order: {
+  shape: class
+  "+id": "UUID"
+  "+create(cmd)": "Result"
+}
+
+flow: {
+  shape: sequence_diagram
+  client
+  api
+  db
+  client -> api: "POST /v1/orders"
+  api -> db: "INSERT INTO orders"
+}
+
+users: {
+  shape: sql_table
+  id: bigint {constraint: primary_key}
+  email: varchar {constraint: unique}
+}
+
+orders: {
+  shape: sql_table
+  id: bigint {constraint: primary_key}
+  user_id: bigint {constraint: foreign_key}
+}
+
+orders.user_id -> users.id
+"#;
+    let node = FigureNode::new("uml_er_test");
+    let inputs = HashMap::from([
+      ("language".to_string(), FlowValue::Json(json!("d2"))),
+      ("source".to_string(), FlowValue::Json(json!(d2_source))),
+      ("png".to_string(), FlowValue::Json(json!(true))),
+    ]);
+    let out = run_context::with_artifact_root(dir.path().to_path_buf(), node.execute(&inputs))
+      .await
+      .expect("d2 UML + ER compiles under OS sandbox");
+    assert!(matches!(
+      out.get("uml_er_test_svg"),
+      Some(FlowValue::File { .. })
+    ));
+    assert!(matches!(
+      out.get("uml_er_test_png"),
+      Some(FlowValue::File { .. })
+    ));
   }
 }
