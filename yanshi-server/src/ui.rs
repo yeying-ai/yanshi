@@ -10,7 +10,7 @@ use axum::{
     StatusCode,
     header::{CACHE_CONTROL, CONTENT_TYPE},
   },
-  response::{Html, IntoResponse, Response},
+  response::{Html, IntoResponse, Redirect, Response},
   routing::get,
 };
 
@@ -34,6 +34,7 @@ const STYLES_CSS: &str = include_str!("../../yanshi-ui/dist/assets/styles.css");
 /// `window.location.pathname`.
 pub fn ui_router() -> Router<AppState> {
   Router::new()
+    .route("/", get(root_redirect))
     .route("/ui", get(index_html))
     .route("/ui/", get(index_html))
     .route("/ui/studio", get(index_html))
@@ -55,6 +56,11 @@ pub fn ui_router() -> Router<AppState> {
     .route("/ui/runs/:id/compare", get(index_html))
     .route("/ui/assets/app.js", get(app_js))
     .route("/ui/assets/styles.css", get(styles_css))
+}
+
+/// Redirect bare domain root (`/`) to the Studio workspace.
+pub async fn root_redirect() -> Redirect {
+  Redirect::temporary("/ui/studio")
 }
 
 /// Serve the SPA shell.
@@ -87,6 +93,16 @@ pub fn asset_response(body: &'static str, content_type: &'static str) -> Respons
 mod tests {
   use super::*;
   use axum::http::header;
+
+  #[tokio::test]
+  async fn root_redirects_to_studio_ui() {
+    let response = root_redirect().await.into_response();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+      response.headers().get(header::LOCATION),
+      Some(&"/ui/studio".parse().expect("valid location header"))
+    );
+  }
 
   #[tokio::test]
   async fn index_contains_app_mount() {

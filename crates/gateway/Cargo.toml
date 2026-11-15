@@ -1,0 +1,23 @@
+[package]
+name = "yanshi-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pingora-based TLS terminator and SSE-friendly reverse proxy for Yanshi"
+
+# Independent workspace: keeps Pingora's OpenSSL / native build dependencies
+# isolated from the main Yanshi workspace and its L0-L4 dependency laws.
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+env_logger = "0.11"
+log = "0.4"
+pingora-core = { version = "0.9", features = ["openssl"] }
+pingora-http = "0.9"
+pingora-proxy = { version = "0.9", features = ["openssl"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
