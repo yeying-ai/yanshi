@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NodeIoInspector } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
+import { YamlCodeEditor } from '../components/YamlCodeEditor';
 import {
   WorkflowGraphCanvas,
   type NodeRuntimeTelemetry,
@@ -291,7 +292,8 @@ export function WorkflowStudioPage({
   );
   const [showConnPopover, setShowConnPopover] = useState<boolean>(false);
   const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
-  const [showYamlEditor, setShowYamlEditor] = useState<boolean>(false);
+  const [showYamlEditor, setShowYamlEditor] = useState<boolean>(true);
+  const [yamlModalOpen, setYamlModalOpen] = useState<boolean>(false);
   const [mobilePane, setMobilePane] = useState<MobilePane>('canvas');
 
   // Debug & run state
@@ -1164,14 +1166,16 @@ export function WorkflowStudioPage({
                     </button>
                   </div>
                   {showYamlEditor && (
-                    <textarea
-                      className="studio-yaml-editor"
+                    <YamlCodeEditor
+                      testId="studio-yaml-editor"
+                      ariaLabel="YAML 编排源码"
                       value={yamlDraft}
-                      onChange={(ev) => {
+                      minHeight={280}
+                      onExpandToggle={() => setYamlModalOpen(true)}
+                      onChange={(nextValue) => {
                         setSelectedPresetId('custom');
-                        setYamlDraft(ev.target.value);
+                        setYamlDraft(nextValue);
                       }}
-                      spellCheck={false}
                     />
                   )}
                 </div>
@@ -1570,6 +1574,57 @@ export function WorkflowStudioPage({
           </>
         )}
       </nav>
+
+      {yamlModalOpen && (
+        <div
+          className="studio-yaml-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="放大编辑工作流 YAML"
+          onKeyDown={(ev) => {
+            if (ev.key === 'Escape') {
+              setYamlModalOpen(false);
+            }
+          }}
+        >
+          <div className="studio-yaml-modal">
+            <header className="studio-yaml-modal__head">
+              <div>
+                <strong>YAML 编排源码编辑器</strong>
+                <span
+                  className={
+                    inspected.diagnostics.valid
+                      ? 'studio-yaml-modal__badge ok'
+                      : 'studio-yaml-modal__badge warn'
+                  }
+                >
+                  {inspected.diagnostics.valid
+                    ? `✓ 拓扑有效 · ${inspected.nodes.length} 节点 / ${inspected.edges.length} 边`
+                    : `⚠ ${inspected.diagnostics.issues[0] ?? '语法或依赖有误'}`}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="studio-btn-primary studio-btn-sm"
+                onClick={() => setYamlModalOpen(false)}
+              >
+                完成并关闭 (Esc)
+              </button>
+            </header>
+
+            <YamlCodeEditor
+              ariaLabel="放大编辑工作流 YAML"
+              value={yamlDraft}
+              isExpanded
+              onExpandToggle={() => setYamlModalOpen(false)}
+              onChange={(nextValue) => {
+                setSelectedPresetId('custom');
+                setYamlDraft(nextValue);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

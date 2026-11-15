@@ -4,6 +4,7 @@ import './styles.css';
 import { compileFilter, applyFilter, type FilterEvent } from './eventFilter';
 import { usePreferenceSync } from './usePreferenceSync';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { YamlCodeEditor } from './components/YamlCodeEditor';
 import { DiagnosticsPanel } from './pages/DiagnosticsPanel';
 import { HarnessSessionDetail } from './pages/HarnessSessionDetail';
 import { HarnessSessionList } from './pages/HarnessSessionList';
@@ -936,10 +937,15 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
                 placeholder="Bearer token"
               />
             </label>
-            <label className="workflow-field">
+            <div className="workflow-field">
               <span>Workflow YAML</span>
-              <textarea value={workflowDraft} onChange={(event) => setWorkflowDraft(event.target.value)} />
-            </label>
+              <YamlCodeEditor
+                ariaLabel="Workflow YAML"
+                value={workflowDraft}
+                onChange={setWorkflowDraft}
+                minHeight={200}
+              />
+            </div>
             <button disabled={submitState === 'submitting'} type="submit">
               {submitState === 'submitting' ? 'Submitting' : 'Submit run'}
             </button>

@@ -4,6 +4,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 
+import { YamlCodeEditor } from '../components/YamlCodeEditor';
 import { apiFetch } from '../lib/api';
 import {
   newFormInputsKey,
@@ -262,12 +263,11 @@ export function RunCreateForm({
             </label>
             <span className="line-meter">lines: {lineCount(workflowYaml)}</span>
           </div>
-          <textarea
-            data-testid="create-workflow"
-            className="code-editor code-editor-yaml"
-            spellCheck={false}
+          <YamlCodeEditor
+            testId="create-workflow"
+            ariaLabel="Workflow YAML"
             value={workflowYaml}
-            onChange={(event) => setWorkflowYaml(event.target.value)}
+            onChange={setWorkflowYaml}
             rows={18}
           />
         </section>
