@@ -232,6 +232,49 @@ export const NODE_PALETTE: NodePaletteItem[] = [
     },
   },
   {
+    type: 'web_search',
+    label: '联网检索 (web_search)',
+    category: '工具与控制流',
+    description: '多厂商联网搜索（Tavily/Bocha/Serper/Brave + 免 Key 聚合回退）',
+    defaultInputKey: 'query',
+    defaultParameters: {
+      query: '{{ query | default("") }}',
+      provider: 'auto',
+      max_results: 6,
+    },
+  },
+  {
+    type: 'repo_snapshot',
+    label: '代码仓库快照 (repo_snapshot)',
+    category: '工具与控制流',
+    description: '提取 GitHub 仓库或受控本地源码目录的模块树、Manifest 与依赖边',
+    defaultInputKey: 'source',
+    defaultParameters: {
+      source: 'https://github.com/tokio-rs/axum',
+    },
+  },
+  {
+    type: 'pdf_extract',
+    label: 'PDF 论文解析 (pdf_extract)',
+    category: '工具与控制流',
+    description: '沙箱提取 arXiv/OpenReview/本地 PDF 全文与分页结构',
+    defaultInputKey: 'source',
+    defaultParameters: {
+      source: 'https://arxiv.org/abs/1706.03762',
+    },
+  },
+  {
+    type: 'video_ingest',
+    label: '视频/字幕采集 (video_ingest)',
+    category: '工具与控制流',
+    description: '优先提取原生软字幕，自动回退沙箱 ffmpeg 16kHz 音频抽取供 ASR 转写',
+    defaultInputKey: 'source',
+    defaultParameters: {
+      source: '{{ source | default("") }}',
+      prefer_subtitles: true,
+    },
+  },
+  {
     type: 'file',
     label: '受控文件读写 (file)',
     category: '工具与控制流',

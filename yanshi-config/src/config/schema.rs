@@ -258,6 +258,43 @@ fn validate_node_schema(
     }
   }
 
+  if node.node_type == "agent" {
+    let has_input = |key: &str| {
+      node.parameters.contains_key(key)
+        || node.input_mapping.contains_key(key)
+        || declared_inputs.contains(key)
+    };
+    let has_skill = has_input("skill");
+    let has_prompt = has_input("prompt");
+    let has_message = has_input("message");
+    if has_skill && !has_message {
+      report.issues.push(format!(
+        "{}.{} requires 'message' as a parameter or input_mapping when 'skill' is set",
+        path, node.id
+      ));
+    } else if !has_skill && !has_prompt && !has_message {
+      report.issues.push(format!(
+        "{}.{} requires 'prompt' or 'message' (inline agent) or 'skill' + 'message' (skill-backed agent)",
+        path, node.id
+      ));
+    }
+    if let Some(tools) = node.parameters.get("tools").and_then(|v| v.as_sequence()) {
+      for entry in tools {
+        match entry.as_str() {
+          Some("web_search" | "http") => {}
+          Some(other) => report.issues.push(format!(
+            "{}.{}.parameters.tools unknown inline agent tool '{other}' (supported: web_search, http)",
+            path, node.id
+          )),
+          None => report.issues.push(format!(
+            "{}.{}.parameters.tools entries must be strings",
+            path, node.id
+          )),
+        }
+      }
+    }
+  }
+
   // F-A6-6: the `template` node is designed to consume arbitrary
   // Tera context — any key in `parameters` that isn't `template` /
   // `output_key` / `output_format` is intentional input for the
@@ -401,10 +438,22 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("max_tokens", ParamType::Integer),
       ParamSpec::optional("json_schema", ParamType::Any),
     ]),
-    "skill_agent" | "agent" => Some(vec![
+    "skill_agent" => Some(vec![
       ParamSpec::required_input("skill", ParamType::String),
       ParamSpec::required_input("message", ParamType::String),
       ParamSpec::optional("model", ParamType::String),
+    ]),
+    "agent" => Some(vec![
+      ParamSpec::optional("skill", ParamType::String),
+      ParamSpec::optional("prompt", ParamType::String),
+      ParamSpec::optional("message", ParamType::String),
+      ParamSpec::optional("system", ParamType::String),
+      ParamSpec::optional("model", ParamType::String),
+      ParamSpec::optional("tools", ParamType::Sequence),
+      ParamSpec::optional("interactive", ParamType::Bool),
+      ParamSpec::optional("max_steps", ParamType::Integer),
+      ParamSpec::optional("max_questions", ParamType::Integer),
+      ParamSpec::optional("json_schema", ParamType::Any),
     ]),
     "multi_agent" => Some(vec![
       ParamSpec::required("mode", ParamType::String),

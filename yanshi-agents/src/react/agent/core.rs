@@ -942,6 +942,49 @@ impl ReActAgent {
       .await?;
 
     match parsed {
+      AgentResponse::Action { tool, params, .. } if tool == ASK_USER_TOOL_NAME => {
+        let question = params
+          .get("question")
+          .and_then(Value::as_str)
+          .unwrap_or_default()
+          .to_string();
+        let ask_step_index = st.step_index;
+        push_step!(
+          self.live_sink,
+          st.steps,
+          st.events,
+          self.session_id,
+          st.step_index,
+          AgentStepKind::ToolCall {
+            tool: ASK_USER_TOOL_NAME.to_string(),
+            params,
+          }
+        );
+        st.step_index += 1;
+        let interrupt_event = AgentEvent::InterruptRequested {
+          session_id: self.session_id.clone(),
+          step_index: ask_step_index,
+          question: question.clone(),
+          timestamp: Utc::now(),
+        };
+        if let Some(handle) = self.live_sink.as_ref() {
+          handle.0.emit(&interrupt_event).await;
+        }
+        st.events.push(interrupt_event);
+        if let Some(checkpointer) = self.live_checkpointer.as_ref() {
+          let checkpoint = st.to_checkpoint(&self.session_id, Some(question.clone()));
+          if let Err(e) = checkpointer.0.save(&checkpoint).await {
+            warn!(session = %self.session_id, error = %e, "agent loop checkpoint save failed");
+          }
+        }
+        Ok(TurnStep::Stop(Self::stopped_result(
+          &self.session_id,
+          None,
+          AgentStopReason::AwaitingInput { question },
+          std::mem::take(&mut st.steps),
+          std::mem::take(&mut st.events),
+        )))
+      }
       AgentResponse::Action {
         thought,
         tool,

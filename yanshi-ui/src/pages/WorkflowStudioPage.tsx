@@ -46,6 +46,8 @@ import {
   RunApprovalDecisionResponseSchema,
   RunApprovalsEnvelopeSchema,
   RunEnvelopeSchema,
+  RunQuestionAnswerResponseSchema,
+  RunQuestionsEnvelopeSchema,
   StreamedEventArraySchema,
   StreamedEventSchema,
   parseJsonResponse,
@@ -54,6 +56,7 @@ import {
   type InspectedInput,
   type InspectWorkflowResponse,
   type PendingApproval,
+  type PendingRunQuestion,
   type ResumePlan,
   type RunRecord,
   type StreamedEvent,
@@ -429,6 +432,9 @@ export function WorkflowStudioPage({
   const [resumeActionBusy, setResumeActionBusy] = useState<boolean>(false);
   const [pendingRunApprovals, setPendingRunApprovals] = useState<PendingApproval[]>([]);
   const [approvalDecisionBusyId, setApprovalDecisionBusyId] = useState<string | null>(null);
+  const [pendingRunQuestions, setPendingRunQuestions] = useState<PendingRunQuestion[]>([]);
+  const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
+  const [questionAnswerBusyId, setQuestionAnswerBusyId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const latestSeqRef = useRef<number>(-1);
@@ -907,6 +913,59 @@ export function WorkflowStudioPage({
     };
   }, [runId, isRunActive, apiToken, tenantId]);
 
+  const latestQuestionSignal = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i];
+      if (
+        ev.kind === 'node.progress' &&
+        ev.payload &&
+        typeof ev.payload === 'object' &&
+        (ev.payload as Record<string, unknown>).kind === 'question.pending'
+      ) {
+        return ev.seq;
+      }
+    }
+    return -1;
+  }, [events]);
+
+  // Poll `/v1/runs/:id/questions` while a run is active so inline HITL `ask_user` prompts appear immediately.
+  useEffect(() => {
+    if (!runId || !isRunActive) {
+      setPendingRunQuestions([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const pollQuestions = async () => {
+      try {
+        const res = await apiFetch(
+          `/v1/runs/${encodeURIComponent(runId)}/questions`,
+          apiToken,
+          {},
+          tenantId,
+        );
+        if (!res.ok || cancelled) return;
+        const parsed = await parseJsonResponse(
+          RunQuestionsEnvelopeSchema,
+          res,
+          `GET /v1/runs/${runId}/questions`,
+        );
+        if (!cancelled) {
+          setPendingRunQuestions(parsed.pending);
+        }
+      } catch {
+        // Non-fatal if endpoint is momentarily unreachable.
+      }
+    };
+    void pollQuestions();
+    const timer = window.setInterval(() => {
+      void pollQuestions();
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [runId, isRunActive, apiToken, tenantId, latestQuestionSignal]);
+
   const allPresets = useMemo(
     () => [
       ...personalTemplates.map((tpl) => ({
@@ -1067,6 +1126,8 @@ export function WorkflowStudioPage({
       setEvents([]);
       setArtifacts([]);
       setPendingRunApprovals([]);
+      setPendingRunQuestions([]);
+      setQuestionDrafts({});
       setRunId(created.run_id);
       setStreamState('loading');
       if (targetRunMode === 'release') {
@@ -1254,6 +1315,71 @@ export function WorkflowStudioPage({
     } finally {
       setApprovalDecisionBusyId(null);
     }
+  };
+
+  const submitRunQuestionAnswer = async (questionId: string, overrideAnswer?: string) => {
+    if (!runId || questionAnswerBusyId) return;
+    const answer = (overrideAnswer ?? questionDrafts[questionId] ?? '').trim();
+    if (!answer) {
+      setBannerError('请先填写你的回答后再提交');
+      return;
+    }
+    setQuestionAnswerBusyId(questionId);
+    try {
+      const res = await apiFetch(
+        `/v1/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(questionId)}`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ answer }),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `提交问答回复失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`,
+        );
+      }
+      await parseJsonResponse(
+        RunQuestionAnswerResponseSchema,
+        res,
+        `POST /v1/runs/${runId}/questions/${questionId}`,
+      );
+      setPendingRunQuestions((prev) => prev.filter((item) => item.question_id !== questionId));
+      setQuestionDrafts((prev) => {
+        const next = { ...prev };
+        delete next[questionId];
+        return next;
+      });
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuestionAnswerBusyId(null);
+    }
+  };
+
+  const attachLocalFileAsDataUri = (
+    inputName: string,
+    ev: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    if (file.size > 24 * 1024 * 1024) {
+      setBannerError(`文件「${file.name}」超过 24MB 浏览器内联上限，请改传公网 URL`);
+      ev.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setInputDrafts((prev) => ({ ...prev, [inputName]: reader.result as string }));
+        setBannerNotice(`已载入本地文件「${file.name}」（${(file.size / 1024).toFixed(1)} KB）`);
+      }
+    };
+    reader.readAsDataURL(file);
+    ev.target.value = '';
   };
 
   const importLocalYaml = (ev: React.ChangeEvent<HTMLInputElement>) => {
@@ -1501,18 +1627,61 @@ export function WorkflowStudioPage({
             );
           }
 
+          const supportsLocalFile =
+            spec.kind === 'string' &&
+            (spec.name === 'source' ||
+              spec.name.endsWith('_source') ||
+              spec.name.includes('pdf') ||
+              spec.name.includes('video') ||
+              spec.name.includes('audio'));
+          const isDataUri = val.startsWith('data:');
+
           return (
-            <label key={spec.name} className="studio-input-field">
+            <div key={spec.name} className="studio-input-field">
               <div className="studio-input-field__label">
                 <strong>
                   {spec.name}
                   {spec.required ? <em className="studio-req">*</em> : null}
                 </strong>
-                <span>{spec.kind}</span>
+                <span className="studio-input-field__meta">
+                  {supportsLocalFile && (
+                    <label
+                      className="studio-upload-btn"
+                      title="选择本地 PDF / 音频 / 视频文件并转为内联 Data URI"
+                    >
+                      📎 选择文件
+                      <input
+                        type="file"
+                        accept=".pdf,.mp4,.mkv,.webm,.mov,.mp3,.wav,.m4a,.srt,.vtt"
+                        onChange={(ev) => attachLocalFileAsDataUri(spec.name, ev)}
+                      />
+                    </label>
+                  )}
+                  <span>{spec.kind}</span>
+                </span>
               </div>
               {spec.description && <small className="studio-input-field__desc">{spec.description}</small>}
-              {spec.kind === 'json' || isLongText ? (
+              {isDataUri ? (
+                <div className="studio-datauri-pill">
+                  <span>
+                    已载入内联文件数据（{Math.round(val.length / 1024)} KB Data URI）
+                  </span>
+                  <button
+                    type="button"
+                    className="studio-btn-ghost studio-btn-sm"
+                    onClick={() =>
+                      setInputDrafts((prev) => ({
+                        ...prev,
+                        [spec.name]: defaultInputString(spec),
+                      }))
+                    }
+                  >
+                    清除并改填 URL
+                  </button>
+                </div>
+              ) : spec.kind === 'json' || isLongText ? (
                 <textarea
+                  aria-label={spec.name}
                   rows={spec.kind === 'json' ? 3 : 2}
                   value={val}
                   onChange={(ev) =>
@@ -1521,6 +1690,7 @@ export function WorkflowStudioPage({
                 />
               ) : (
                 <input
+                  aria-label={spec.name}
                   type={spec.kind === 'number' ? 'number' : 'text'}
                   value={val}
                   onChange={(ev) =>
@@ -1528,7 +1698,7 @@ export function WorkflowStudioPage({
                   }
                 />
               )}
-            </label>
+            </div>
           );
         })}
       </div>
@@ -1780,6 +1950,74 @@ export function WorkflowStudioPage({
                   >
                     ✕ 拒绝并中止
                   </button>
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      )}
+
+      {pendingRunQuestions.length > 0 && (
+        <section
+          className="studio-run-questions-banner"
+          role="region"
+          aria-label="架构规划多轮澄清问答"
+          data-testid="run-questions-banner"
+        >
+          {pendingRunQuestions.map((q) => {
+            const busy = questionAnswerBusyId === q.question_id;
+            const draft = questionDrafts[q.question_id] ?? '';
+            return (
+              <div key={q.question_id} className="studio-run-question-card">
+                <div className="studio-run-question-card__header">
+                  <span className="studio-question-badge">💬 Agent 需求澄清</span>
+                  <strong>节点：{q.node_id}</strong>
+                  <small>回答后工作流将自动继续执行</small>
+                </div>
+                <div className="studio-run-question-card__prompt">{q.question}</div>
+                <div className="studio-run-question-card__reply">
+                  <textarea
+                    rows={3}
+                    aria-label={`回答节点 ${q.node_id} 的提问`}
+                    placeholder="输入你的业务约束、技术栈偏好或规模预期（Ctrl/Cmd + Enter 提交）…"
+                    value={draft}
+                    disabled={busy}
+                    onChange={(ev) =>
+                      setQuestionDrafts((prev) => ({
+                        ...prev,
+                        [q.question_id]: ev.target.value,
+                      }))
+                    }
+                    onKeyDown={(ev) => {
+                      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+                        ev.preventDefault();
+                        void submitRunQuestionAnswer(q.question_id);
+                      }
+                    }}
+                  />
+                  <div className="studio-run-question-card__actions">
+                    <button
+                      type="button"
+                      className="studio-btn-primary studio-btn-sm"
+                      disabled={busy || !draft.trim()}
+                      onClick={() => void submitRunQuestionAnswer(q.question_id)}
+                    >
+                      {busy ? '提交中…' : '发送回答并继续 →'}
+                    </button>
+                    <button
+                      type="button"
+                      className="studio-btn-secondary studio-btn-sm"
+                      disabled={busy}
+                      onClick={() =>
+                        void submitRunQuestionAnswer(
+                          q.question_id,
+                          '其余细节请直接采用生产级主流工程最佳实践默认方案，无需继续追问，直接输出完整规格方案。',
+                        )
+                      }
+                    >
+                      按工程最佳实践默认继续
+                    </button>
+                  </div>
                 </div>
               </div>
             );

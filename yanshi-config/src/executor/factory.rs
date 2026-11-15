@@ -1,12 +1,20 @@
 use crate::config::v2::NodeDefinitionV2;
-use yanshi_agents::{AgentNodeResumeContract, AgentRunResult};
+use yanshi_agents::checkpoint::{
+  AgentLoopCheckpoint, AgentLoopCheckpointError, AgentLoopCheckpointer,
+};
+use yanshi_agents::react::{ReActAgent, ReActConfig};
+use yanshi_agents::runtime::AgentEventSink;
+use yanshi_agents::yanshi_memory::SessionMemory;
+use yanshi_agents::{
+  AgentContext, AgentEvent, AgentNodeResumeContract, AgentRunResult, AgentStopReason,
+};
 use yanshi_core::{
   async_node::{AsyncNode, AsyncNodeInputs, AsyncNodeResult},
   error::YanshiError,
   flow::{GraphNode, NodeType},
   value::FlowValue,
 };
-use yanshi_llm::Yanshi;
+use yanshi_llm::{Yanshi, pricing::PricingTable};
 // Tool-tier nodes (no capability deps) stay in `yanshi-nodes`; the
 // capability-backed nodes moved to `yanshi-nodes-ai` (P-A nodes split).
 use async_trait::async_trait;
@@ -22,6 +30,7 @@ use yanshi_nodes_ai::nodes::{
   text_to_video::TextToVideoNode, tts::TTSNode,
 };
 use yanshi_skills::{SkillBuilder, SkillLoader};
+use yanshi_tools::builtin::{HttpTool, WebSearchTool};
 use yanshi_tools::{SandboxPolicy, ToolRegistry};
 
 #[cfg(feature = "mcp")]
@@ -57,8 +66,12 @@ fn get_string_param_optional(params: &HashMap<String, serde_yaml::Value>, key: &
 pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
   let node_type = match node_def.node_type.as_str() {
     "llm" => Ok(NodeType::Standard(Arc::new(LlmNode::with_id(&node_def.id)))),
-    "skill_agent" | "agent" => {
+    "skill_agent" => {
       let node = SkillAgentWorkflowNode::new(&node_def.id);
+      Ok(NodeType::Standard(Arc::new(node)))
+    }
+    "agent" => {
+      let node = AgentWorkflowNode::new(&node_def.id);
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "multi_agent" => {
@@ -755,6 +768,402 @@ fn build_skill_agent_outputs(
   Ok(outputs)
 }
 
+#[derive(Default)]
+struct InMemoryLoopCheckpointer {
+  latest: std::sync::Mutex<Option<AgentLoopCheckpoint>>,
+}
+
+impl InMemoryLoopCheckpointer {
+  fn latest(&self) -> Option<AgentLoopCheckpoint> {
+    self
+      .latest
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+}
+
+#[async_trait]
+impl AgentLoopCheckpointer for InMemoryLoopCheckpointer {
+  async fn save(&self, checkpoint: &AgentLoopCheckpoint) -> Result<(), AgentLoopCheckpointError> {
+    *self
+      .latest
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkpoint.clone());
+    Ok(())
+  }
+
+  async fn load(
+    &self,
+    _session_id: &str,
+  ) -> Result<Option<AgentLoopCheckpoint>, AgentLoopCheckpointError> {
+    Ok(self.latest())
+  }
+
+  async fn clear(&self, _session_id: &str) -> Result<(), AgentLoopCheckpointError> {
+    *self
+      .latest
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    Ok(())
+  }
+}
+
+struct InlineAgentEventSink;
+
+#[async_trait]
+impl AgentEventSink for InlineAgentEventSink {
+  async fn emit(&self, event: &AgentEvent) {
+    match event {
+      AgentEvent::LlmCallCompleted {
+        model,
+        prompt_tokens,
+        completion_tokens,
+        ..
+      } => {
+        if let Ok(table) = PricingTable::shared() {
+          let usd = table
+            .lookup(model)
+            .cost_for_call(*prompt_tokens, *completion_tokens);
+          yanshi_core::run_context::record_cost_usd(usd);
+        }
+      }
+      AgentEvent::ToolCallStarted {
+        step_index, tool, ..
+      } => {
+        yanshi_core::run_context::report_progress(
+          "agent.tool_call",
+          json!({ "step_index": step_index, "tool": tool }),
+        );
+      }
+      _ => {}
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+struct AgentWorkflowNode {
+  name: String,
+}
+
+impl AgentWorkflowNode {
+  fn new(name: &str) -> Self {
+    Self {
+      name: name.to_string(),
+    }
+  }
+}
+
+#[async_trait]
+impl AsyncNode for AgentWorkflowNode {
+  async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+    if inputs.contains_key("skill") {
+      return SkillAgentWorkflowNode::new(&self.name)
+        .execute(inputs)
+        .await;
+    }
+
+    let prompt = match get_optional_string(inputs, "prompt")
+      .map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?
+      .filter(|s| !s.trim().is_empty())
+    {
+      Some(p) => p,
+      None => get_optional_string(inputs, "message")
+        .map_err(|m| YanshiError::NodeInputError {
+          message: format!("agent '{}': {m}", self.name),
+        })?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| YanshiError::NodeInputError {
+          message: format!(
+            "agent '{}': required input 'prompt' (or 'message') is missing or empty",
+            self.name
+          ),
+        })?,
+    };
+
+    let model = get_optional_string(inputs, "model")
+      .map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?
+      .unwrap_or_default()
+      .to_string();
+    let system =
+      get_optional_string(inputs, "system").map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?;
+    let interactive = get_optional_bool(inputs, "interactive")
+      .map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?
+      .unwrap_or(true);
+    let max_steps = get_optional_usize(inputs, "max_steps")
+      .map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?
+      .unwrap_or(10)
+      .clamp(1, 32);
+    let max_questions = get_optional_usize(inputs, "max_questions")
+      .map_err(|m| YanshiError::NodeInputError {
+        message: format!("agent '{}': {m}", self.name),
+      })?
+      .unwrap_or(4)
+      .min(16);
+
+    let json_schema = match inputs.get("json_schema") {
+      None => None,
+      Some(FlowValue::Json(Value::Object(map))) => Some(Value::Object(map.clone())),
+      Some(FlowValue::Json(Value::String(raw))) => Some(serde_json::from_str(raw).map_err(
+        |err| YanshiError::NodeInputError {
+          message: format!(
+            "agent '{}': 'json_schema' is not valid JSON: {err}",
+            self.name
+          ),
+        },
+      )?),
+      Some(_) => {
+        return Err(YanshiError::NodeInputError {
+          message: format!(
+            "agent '{}': 'json_schema' must be a JSON Schema object",
+            self.name
+          ),
+        });
+      }
+    };
+
+    let mut registry = ToolRegistry::new();
+    if let Some(tools_val) = inputs.get("tools") {
+      let FlowValue::Json(Value::Array(items)) = tools_val else {
+        return Err(YanshiError::NodeInputError {
+          message: format!(
+            "agent '{}': 'tools' must be an array of tool names",
+            self.name
+          ),
+        });
+      };
+      for entry in items {
+        let Some(tool_name) = entry.as_str() else {
+          return Err(YanshiError::NodeInputError {
+            message: format!("agent '{}': 'tools' entries must be strings", self.name),
+          });
+        };
+        match tool_name {
+          "web_search" => {
+            let tool =
+              WebSearchTool::default_policy().map_err(|err| YanshiError::ConfigurationError {
+                message: format!(
+                  "agent '{}': failed to build web_search tool: {err}",
+                  self.name
+                ),
+              })?;
+            registry.register(Arc::new(tool));
+          }
+          "http" => {
+            let tool = HttpTool::new(Arc::new(SandboxPolicy::default())).map_err(|err| {
+              YanshiError::ConfigurationError {
+                message: format!("agent '{}': failed to build http tool: {err}", self.name),
+              }
+            })?;
+            registry.register(Arc::new(tool));
+          }
+          other => {
+            return Err(YanshiError::NodeInputError {
+              message: format!(
+                "agent '{}': unsupported inline tool '{other}' (supported: web_search, http)",
+                self.name
+              ),
+            });
+          }
+        }
+      }
+    }
+
+    Yanshi::ensure_init()
+      .await
+      .map_err(|err| YanshiError::ConfigurationError {
+        message: format!("agent '{}': failed to initialize LLM: {}", self.name, err),
+      })?;
+
+    // Check PricingTable upfront so malformed pricing configs fail consistently.
+    PricingTable::shared().map_err(|message| YanshiError::ConfigurationError {
+      message: format!("pricing table: {message}"),
+    })?;
+
+    let mut config = ReActConfig::new(&model)
+      .with_max_iterations(max_steps)
+      .with_budget_tokens(200_000);
+    if let Some(sys) = system {
+      config = config.with_persona(sys.to_string());
+    }
+    if let Some(schema) = &json_schema {
+      config.output_schema = Some(schema.clone());
+    }
+
+    let mut agent = ReActAgent::new(
+      config,
+      Box::new(SessionMemory::default_window()),
+      Arc::new(registry),
+    );
+    let session_id = format!("flow-agent-{}-{}", self.name, uuid::Uuid::new_v4());
+    let checkpointer = Arc::new(InMemoryLoopCheckpointer::default());
+    let checkpointer_handle: Arc<dyn AgentLoopCheckpointer> = checkpointer.clone();
+    let event_sink: Arc<dyn AgentEventSink> = Arc::new(InlineAgentEventSink);
+
+    let effective_input = if !interactive
+      || yanshi_core::run_context::current_question_handler().is_none()
+    {
+      format!(
+        "{prompt}\n\n[Execution mode: non-interactive batch mode. Do NOT call ask_user; infer reasonable production-grade engineering defaults directly and produce the complete final answer.]"
+      )
+    } else {
+      prompt.to_string()
+    };
+
+    let initial_ctx = AgentContext::new(&session_id, effective_input, &model)
+      .with_event_sink(event_sink.clone())
+      .with_loop_checkpointer(checkpointer_handle.clone());
+
+    let mut result = agent.run_with_context(initial_ctx).await.map_err(|err| {
+      YanshiError::NodeExecutionFailed {
+        message: format!("agent '{}': agent run failed: {}", self.name, err),
+      }
+    })?;
+
+    let mut questions_asked = 0usize;
+    let mut qa_history = Vec::new();
+    while let AgentStopReason::AwaitingInput { question } = result.stop_reason.clone() {
+      let checkpoint = checkpointer
+        .latest()
+        .ok_or_else(|| YanshiError::NodeExecutionFailed {
+          message: format!(
+            "agent '{}': paused on ask_user without saving a loop checkpoint",
+            self.name
+          ),
+        })?;
+      let answer = if interactive
+        && questions_asked < max_questions
+        && let Some(handler) = yanshi_core::run_context::current_question_handler()
+      {
+        questions_asked += 1;
+        let reply = handler
+          .ask_user(&self.name, &question)
+          .await
+          .map_err(|err| {
+            if err == "cancelled" {
+              YanshiError::TaskCancelled
+            } else {
+              YanshiError::NodeExecutionFailed {
+                message: format!(
+                  "agent '{}': failed waiting for user answer: {err}",
+                  self.name
+                ),
+              }
+            }
+          })?;
+        qa_history.push(json!({
+          "round": questions_asked,
+          "question": question,
+          "answer": reply,
+        }));
+        if questions_asked >= max_questions {
+          format!(
+            "{reply}\n\n[System note: Maximum clarification rounds ({max_questions}) reached. Do NOT call ask_user again; synthesize all gathered requirements and output the complete final specification now.]"
+          )
+        } else {
+          reply
+        }
+      } else {
+        "Proceed directly using reasonable production-grade engineering defaults without asking any further questions, and output the complete final specification now.".to_string()
+      };
+
+      let resume_ctx = AgentContext::new(&session_id, "", &model)
+        .with_event_sink(event_sink.clone())
+        .with_loop_checkpointer(checkpointer_handle.clone());
+      result = agent
+        .resume_from_loop_checkpoint(resume_ctx, checkpoint, Some(answer))
+        .await
+        .map_err(|err| YanshiError::NodeExecutionFailed {
+          message: format!("agent '{}': agent resume failed: {}", self.name, err),
+        })?;
+    }
+
+    let tools = agent.tools().clone();
+    if !result.stop_reason.is_success() {
+      let partial_outputs = build_skill_agent_outputs(&self.name, &result, &tools)?;
+      return Err(YanshiError::NodePartialExecutionFailed {
+        message: format!(
+          "agent '{}': agent stopped before final answer: {:?}",
+          self.name, result.stop_reason
+        ),
+        partial_outputs,
+      });
+    }
+
+    let mut outputs = build_skill_agent_outputs(&self.name, &result, &tools)?;
+    let response_text = result.answer.clone().unwrap_or_default();
+    let primary_output = if json_schema.is_some() {
+      serde_json::from_str::<Value>(&response_text).map_err(|err| {
+        YanshiError::NodeExecutionFailed {
+          message: format!(
+            "agent '{}': final answer did not parse as JSON: {err}",
+            self.name
+          ),
+        }
+      })?
+    } else {
+      Value::String(response_text.clone())
+    };
+    outputs.insert(
+      "output".to_string(),
+      FlowValue::Json(primary_output.clone()),
+    );
+    outputs.insert(
+      format!("{}_output", self.name),
+      FlowValue::Json(primary_output),
+    );
+    outputs.insert("text".to_string(), FlowValue::Json(json!(response_text)));
+    outputs.insert(
+      "qa_history".to_string(),
+      FlowValue::Json(Value::Array(qa_history)),
+    );
+    outputs.insert(
+      "questions_asked".to_string(),
+      FlowValue::Json(json!(questions_asked)),
+    );
+    Ok(outputs)
+  }
+}
+
+fn get_optional_bool(inputs: &AsyncNodeInputs, key: &str) -> Result<Option<bool>, String> {
+  match inputs.get(key) {
+    None => Ok(None),
+    Some(FlowValue::Json(Value::Bool(flag))) => Ok(Some(*flag)),
+    Some(FlowValue::Json(Value::String(raw))) => match raw.trim().to_ascii_lowercase().as_str() {
+      "true" | "1" | "yes" => Ok(Some(true)),
+      "false" | "0" | "no" => Ok(Some(false)),
+      _ => Err(format!("input '{}' must be a boolean", key)),
+    },
+    Some(_) => Err(format!("input '{}' must be a boolean", key)),
+  }
+}
+
+fn get_optional_usize(inputs: &AsyncNodeInputs, key: &str) -> Result<Option<usize>, String> {
+  match inputs.get(key) {
+    None => Ok(None),
+    Some(FlowValue::Json(Value::Number(num))) => num
+      .as_u64()
+      .map(|n| Some(n as usize))
+      .ok_or_else(|| format!("input '{}' must be a non-negative integer", key)),
+    Some(FlowValue::Json(Value::String(raw))) => raw
+      .trim()
+      .parse::<usize>()
+      .map(Some)
+      .map_err(|_| format!("input '{}' must be a non-negative integer", key)),
+    Some(_) => Err(format!("input '{}' must be a non-negative integer", key)),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -911,6 +1320,102 @@ input_mapping:
         Some(&("producer".to_string(), "field".to_string())),
         "input_mapping[\"{key}\"] did not resolve to (producer, field)"
       );
+    }
+  }
+
+  #[tokio::test]
+  async fn inline_agent_node_supports_hitl_questions_and_batch_fallback() {
+    struct StaticAnswerHandler;
+    impl yanshi_core::run_context::RunQuestionHandler for StaticAnswerHandler {
+      fn ask_user<'a>(
+        &'a self,
+        node_id: &'a str,
+        question: &'a str,
+      ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+      {
+        Box::pin(async move { Ok(format!("{node_id}->{question}->PostgreSQL+Redis")) })
+      }
+    }
+
+    let model = format!("mock-inline-agent-{}", uuid::Uuid::new_v4());
+    let config_path =
+      std::env::temp_dir().join(format!("yanshi-inline-agent-{}.yml", uuid::Uuid::new_v4()));
+    std::fs::write(
+      &config_path,
+      format!(
+        "models:\n  {model}:\n    vendor: mock\n    type: text\n    model_id: {model}\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n"
+      ),
+    )
+    .expect("write mock config");
+    let _ = Yanshi::ensure_init().await;
+    unsafe {
+      std::env::set_var(
+        "YANSHI_MOCK_RESPONSES",
+        serde_json::to_string(&vec![
+          r#"{"thought":"need storage choice","action":{"tool":"ask_user","params":{"question":"Which DB?"}}}"#,
+          r#"{"thought":"got DB choice","answer":"Spec ready with PostgreSQL+Redis"}"#,
+          r#"{"thought":"still tries asking","action":{"tool":"ask_user","params":{"question":"Which auth?"}}}"#,
+          r#"{"thought":"auto defaults","answer":"Headless spec ready"}"#,
+        ])
+        .expect("serialize mock responses"),
+      );
+    }
+    Yanshi::init_with_config(config_path.to_str().expect("utf8 path"))
+      .await
+      .expect("init mock");
+    let _ = std::fs::remove_file(&config_path);
+
+    let node = node_from_yaml(&format!(
+      r#"
+id: clarify
+type: agent
+parameters:
+  prompt: "Design an order backend"
+  model: "{model}"
+  tools: [web_search]
+"#
+    ));
+    let graph_node = create_graph_node(&node).expect("create inline agent");
+    let NodeType::Standard(async_node) = graph_node.node_type else {
+      panic!("expected Standard node");
+    };
+
+    // 1. Interactive mode with a RunQuestionHandler attached.
+    let handler: Arc<dyn yanshi_core::run_context::RunQuestionHandler> =
+      Arc::new(StaticAnswerHandler);
+    let interactive_out = yanshi_core::run_context::with_question_handler(
+      Some(handler),
+      async_node.execute(&graph_node.initial_inputs),
+    )
+    .await
+    .expect("interactive run succeeds");
+    assert_eq!(
+      interactive_out.get("output"),
+      Some(&FlowValue::Json(json!("Spec ready with PostgreSQL+Redis")))
+    );
+    assert_eq!(
+      interactive_out.get("questions_asked"),
+      Some(&FlowValue::Json(json!(1)))
+    );
+
+    // 2. Headless / non-interactive mode (no handler in scope): auto-resumes with defaults.
+    let mut batch_inputs = graph_node.initial_inputs.clone();
+    batch_inputs.insert("interactive".to_string(), FlowValue::Json(json!(false)));
+    let batch_out = async_node
+      .execute(&batch_inputs)
+      .await
+      .expect("batch run succeeds");
+    assert_eq!(
+      batch_out.get("output"),
+      Some(&FlowValue::Json(json!("Headless spec ready")))
+    );
+    assert_eq!(
+      batch_out.get("questions_asked"),
+      Some(&FlowValue::Json(json!(0)))
+    );
+
+    unsafe {
+      std::env::remove_var("YANSHI_MOCK_RESPONSES");
     }
   }
 }

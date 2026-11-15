@@ -71,6 +71,9 @@ pub struct FlowExecutionConfig {
   /// Optional interactive debug controller enabling single-step execution
   /// and pre-node breakpoints (`None` in release mode — zero overhead).
   pub debug_controller: Option<FlowDebugController>,
+  /// Optional interactive question handler enabling HITL `ask_user` prompts
+  /// inside workflow nodes (`None` in headless / batch runs).
+  pub question_handler: Option<crate::run_context::RunQuestionHandle>,
 }
 
 impl FlowExecutionConfig {
@@ -104,7 +107,18 @@ impl FlowExecutionConfig {
       resource_limits: None,
       cost_limit_usd: None,
       debug_controller: None,
+      question_handler: None,
     }
+  }
+
+  /// Attach an interactive [`crate::run_context::RunQuestionHandler`] for
+  /// HITL `ask_user` prompts emitted by workflow nodes.
+  pub fn with_question_handler(
+    mut self,
+    handler: Arc<dyn crate::run_context::RunQuestionHandler>,
+  ) -> Self {
+    self.question_handler = Some(crate::run_context::RunQuestionHandle(handler));
+    self
   }
 
   /// Attach an interactive [`FlowDebugController`] (forces deterministic
@@ -165,6 +179,7 @@ impl Default for FlowExecutionConfig {
       resource_limits: None,
       cost_limit_usd: None,
       debug_controller: None,
+      question_handler: None,
     }
   }
 }

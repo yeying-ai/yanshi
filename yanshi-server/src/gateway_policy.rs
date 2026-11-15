@@ -116,7 +116,11 @@ impl GatewayPolicy {
   fn check_node(&self, node: &NodeDefinitionV2) -> Result<(), String> {
     let kind = node.node_type.as_str();
     let id = &node.id;
-    if HOST_NODE_TYPES.contains(&kind) && !self.host_node_types.contains(kind) {
+    let is_safe_inline_agent = kind == "agent" && is_gateway_safe_inline_agent(node);
+    if HOST_NODE_TYPES.contains(&kind)
+      && !is_safe_inline_agent
+      && !self.host_node_types.contains(kind)
+    {
       return Err(format!(
         "node '{id}': type '{kind}' is disabled on this gateway (operator enables it via {HOST_NODE_TYPES_ENV})"
       ));
@@ -245,6 +249,31 @@ fn is_plain_absolute(path: &Path) -> bool {
   path.is_absolute() && !path.components().any(|c| c == Component::ParentDir)
 }
 
+/// An inline `type: agent` node (no host `skill` directory, restricted to
+/// SSRF-filtered built-in `web_search` / `http` tools) does not access host
+/// paths or spawn host processes, so tenants may run it under the default
+/// gateway policy without enabling skill-directory `agent` nodes.
+fn is_gateway_safe_inline_agent(node: &NodeDefinitionV2) -> bool {
+  if node.parameters.contains_key("skill") || node.input_mapping.contains_key("skill") {
+    return false;
+  }
+  let has_prompt = node.parameters.contains_key("prompt")
+    || node.input_mapping.contains_key("prompt")
+    || node.parameters.contains_key("message")
+    || node.input_mapping.contains_key("message");
+  if !has_prompt || node.input_mapping.contains_key("tools") {
+    return false;
+  }
+  match node.parameters.get("tools") {
+    None => true,
+    Some(value) => value.as_sequence().is_some_and(|seq| {
+      seq
+        .iter()
+        .all(|entry| matches!(entry.as_str(), Some("web_search" | "http")))
+    }),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -368,5 +397,32 @@ mod tests {
       "name: w\nnodes:\n  - id: h\n    type: http\n    parameters:\n      url: https://example.org\n",
     );
     assert!(GatewayPolicy::default().check_workflow(&http).is_ok());
+
+    // Inline `agent` (no `skill`, safe built-in tools only) is permitted by default,
+    // whereas skill-backed `agent` or unsupported tools remain host-gated.
+    let inline_agent = workflow(
+      "name: w\nnodes:\n  - id: clarify\n    type: agent\n    parameters:\n      prompt: Plan backend\n      tools: [web_search, http]\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&inline_agent)
+        .is_ok()
+    );
+    let skill_backed_agent = workflow(
+      "name: w\nnodes:\n  - id: clarify\n    type: agent\n    parameters:\n      skill: /srv/skills/planner\n      message: Plan backend\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&skill_backed_agent)
+        .is_err()
+    );
+    let shell_tool_agent = workflow(
+      "name: w\nnodes:\n  - id: clarify\n    type: agent\n    parameters:\n      prompt: Plan backend\n      tools: [shell]\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&shell_tool_agent)
+        .is_err()
+    );
   }
 }

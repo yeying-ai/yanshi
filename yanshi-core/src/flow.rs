@@ -1497,13 +1497,16 @@ impl<'f> FlowExecutor<'f> {
       ))
     });
     let run_once = || async {
-      let execute = crate::run_context::with_node_reporter(
-        reporter.clone(),
-        crate::run_context::with_cost_meter(
-          node_meter.clone(),
-          crate::run_context::with_artifact_root(
-            run_dir.to_path_buf(),
-            self.execute_node_type(node_type, inputs, config),
+      let execute = crate::run_context::with_question_handler(
+        config.question_handler.as_ref().map(|h| h.0.clone()),
+        crate::run_context::with_node_reporter(
+          reporter.clone(),
+          crate::run_context::with_cost_meter(
+            node_meter.clone(),
+            crate::run_context::with_artifact_root(
+              run_dir.to_path_buf(),
+              self.execute_node_type(node_type, inputs, config),
+            ),
           ),
         ),
       );
@@ -1614,6 +1617,7 @@ impl<'f> FlowExecutor<'f> {
     let sub_config = FlowExecutionConfig {
       run_base_dir: execution_config.run_base_dir.clone(),
       cancellation_token: execution_config.cancellation_token.clone(),
+      question_handler: execution_config.question_handler.clone(),
       ..FlowExecutionConfig::serial()
     };
     (sub_flow, sub_config)

@@ -418,6 +418,32 @@ export const RunApprovalDecisionResponseSchema = z
   .loose();
 export type RunApprovalDecisionResponse = z.infer<typeof RunApprovalDecisionResponseSchema>;
 
+export const PendingRunQuestionSchema = z
+  .object({
+    question_id: z.string(),
+    node_id: z.string(),
+    question: z.string(),
+    created_at: z.string(),
+  })
+  .loose();
+export type PendingRunQuestion = z.infer<typeof PendingRunQuestionSchema>;
+
+export const RunQuestionsEnvelopeSchema = z
+  .object({
+    pending: z.array(PendingRunQuestionSchema),
+  })
+  .loose();
+export type RunQuestionsEnvelope = z.infer<typeof RunQuestionsEnvelopeSchema>;
+
+export const RunQuestionAnswerResponseSchema = z
+  .object({
+    run_id: z.string(),
+    question_id: z.string(),
+    resolved: z.boolean(),
+  })
+  .loose();
+export type RunQuestionAnswerResponse = z.infer<typeof RunQuestionAnswerResponseSchema>;
+
 // ── Content Studio Notebooks (`/v1/notebooks/*`) ─────────────────────
 
 export const NotebookSchema = z

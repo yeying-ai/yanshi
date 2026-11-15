@@ -199,6 +199,56 @@ pub async fn with_node_reporter<F: Future>(
   }
 }
 
+/// Interactive human-in-the-loop question bridge for workflow nodes (such as
+/// an inline `agent` node calling `ask_user`). Installed per run by callers
+/// that can surface questions to a user (e.g. `yanshi-server`'s
+/// `/v1/runs/:id/questions` endpoints); absent in batch / headless runs.
+pub trait RunQuestionHandler: Send + Sync {
+  fn ask_user<'a>(
+    &'a self,
+    node_id: &'a str,
+    question: &'a str,
+  ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+}
+
+/// Cloneable, pointer-comparable handle wrapping [`RunQuestionHandler`] so
+/// [`crate::scheduler::FlowExecutionConfig`] keeps deriving `Debug` and
+/// `PartialEq`.
+#[derive(Clone)]
+pub struct RunQuestionHandle(pub std::sync::Arc<dyn RunQuestionHandler>);
+
+impl std::fmt::Debug for RunQuestionHandle {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("RunQuestionHandle(<dyn RunQuestionHandler>)")
+  }
+}
+
+impl PartialEq for RunQuestionHandle {
+  fn eq(&self, other: &Self) -> bool {
+    std::sync::Arc::ptr_eq(&self.0, &other.0)
+  }
+}
+
+tokio::task_local! {
+  static QUESTION_HANDLER: std::sync::Arc<dyn RunQuestionHandler>;
+}
+
+/// The interactive question handler attached to the current run, if any.
+pub fn current_question_handler() -> Option<std::sync::Arc<dyn RunQuestionHandler>> {
+  QUESTION_HANDLER.try_with(std::sync::Arc::clone).ok()
+}
+
+/// Run `fut` with `handler` available via [`current_question_handler`].
+pub async fn with_question_handler<F: Future>(
+  handler: Option<std::sync::Arc<dyn RunQuestionHandler>>,
+  fut: F,
+) -> F::Output {
+  match handler {
+    Some(handler) => QUESTION_HANDLER.scope(handler, fut).await,
+    None => fut.await,
+  }
+}
+
 /// One `FlowValue::File` a finished run left in its state pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOutput {

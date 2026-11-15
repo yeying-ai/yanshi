@@ -267,6 +267,8 @@ pub struct RunContext {
   pub notebook: Option<NotebookLink>,
   /// Interactive step-by-step controller when submitted in Studio debug mode.
   pub debug_controller: Option<FlowDebugController>,
+  /// Interactive HITL `ask_user` question registry for inline workflow agents.
+  pub question_registry: crate::run_questions::RunQuestionRegistry,
 }
 
 /// Process-local registry of active [`FlowDebugController`] handles keyed by `run_id`.
@@ -731,6 +733,7 @@ impl RunExecutor for FlowRunExecutor {
       return;
     }
     if let Err(e) = flow_execute(&ctx).await {
+      ctx.question_registry.clear_run(ctx.run_id);
       error!(run_id = %ctx.run_id, error = %e, "flow executor failed");
       let status = if e.is_cancelled() {
         RunStatus::Cancelled
@@ -834,7 +837,14 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     ctx.run_base_dir.clone(),
     ctx.cancellation_token.clone(),
     ctx.run_max_concurrency,
-  );
+  )
+  .with_question_handler(Arc::new(
+    crate::run_questions::ServerRunQuestionHandler::new(
+      ctx.run_id,
+      ctx.question_registry.clone(),
+      ctx.cancellation_token.clone(),
+    ),
+  ));
   if let Some(limit) = flow_def
     .effective_cost_limit(ctx.cost_limit_usd)
     .map_err(anyhow::Error::msg)?
@@ -1810,6 +1820,7 @@ fn dispatch_run<G: Send + 'static>(
   let broker = state.event_broker.clone();
   let cancellation_registry = state.cancellation_registry.clone();
   let debug_registry = state.debug_registry.clone();
+  let question_registry = state.question_registry.clone();
   let live_state_registry = state.live_state_registry.clone();
   let approval_registry = state.approval_registry.clone();
   let run_max_concurrency = state.run_max_concurrency;
@@ -1819,6 +1830,7 @@ fn dispatch_run<G: Send + 'static>(
   if let Some(ctrl) = &run.debug_controller {
     state.debug_registry.register(run_id, ctrl.clone());
   }
+  let task_question_registry = question_registry.clone();
   let handle = tokio::spawn(async move {
     // Held until the task completes — releases the local pre-check's
     // admission slot on drop (V3.4). Cluster-wide correctness for new
@@ -1845,8 +1857,10 @@ fn dispatch_run<G: Send + 'static>(
         model: run.model,
         notebook: run.notebook,
         debug_controller: run.debug_controller,
+        question_registry: task_question_registry.clone(),
       })
       .await;
+    task_question_registry.clear_run(run_id);
     debug_registry.complete(run_id);
     cancellation_registry.complete(run_id);
   });
@@ -1854,6 +1868,7 @@ fn dispatch_run<G: Send + 'static>(
     .cancellation_registry
     .register(run_id, cancellation_token, handle.abort_handle());
   if handle.is_finished() {
+    question_registry.clear_run(run_id);
     state.debug_registry.complete(run_id);
     state.cancellation_registry.complete(run_id);
   }

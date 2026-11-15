@@ -40,6 +40,7 @@ pub mod live_state_registry;
 pub mod metrics;
 pub mod notebooks;
 pub mod preferences;
+pub mod run_questions;
 pub mod runs;
 pub mod scheduler;
 pub mod serve;
@@ -83,6 +84,11 @@ pub use harness_approval::{
 };
 pub use harness_live::{LiveHarnessExecutor, ServerHarnessEventSink};
 pub use live_state_registry::LiveStateRegistry;
+pub use run_questions::{
+  AnswerRunQuestionRequest, AnswerRunQuestionResponse, PendingRunQuestion,
+  PendingRunQuestionsResponse, QuestionResolveError, RunQuestionRegistry, ServerRunQuestionHandler,
+  answer_run_question, list_run_questions,
+};
 pub use runs::{
   CancelRunResponse, CreateRunRequest, CreateRunResponse, DebugActionRequest, DebugStatusResponse,
   FlowRunExecutor, ListRunsQuery, ListRunsResponse, RUN_CANCELLATION_NOTIFY_CHANNEL,
@@ -154,6 +160,8 @@ pub struct AppState {
   pub cancellation_registry: RunCancellationRegistry,
   /// Process-local interactive debug step registry for Studio runs.
   pub debug_registry: RunDebugRegistry,
+  /// Process-local interactive `ask_user` question registry for workflow runs.
+  pub question_registry: RunQuestionRegistry,
   /// Background executor for submitted harness sessions (P-H.5). Defaults
   /// to [`StubHarnessExecutor`] until the LLM-backed runtime lands.
   pub harness_executor: Arc<dyn harness::HarnessSessionExecutor>,
@@ -234,6 +242,7 @@ impl AppState {
       event_broker: EventBroker::new(),
       cancellation_registry: RunCancellationRegistry::new(),
       debug_registry: RunDebugRegistry::new(),
+      question_registry: RunQuestionRegistry::new(),
       harness_executor: default_harness_executor(),
       harness_broker: HarnessEventBroker::new(),
       approval_registry: PendingApprovalRegistry::new(),
@@ -663,6 +672,11 @@ pub fn create_router(state: AppState) -> Router {
     .route("/v1/runs/:id/events/history", get(list_events))
     .route("/v1/runs/:id/events", get(stream_events))
     .route("/v1/runs/:id/approvals", get(list_run_approvals))
+    .route("/v1/runs/:id/questions", get(list_run_questions))
+    .route(
+      "/v1/runs/:id/questions/:question_id",
+      post(answer_run_question),
+    )
     // Y5.2: notebooks, their sources and search.
     .route(
       "/v1/notebooks",

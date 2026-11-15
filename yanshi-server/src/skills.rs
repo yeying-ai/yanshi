@@ -281,6 +281,7 @@ pub async fn run_skill(
         model: None,
         notebook: None,
         debug_controller: None,
+        question_registry: crate::run_questions::RunQuestionRegistry::new(),
       })
       .await;
     cancellation_registry.complete(run_id);

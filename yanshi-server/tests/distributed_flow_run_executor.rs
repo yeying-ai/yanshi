@@ -149,6 +149,7 @@ async fn distributed_run_reaches_succeeded_and_emits_ordered_events() {
     model: None,
     notebook: None,
     debug_controller: None,
+    question_registry: yanshi_server::RunQuestionRegistry::new(),
   };
 
   let executor = DistributedFlowRunExecutor::new(control_plane);
@@ -272,6 +273,7 @@ async fn distributed_run_fails_when_a_node_reports_failure() {
     model: None,
     notebook: None,
     debug_controller: None,
+    question_registry: yanshi_server::RunQuestionRegistry::new(),
   };
 
   let executor = DistributedFlowRunExecutor::new(control_plane);
@@ -338,6 +340,7 @@ async fn cancelled_distributed_run_releases_its_queued_tasks() {
     model: None,
     notebook: None,
     debug_controller: None,
+    question_registry: yanshi_server::RunQuestionRegistry::new(),
   };
   // No worker runs: n1 sits in the queue until the cancel.
   let canceller = tokio::spawn(async move {

@@ -75,9 +75,21 @@ function nodeTypePalette(nodeType: string): { label: string; accent: string; tin
   if (
     normalized === 'render_document' ||
     normalized === 'render_markdown' ||
-    normalized === 'render_mindmap'
+    normalized === 'render_mindmap' ||
+    normalized === 'render_table' ||
+    normalized === 'figure' ||
+    normalized === 'markmap'
   ) {
     return { label: nodeType, accent: '#3b5bdb', tint: '#edf2ff' };
+  }
+  if (
+    normalized === 'web_search' ||
+    normalized === 'repo_snapshot' ||
+    normalized === 'pdf_extract' ||
+    normalized === 'video_ingest' ||
+    normalized === 'arxiv'
+  ) {
+    return { label: nodeType, accent: '#b45309', tint: '#fef3c7' };
   }
   return { label: nodeType, accent: '#475569', tint: '#f1f5f9' };
 }
