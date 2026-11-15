@@ -25,6 +25,8 @@ models:
   gemini-2.5-flash:
     input_per_1k: 0.00015
     output_per_1k: 0.00060
+  gemini-2.5-flash-asr:
+    per_output_second: 0.00003
   gemini-2.5-pro:
     input_per_1k: 0.00125
     output_per_1k: 0.01000
@@ -57,6 +59,10 @@ models:
   glm-5.1:
     input_per_1k: 0.00070
     output_per_1k: 0.00280
+  glm-asr:
+    per_output_second: 0.00008
+  glm-image:
+    per_image: 0.01400
 
   # OpenAI
   gpt-4o:

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use yanshi_nodes::nodes::{
   arxiv::ArxivNode, file::FileNode, http::HttpNode, markmap::MarkMapNode,
   pdf_extract::PdfExtractNode, repo_snapshot::RepoSnapshotNode, template::TemplateNode,
-  web_search::WebSearchNode,
+  video_ingest::VideoIngestNode, web_search::WebSearchNode,
 };
 use yanshi_nodes_ai::nodes::{
   asr::ASRNode, image_edit::ImageEditNode, image_to_image::ImageToImageNode,
@@ -133,6 +133,27 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
         policy,
       ))))
     }
+    "video_ingest" => {
+      let allowed_paths: Vec<PathBuf> = node_def
+        .parameters
+        .get("allowed_paths")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+          seq
+            .iter()
+            .filter_map(|v| v.as_str().map(PathBuf::from))
+            .collect()
+        })
+        .unwrap_or_default();
+      let policy = Arc::new(SandboxPolicy {
+        allowed_paths,
+        ..SandboxPolicy::default()
+      });
+      Ok(NodeType::Standard(Arc::new(VideoIngestNode::new(
+        &node_def.id,
+        policy,
+      ))))
+    }
     "file" => {
       // V0.2 closure: `FileNode::default()` denies every path
       // (`SandboxPolicy::default()`'s `allowed_paths` is empty), so a
@@ -216,7 +237,11 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
     "asr" => {
       let model = get_string_param_optional(&node_def.parameters, "model");
       let audio_source = get_string_param_optional(&node_def.parameters, "audio_source");
-      let node = ASRNode::new(&node_def.id, &model, &audio_source);
+      let mut node = ASRNode::new(&node_def.id, &model, &audio_source);
+      let fmt = get_string_param_optional(&node_def.parameters, "response_format");
+      if let Some(parsed) = yanshi_nodes_ai::nodes::asr::ASRResponseFormat::from_str_opt(&fmt) {
+        node = node.with_response_format(parsed);
+      }
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "image_edit" => {

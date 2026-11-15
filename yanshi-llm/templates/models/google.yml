@@ -1142,3 +1142,19 @@ models:
     supports_tools: true
     supports_multimodal: true
     response_format: null
+  gemini-2.5-flash-asr:
+    vendor: google
+    type: asr
+    accepts: [audio]
+    model_id: models/gemini-2.5-flash
+    base_url: null
+    temperature: 0.0
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: false
+    supports_tools: false
+    supports_multimodal: true
+    response_format: null

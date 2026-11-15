@@ -450,6 +450,13 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("max_pages", ParamType::Integer),
       ParamSpec::optional("allowed_paths", ParamType::Sequence),
     ]),
+    "video_ingest" => Some(vec![
+      ParamSpec::required_input("source", ParamType::Any),
+      ParamSpec::optional("prefer_subtitles", ParamType::Bool),
+      ParamSpec::optional("subtitle_langs", ParamType::String),
+      ParamSpec::optional("max_duration_seconds", ParamType::Integer),
+      ParamSpec::optional("allowed_paths", ParamType::Sequence),
+    ]),
     "file" => Some(vec![
       // V0.2 closure: `file` node requires explicit `allowed_paths` to
       // avoid permissive-by-default arbitrary filesystem read/write
@@ -470,8 +477,11 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("simplify_latex", ParamType::Bool),
     ]),
     "asr" => Some(vec![
-      ParamSpec::required("model", ParamType::String),
-      ParamSpec::required_input("audio_source", ParamType::String),
+      ParamSpec::required_input("model", ParamType::String),
+      ParamSpec::required_input("audio_source", ParamType::Any),
+      ParamSpec::optional("response_format", ParamType::String),
+      ParamSpec::optional("language", ParamType::String),
+      ParamSpec::optional("prompt", ParamType::String),
     ]),
     "image_edit" => Some(vec![
       ParamSpec::required("model", ParamType::String),

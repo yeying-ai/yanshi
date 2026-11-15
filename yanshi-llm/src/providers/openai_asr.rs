@@ -37,6 +37,7 @@ pub struct OpenAIAsrProvider {
   client: Client,
   api_key: String,
   base_url: String,
+  vendor_name: &'static str,
 }
 
 impl std::fmt::Debug for OpenAIAsrProvider {
@@ -44,6 +45,7 @@ impl std::fmt::Debug for OpenAIAsrProvider {
     // Never print the API key — keep it out of trace logs and error
     // dumps even when callers `dbg!` the provider.
     f.debug_struct("OpenAIAsrProvider")
+      .field("vendor", &self.vendor_name)
       .field("base_url", &self.base_url)
       .field("api_key", &"<redacted>")
       .finish()
@@ -55,21 +57,49 @@ impl OpenAIAsrProvider {
     Self::with_client(super::default_http_client()?, api_key, base_url)
   }
 
+  /// Build an OpenAI-compatible ASR client targeting Zhipu BigModel (`glm-asr`).
+  pub fn new_glm(api_key: &str, base_url: Option<String>) -> Result<Self> {
+    Self::with_client_and_vendor(
+      super::default_http_client()?,
+      api_key,
+      base_url,
+      "glm",
+      "https://open.bigmodel.cn/api/paas/v4",
+    )
+  }
+
   /// Construct with a caller-supplied [`reqwest::Client`]. Mirrors
   /// `OpenAIProvider::with_client` — used by tests that need
   /// `.no_proxy()` for localhost mocks, and by production deployments
   /// that share one HTTPS-pinned client across providers.
   pub fn with_client(client: Client, api_key: &str, base_url: Option<String>) -> Result<Self> {
+    Self::with_client_and_vendor(
+      client,
+      api_key,
+      base_url,
+      "openai",
+      "https://api.openai.com/v1",
+    )
+  }
+
+  pub fn with_client_and_vendor(
+    client: Client,
+    api_key: &str,
+    base_url: Option<String>,
+    vendor_name: &'static str,
+    default_base_url: &str,
+  ) -> Result<Self> {
     if api_key.is_empty() {
       return Err(LLMError::MissingApiKey {
-        provider: "openai".to_string(),
+        provider: vendor_name.to_string(),
       });
     }
-    let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    let base_url = base_url.unwrap_or_else(|| default_base_url.to_string());
     Ok(Self {
       client,
       api_key: api_key.to_string(),
       base_url,
+      vendor_name,
     })
   }
 
@@ -79,7 +109,12 @@ impl OpenAIAsrProvider {
   /// HTTP call. We can't introspect a `reqwest::multipart::Form`
   /// directly, but we can at least exercise the construction path
   /// here so the test suite catches "field renamed" regressions.
+  #[cfg(test)]
   pub(crate) fn build_form(request: &AsrRequest) -> Form {
+    Self::build_form_for("openai", request)
+  }
+
+  pub(crate) fn build_form_for(vendor_name: &str, request: &AsrRequest) -> Form {
     let file_part = Part::bytes(request.audio_data.clone())
       .file_name(request.filename.clone())
       .mime_str(mime_for_filename(&request.filename))
@@ -100,11 +135,15 @@ impl OpenAIAsrProvider {
 
     let mut form = Form::new()
       .text("model", request.model.clone())
-      .text("response_format", request.response_format.clone())
       .part("file", file_part);
 
-    if let Some(language) = &request.language {
-      form = form.text("language", language.clone());
+    // Zhipu `glm-asr` accepts `model`, `file`, `prompt`, `temperature`, `stream`
+    // and always returns JSON `{"text": "..."}` without a `response_format` field.
+    if vendor_name != "glm" {
+      form = form.text("response_format", request.response_format.clone());
+      if let Some(language) = &request.language {
+        form = form.text("language", language.clone());
+      }
     }
     if let Some(temperature) = request.temperature {
       form = form.text("temperature", temperature.to_string());
@@ -172,23 +211,39 @@ pub(crate) fn parse_transcription_response(
         metadata: Some(value),
       })
     }
-    _ => Ok(AsrResponse {
-      text: body.to_string(),
-      metadata: None,
-    }),
+    _ => {
+      // OpenAI-compatible vendors like Zhipu `glm-asr` always return JSON
+      // `{"text": "..."}` regardless of requested `response_format`.
+      if body.trim_start().starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(text) = value.get("text").and_then(|v| v.as_str())
+      {
+        return Ok(AsrResponse {
+          text: text.to_string(),
+          metadata: Some(value),
+        });
+      }
+      Ok(AsrResponse {
+        text: body.to_string(),
+        metadata: None,
+      })
+    }
   }
 }
 
 #[async_trait]
 impl AsrProvider for OpenAIAsrProvider {
   fn name(&self) -> &str {
-    "openai"
+    self.vendor_name
   }
 
   async fn transcribe(&self, request: AsrRequest) -> Result<AsrResponse> {
-    let url = format!("{}/audio/transcriptions", self.base_url);
+    let url = format!(
+      "{}/audio/transcriptions",
+      self.base_url.trim_end_matches('/')
+    );
     let response_format = request.response_format.clone();
-    let form = Self::build_form(&request);
+    let form = Self::build_form_for(self.vendor_name, &request);
 
     let response = self
       .client
@@ -336,5 +391,16 @@ mod tests {
       prompt: Some("Yanshi, OpenAI, Whisper".into()),
     };
     let _ = OpenAIAsrProvider::build_form(&full_request);
+    let _ = OpenAIAsrProvider::build_form_for("glm", &full_request);
+  }
+
+  #[test]
+  fn glm_json_envelope_unwraps_cleanly_even_when_srt_requested() {
+    let body = r#"{"id":"req_1","model":"glm-asr","text":"第一段观点。第二段总结。"}"#;
+    let resp = parse_transcription_response("srt", body).expect("glm json unwraps");
+    assert_eq!(resp.text, "第一段观点。第二段总结。");
+    assert!(resp.metadata.is_some());
+    let glm = OpenAIAsrProvider::new_glm("sk-test", None).expect("glm builds");
+    assert_eq!(glm.name(), "glm");
   }
 }

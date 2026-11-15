@@ -56,7 +56,12 @@ async fn resolve_for_modality(
     && model_config
       .accepts()
       .contains(&crate::model_types::InputType::Image);
-  if actual != expected && !compatible_image_modality {
+  // Multimodal Google Gemini chat models (e.g. `gemini-2.5-flash`) natively
+  // transcribe `inlineData` audio via `generateContent`, so allow them on
+  // the ASR surface alongside explicit `type: asr` aliases (`gemini-2.5-flash-asr`).
+  let compatible_google_asr =
+    expected == ModelType::Asr && actual == ModelType::Chat && model_config.vendor == "google";
+  if actual != expected && !compatible_image_modality && !compatible_google_asr {
     return Err(LLMError::InvalidModelConfig {
       message: format!(
         "Model '{model_name}' has type '{}' but the requested modality requires type '{}'. \
@@ -100,6 +105,12 @@ fn build_stepfun_tts(api_key: &str, base_url: Option<String>) -> Result<Box<dyn 
 }
 fn build_openai_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
   Ok(Box::new(OpenAIAsrProvider::new(api_key, base_url)?))
+}
+fn build_glm_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
+  Ok(Box::new(OpenAIAsrProvider::new_glm(api_key, base_url)?))
+}
+fn build_google_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
+  Ok(Box::new(GoogleMediaProvider::new(api_key, base_url)?))
 }
 fn build_openai_text2image(
   api_key: &str,
@@ -231,6 +242,8 @@ const ASR_PROVIDERS: &[(&str, Ctor<dyn AsrProvider>)] = &[
   ("stepfun", build_stepfun_asr),
   ("step", build_stepfun_asr),
   ("openai", build_openai_asr),
+  ("google", build_google_asr),
+  ("glm", build_glm_asr),
   ("mock", build_mock_asr),
 ];
 const TTS_PROVIDERS: &[(&str, Ctor<dyn TtsProvider>)] = &[
@@ -501,16 +514,21 @@ mod tests {
   }
 
   #[test]
-  fn implemented_modalities_for_google_covers_tts_images_and_text_to_video() {
+  fn implemented_modalities_for_google_covers_asr_tts_images_and_text_to_video() {
     assert_eq!(
       implemented_modalities_for("google"),
       vec![
+        "ASR",
         "TTS",
         "text-to-image",
         "image-to-image",
         "image-edit",
         "text-to-video"
       ]
+    );
+    assert_eq!(
+      implemented_modalities_for("glm"),
+      vec!["ASR", "text-to-image"]
     );
   }
 

@@ -19,9 +19,9 @@
 
 use super::google_endpoint::GoogleEndpoint;
 use super::modality::{
-  GeneratedImage, Image2ImageProvider, Image2ImageRequest, ImageEditProvider, ImageEditRequest,
-  ImageGenerationResponse, Text2ImageProvider, Text2ImageRequest, TtsProvider, TtsRequest,
-  TtsResponse,
+  AsrProvider, AsrRequest, AsrResponse, GeneratedImage, Image2ImageProvider, Image2ImageRequest,
+  ImageEditProvider, ImageEditRequest, ImageGenerationResponse, Text2ImageProvider,
+  Text2ImageRequest, TtsProvider, TtsRequest, TtsResponse,
 };
 use crate::{LLMError, Result};
 use async_trait::async_trait;
@@ -160,6 +160,8 @@ struct CandidateContent {
 
 #[derive(Debug, Deserialize)]
 struct CandidatePart {
+  #[serde(default)]
+  text: Option<String>,
   #[serde(default, rename = "inlineData", alias = "inline_data")]
   inline_data: Option<InlineData>,
 }
@@ -403,6 +405,177 @@ impl TtsProvider for GoogleMediaProvider {
   }
 }
 
+fn audio_mime_from_filename(filename: &str) -> &'static str {
+  let lower = filename.to_ascii_lowercase();
+  if lower.ends_with(".mp3") || lower.ends_with(".mpeg") || lower.ends_with(".mpga") {
+    "audio/mp3"
+  } else if lower.ends_with(".wav") {
+    "audio/wav"
+  } else if lower.ends_with(".flac") {
+    "audio/flac"
+  } else if lower.ends_with(".ogg") || lower.ends_with(".opus") {
+    "audio/ogg"
+  } else if lower.ends_with(".aac") {
+    "audio/aac"
+  } else if lower.ends_with(".m4a") || lower.ends_with(".mp4") {
+    "audio/mp4"
+  } else if lower.ends_with(".webm") {
+    "audio/webm"
+  } else {
+    "audio/mp3"
+  }
+}
+
+pub(crate) fn parse_generate_content_text_response(body: &str) -> Result<String> {
+  let parsed: GenerateContentResponse =
+    serde_json::from_str(body).map_err(|e| LLMError::ResponseParsingError {
+      message: format!("Google generateContent text response JSON parse failed: {e}"),
+    })?;
+
+  if let Some(reason) = parsed
+    .prompt_feedback
+    .as_ref()
+    .and_then(|f| f.block_reason.as_deref())
+  {
+    return Err(LLMError::ResponseParsingError {
+      message: format!("Google generateContent request blocked: {reason}"),
+    });
+  }
+
+  let finish_reason = parsed
+    .candidates
+    .first()
+    .and_then(|c| c.finish_reason.clone());
+
+  let text: String = parsed
+    .candidates
+    .into_iter()
+    .filter_map(|c| c.content)
+    .flat_map(|c| c.parts)
+    .filter_map(|p| p.text)
+    .collect::<Vec<_>>()
+    .join("");
+
+  if text.trim().is_empty() {
+    let reason_note = finish_reason
+      .map(|r| format!(" (finishReason: {r})"))
+      .unwrap_or_default();
+    return Err(LLMError::ResponseParsingError {
+      message: format!(
+        "Google generateContent ASR response carried no text parts{reason_note}. Body: {body}"
+      ),
+    });
+  }
+
+  Ok(strip_code_fence(text.trim()))
+}
+
+fn strip_code_fence(raw: &str) -> String {
+  let trimmed = raw.trim();
+  if let Some(after_open) = trimmed.strip_prefix("```")
+    && let Some((_, inner)) = after_open.split_once('\n')
+    && let Some(stripped) = inner.trim_end().strip_suffix("```")
+  {
+    return stripped.trim().to_string();
+  }
+  trimmed.to_string()
+}
+
+fn build_google_asr_prompt(request: &AsrRequest) -> String {
+  let mut instructions = match request.response_format.as_str() {
+    "srt" => "Transcribe the spoken audio verbatim into valid SubRip (.srt) subtitle format \
+       with sequential cue numbers and `HH:MM:SS,mmm --> HH:MM:SS,mmm` timestamps. \
+       Output ONLY the raw .srt content with no markdown code fences or commentary."
+      .to_string(),
+    "vtt" => "Transcribe the spoken audio verbatim into valid WebVTT (.vtt) format starting \
+       with `WEBVTT`. Output ONLY the raw .vtt content with no markdown fences."
+      .to_string(),
+    _ => "Transcribe the spoken audio verbatim. Output ONLY the transcript text.".to_string(),
+  };
+  if let Some(lang) = request.language.as_deref().filter(|s| !s.trim().is_empty()) {
+    instructions.push_str(&format!(" Primary spoken language: {lang}."));
+  }
+  if let Some(hint) = request.prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+    instructions.push_str(&format!(" Domain terminology / hint: {hint}"));
+  }
+  instructions
+}
+
+#[async_trait]
+impl AsrProvider for GoogleMediaProvider {
+  fn name(&self) -> &str {
+    "google"
+  }
+
+  async fn transcribe(&self, request: AsrRequest) -> Result<AsrResponse> {
+    let effective_model = crate::registry::ModelRegistry::global()
+      .get_model(&request.model)
+      .ok()
+      .and_then(|cfg| cfg.model_id.clone())
+      .unwrap_or_else(|| request.model.clone());
+
+    let url = self
+      .endpoint
+      .model_action_url(&effective_model, "generateContent", None);
+    let mime_type = audio_mime_from_filename(&request.filename);
+    let b64_audio = base64::engine::general_purpose::STANDARD.encode(&request.audio_data);
+    let prompt = build_google_asr_prompt(&request);
+
+    let mut gen_cfg = serde_json::Map::new();
+    gen_cfg.insert(
+      "temperature".to_string(),
+      json!(request.temperature.unwrap_or(0.0)),
+    );
+
+    let body = json!({
+      "contents": [{
+        "role": "user",
+        "parts": [
+          {
+            "inlineData": {
+              "mimeType": mime_type,
+              "data": b64_audio,
+            }
+          },
+          { "text": prompt }
+        ]
+      }],
+      "generationConfig": Value::Object(gen_cfg),
+    });
+
+    let response = self
+      .client
+      .post(&url)
+      .headers(self.build_headers()?)
+      .json(&body)
+      .send()
+      .await?;
+
+    if !response.status().is_success() {
+      let status_code = response.status().as_u16();
+      let message = response.text().await.unwrap_or_default();
+      return Err(LLMError::HttpError {
+        status_code,
+        message,
+      });
+    }
+
+    let raw_body = response.text().await?;
+    let text = parse_generate_content_text_response(&raw_body)?;
+    if request.response_format == "json" {
+      let meta = json!({ "text": text, "provider": "google", "model": effective_model });
+      return Ok(AsrResponse {
+        text,
+        metadata: Some(meta),
+      });
+    }
+    Ok(AsrResponse {
+      text,
+      metadata: None,
+    })
+  }
+}
+
 /// Gemini TTS returns headerless 16-bit signed LE mono PCM labeled
 /// `audio/L16;codec=pcm;rate=24000` (or `audio/pcm`). Wrapping it in a
 /// standard 44-byte RIFF/WAVE header makes downstream consumers (`ffprobe`,
@@ -527,5 +700,21 @@ mod tests {
     assert_eq!(&wav[8..12], b"WAVE");
     let sample_rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
     assert_eq!(sample_rate, 24_000);
+  }
+
+  #[test]
+  fn parse_text_response_strips_srt_code_fences() {
+    let body = json!({
+      "candidates": [{
+        "content": {
+          "parts": [{
+            "text": "```srt\n1\n00:00:00,000 --> 00:00:02,500\nHello Yanshi\n```"
+          }]
+        }
+      }]
+    })
+    .to_string();
+    let parsed = parse_generate_content_text_response(&body).expect("parse ok");
+    assert_eq!(parsed, "1\n00:00:00,000 --> 00:00:02,500\nHello Yanshi");
   }
 }

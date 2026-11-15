@@ -11,6 +11,8 @@ pub mod pdf_extract;
 #[cfg(feature = "http")]
 pub mod repo_snapshot;
 #[cfg(feature = "http")]
+pub mod video_ingest;
+#[cfg(feature = "http")]
 pub mod web_search;
 
 #[cfg(feature = "file")]

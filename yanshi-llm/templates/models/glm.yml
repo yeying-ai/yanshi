@@ -64,3 +64,19 @@ models:
     supports_tools: false
     supports_multimodal: false
     response_format: null
+  glm-asr:
+    vendor: glm
+    type: asr
+    accepts: [audio]
+    model_id: null
+    base_url: null
+    temperature: null
+    top_p: null
+    max_tokens: null
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: false
+    supports_tools: false
+    supports_multimodal: true
+    response_format: null
