@@ -3,8 +3,22 @@ import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
+const devApiTarget = process.env.YANSHI_DEV_API ?? 'http://127.0.0.1:8080';
+
 export default defineConfig({
   base: '/ui/',
+  server: {
+    proxy: {
+      '/v1': {
+        target: devApiTarget,
+        changeOrigin: true,
+      },
+      '/health': {
+        target: devApiTarget,
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
     cssCodeSplit: false,
     chunkSizeWarningLimit: 900,

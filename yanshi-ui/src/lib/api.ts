@@ -78,6 +78,21 @@ export const apiFetch = (
 };
 
 /**
+ * Format an API error into a clear message; if it's a low-level browser
+ * network failure (e.g. `Failed to fetch` when `yanshi serve` isn't running),
+ * append actionable setup guidance.
+ */
+export const formatApiError = (err: unknown): string => {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (
+    /failed to fetch|networkerror|load failed|econnrefused/i.test(raw)
+  ) {
+    return `无法连接后端网关（${raw}）。请先启动 \`yanshi serve\`，或在 Studio 顶栏「网关配置」中填写服务地址（Tauri 桌面端会自动启动内置引擎）。`;
+  }
+  return raw;
+};
+
+/**
  * Generic SSE chunk parser used by workflow runs (`StreamedEventSchema`)
  * and harness sessions (`HarnessEventSchema`).
  */

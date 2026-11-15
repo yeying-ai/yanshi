@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { StudioSubpageHeader } from '../components/StudioSubpageHeader';
-import { apiFetch } from '../lib/api';
+import { apiFetch, formatApiError } from '../lib/api';
 import {
   DiagnosticsReportSchema,
   parseJsonResponse,
@@ -123,7 +123,7 @@ export function DiagnosticsPanel({
       );
       setReport(json);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
       setReport(null);
     } finally {
       setLoading(false);

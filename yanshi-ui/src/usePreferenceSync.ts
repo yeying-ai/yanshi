@@ -5,6 +5,7 @@
 // function.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { apiFetch } from './lib/api';
 import {
   PreferenceWriteQueue,
   loadServerPreferences,
@@ -30,18 +31,11 @@ export interface PreferenceSyncHandle {
   syncToServer: (localKey: string, value: unknown) => void;
 }
 
-/// Build an [`ApiFetcher`] that attaches the bearer token.
-/// Mirrors main.tsx's existing `apiFetch` helper but free-standing
-/// so the preferences module can be unit-tested without React.
-function makeFetcher(apiToken: string): ApiFetcher {
-  return (path, init = {}) => {
-    const headers = new Headers(init.headers);
-    const trimmed = apiToken.trim();
-    if (trimmed) {
-      headers.set('Authorization', `Bearer ${trimmed}`);
-    }
-    return fetch(path, { ...init, headers });
-  };
+/// Build an [`ApiFetcher`] backed by `apiFetch` so `resolveApiUrl`
+/// (`window.__YANSHI_API_BASE__` on Tauri Desktop or custom gateway URLs)
+/// and `Authorization: Bearer <token>` both work uniformly.
+export function makePreferenceFetcher(apiToken: string): ApiFetcher {
+  return (path, init = {}) => apiFetch(path, apiToken, init);
 }
 
 /// One-stop hook for the synced-preferences pattern. Components
@@ -67,12 +61,12 @@ export function usePreferenceSync(
   // late responses overwriting state after the operator switched
   // tenants again.
   useEffect(() => {
-    if (!apiToken.trim() || !tenant.trim()) {
+    if (!tenant.trim()) {
       setServerPrefs(null);
       return;
     }
     let cancelled = false;
-    loadServerPreferences(makeFetcher(apiToken), tenant)
+    loadServerPreferences(makePreferenceFetcher(apiToken), tenant.trim())
       .then((prefs) => {
         if (!cancelled) setServerPrefs(prefs);
       })
@@ -101,10 +95,10 @@ export function usePreferenceSync(
   const queueRef = useRef<PreferenceWriteQueue | null>(null);
   if (queueRef.current === null) {
     queueRef.current = new PreferenceWriteQueue(FLUSH_DEBOUNCE_MS, (entries) => {
-      const t = tokenRef.current.trim();
+      const t = tokenRef.current;
       const tn = tenantRef.current.trim();
-      if (!t || !tn) return;
-      saveServerPreferences(makeFetcher(t), tn, entries).catch((err) => {
+      if (!tn) return;
+      saveServerPreferences(makePreferenceFetcher(t), tn, entries).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('preferences PUT failed:', err);
       });

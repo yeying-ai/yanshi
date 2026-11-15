@@ -13,7 +13,7 @@ import { HarnessSubmitForm } from './pages/HarnessSubmitForm';
 import { RunCreateForm } from './pages/RunCreateForm';
 import { WorkflowStudioPage } from './pages/WorkflowStudioPage';
 import { harnessSessionIdFromPath } from './lib/harness';
-import { apiFetch, parseSseChunk } from './lib/api';
+import { apiFetch, formatApiError, parseSseChunk } from './lib/api';
 import { navigateTo, useCurrentRoute } from './lib/router';
 import {
   eventFilterKeyPrefix,
@@ -92,10 +92,13 @@ function eventLatencyMs(events: StreamedEvent[], index: number): number | null {
 async function fetchEventsHistory(
   runId: string,
   apiToken: string,
+  tenantId: string,
 ): Promise<StreamedEvent[]> {
   const response = await apiFetch(
     `/v1/runs/${encodeURIComponent(runId)}/events/history?limit=1000`,
     apiToken,
+    {},
+    tenantId,
   );
   if (!response.ok) {
     throw new Error(`run ${runId}: ${response.status} ${response.statusText}`);
@@ -131,14 +134,19 @@ function RunCompare({
     setOtherRunId(against);
   }, [against]);
 
+  const tenantId = useMemo(
+    () => new URLSearchParams(routeSearch).get('tenant')?.trim() || readStorage(tenantKey, 'default'),
+    [routeSearch],
+  );
+
   useEffect(() => {
     if (!primaryRunId || !otherRunId) return;
     let cancelled = false;
     setState('loading');
     setError(null);
     Promise.all([
-      fetchEventsHistory(primaryRunId, apiToken),
-      fetchEventsHistory(otherRunId, apiToken),
+      fetchEventsHistory(primaryRunId, apiToken, tenantId),
+      fetchEventsHistory(otherRunId, apiToken, tenantId),
     ])
       .then(([primary, other]) => {
         if (cancelled) return;
@@ -148,13 +156,13 @@ function RunCompare({
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        setError(formatApiError(err));
         setState('error');
       });
     return () => {
       cancelled = true;
     };
-  }, [primaryRunId, otherRunId, apiToken]);
+  }, [primaryRunId, otherRunId, apiToken, tenantId]);
 
   // Compute the union of compare keys so both columns can highlight
   // events that lack a counterpart in the other run.
@@ -529,7 +537,13 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
   }, [workflowDraft]);
 
   const loadRuns = async (nextTenant = tenantId) => {
-    const response = await apiFetch(`/v1/runs?tenant_id=${encodeURIComponent(nextTenant)}&limit=20`, apiToken);
+    const trimmedTenant = nextTenant.trim() || 'default';
+    const response = await apiFetch(
+      `/v1/runs?tenant_id=${encodeURIComponent(trimmedTenant)}&limit=20`,
+      apiToken,
+      {},
+      trimmedTenant,
+    );
     if (!response.ok) {
       throw new Error(`run list failed with HTTP ${response.status}`);
     }
@@ -620,6 +634,7 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
         `/v1/runs/${runId}/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
         apiToken,
         { signal: controller.signal },
+        tenantId.trim() || 'default',
       );
       if (!response.ok || !response.body) {
         throw new Error(`event stream failed with HTTP ${response.status}`);
@@ -675,8 +690,9 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
     };
 
     const connect = async () => {
+      const activeTenant = tenantId.trim() || 'default';
       try {
-        const response = await apiFetch(`/v1/runs/${runId}`, apiToken);
+        const response = await apiFetch(`/v1/runs/${runId}`, apiToken, {}, activeTenant);
         if (!response.ok) {
           throw new Error(`run lookup failed with HTTP ${response.status}`);
         }
@@ -693,30 +709,20 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
         setEvents([]);
         setSelectedSeq(null);
         setError(null);
-        window.history.replaceState(null, '', `/ui/console?run=${encodeURIComponent(runId)}`);
+        navigateTo(`/ui/console?run=${encodeURIComponent(runId)}`, { replace: true });
 
-        // P10.17.3: when the operator already has a filter expression
-        // (loaded from localStorage on the run-id effect above), pass
-        // it through to the server so very long runs don't ship every
-        // event just to be filtered client-side. The client-side
-        // filter still runs on the returned events as a defensive
-        // (live SSE events arrive after the initial fetch and aren't
-        // server-pre-filtered). On a 400 from a malformed expression
-        // the UI silently retries without the filter — the inline
-        // parse error from `compileFilter` is already visible.
         let historyUrl = `/v1/runs/${runId}/events/history`;
         const initialFilter = readStorage(`${eventFilterKeyPrefix}${runId}`, '');
         if (initialFilter.trim()) {
           historyUrl += `?filter=${encodeURIComponent(initialFilter)}`;
         }
-        let historyResponse = await apiFetch(historyUrl, apiToken);
+        let historyResponse = await apiFetch(historyUrl, apiToken, {}, activeTenant);
         if (historyResponse.status === 400 && initialFilter.trim()) {
-          // Malformed filter — retry without it so the timeline
-          // still loads. The inline filter input will show the
-          // parse error from compileFilter.
           historyResponse = await apiFetch(
             `/v1/runs/${runId}/events/history`,
             apiToken,
+            {},
+            activeTenant,
           );
         }
         let afterSeq = -1;
@@ -729,21 +735,13 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
           setEvents(history);
           setSelectedSeq(history.at(-1)?.seq ?? null);
           afterSeq = history.at(-1)?.seq ?? -1;
-          // Q3.7.3: seed the seq ref with the initial-history high-watermark
-          // so a reconnect that fires before the first live event still
-          // resumes from the right point.
           latestSeqRef.current = afterSeq;
         }
-
-        // P10.13.1: the `/v1/runs/{id}/graph` fetch + the
-        // mermaid-preview block it fed were removed alongside the
-        // `yanshi-viz` crate deletion. The node grid below now
-        // derives entirely from observed events.
 
         await connectStream(afterSeq);
         if (!cancelled) {
           setState('closed');
-          void apiFetch(`/v1/runs/${runId}`, apiToken)
+          void apiFetch(`/v1/runs/${runId}`, apiToken, {}, activeTenant)
             .then((latest) => (latest.ok ? latest.json() : null))
             .then((latest: RunEnvelope | null) => {
               if (latest) {
@@ -755,11 +753,7 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
         if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) {
           return;
         }
-        setError(err instanceof Error ? err.message : String(err));
-        // Q3.7.3: kick off the indefinite-with-backoff reconnect loop.
-        // The previous code did a single 1200ms retry and then surrendered
-        // to the `error` state; with this change a transient network
-        // blip self-recovers without operator intervention.
+        setError(formatApiError(err));
         scheduleReconnect();
       }
     };
@@ -794,17 +788,24 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
     }
     setSubmitState('submitting');
     setError(null);
+    const trimmedTenant = tenantId.trim() || 'default';
     try {
-      const response = await apiFetch('/v1/runs', apiToken, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tenant_id: tenantId.trim() || 'default',
-          workflow: workflowDraft,
-        }),
-      });
+      const response = await apiFetch(
+        '/v1/runs',
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenant_id: trimmedTenant,
+            workflow: workflowDraft,
+          }),
+        },
+        trimmedTenant,
+      );
       if (!response.ok) {
-        throw new Error(`run submission failed with HTTP ${response.status}`);
+        const text = await response.text();
+        throw new Error(`run submission failed with HTTP ${response.status}: ${text}`);
       }
       const payload = await parseJsonResponse(
         CreateRunEnvelopeSchema,
@@ -813,9 +814,9 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
       );
       setRunId(payload.run_id);
       setState('loading');
-      await loadRuns(tenantId.trim() || 'default');
+      await loadRuns(trimmedTenant);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setSubmitState('idle');
     }
@@ -827,8 +828,14 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
     }
     setSubmitState('cancelling');
     setError(null);
+    const targetTenant = activeRun.tenant_id?.trim() || tenantId.trim() || 'default';
     try {
-      const response = await apiFetch(`/v1/runs/${activeRun.id}:cancel`, apiToken, { method: 'POST' });
+      const response = await apiFetch(
+        `/v1/runs/${activeRun.id}:cancel`,
+        apiToken,
+        { method: 'POST' },
+        targetTenant,
+      );
       if (!response.ok) {
         throw new Error(`run cancellation failed with HTTP ${response.status}`);
       }
@@ -840,9 +847,9 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
       setActiveRun(payload.run);
       setState('closed');
       abortRef.current?.abort();
-      await loadRuns(payload.run.tenant_id ?? tenantId);
+      await loadRuns(payload.run.tenant_id ?? targetTenant);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setSubmitState('idle');
     }

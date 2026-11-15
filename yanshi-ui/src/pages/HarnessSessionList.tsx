@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
-import { apiFetch } from '../lib/api';
+import { apiFetch, formatApiError } from '../lib/api';
 import { harnessNewFormTenantKey, harnessStatusTone } from '../lib/harness';
 import { formatTime } from '../lib/helpers';
 import { navigateTo } from '../lib/router';
@@ -56,7 +56,7 @@ export function HarnessSessionList({
       const next = HarnessSessionArraySchema.parse(raw?.sessions ?? []);
       setSessions(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatApiError(err));
     } finally {
       setBusy(false);
     }
