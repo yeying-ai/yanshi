@@ -24,6 +24,7 @@ serde_json = "1.0"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
 axum = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
@@ -35,9 +36,15 @@ tokio-util = { version = "0.7.11", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 uuid = { version = "1.6", features = ["v4", "serde"] }
+yanshi-agent-spi = { path = "../../yanshi-agent-spi" }
+yanshi-agents = { path = "../../yanshi-agents" }
 yanshi-config = { path = "../../yanshi-config" }
 yanshi-core = { path = "../../yanshi-core" }
+yanshi-harness = { path = "../../yanshi-harness" }
 yanshi-llm = { path = "../../yanshi-llm" }
+yanshi-memory = { path = "../../yanshi-memory" }
+yanshi-skills = { path = "../../yanshi-skills" }
+yanshi-tools = { path = "../../yanshi-tools" }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

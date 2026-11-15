@@ -92,21 +92,28 @@ type TenantPreferencesMap = BTreeMap<String, BTreeMap<String, serde_json::Value>
 pub struct LocalEngineState {
   runs: Arc<Mutex<HashMap<Uuid, RunEntry>>>,
   preferences: Arc<Mutex<TenantPreferencesMap>>,
+  harness: crate::local_harness::LocalHarnessState,
   base_dir: PathBuf,
 }
 
 impl LocalEngineState {
   pub fn new(base_dir: PathBuf) -> Self {
     let initial_prefs = load_preferences_from_disk(&base_dir);
+    let harness = crate::local_harness::LocalHarnessState::new(base_dir.clone());
     Self {
       runs: Arc::new(Mutex::new(HashMap::new())),
       preferences: Arc::new(Mutex::new(initial_prefs)),
+      harness,
       base_dir,
     }
   }
 
   pub fn base_dir(&self) -> &Path {
     &self.base_dir
+  }
+
+  pub fn harness(&self) -> &crate::local_harness::LocalHarnessState {
+    &self.harness
   }
 
   fn lock_runs(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, RunEntry>> {
@@ -197,6 +204,7 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
 }
 
 pub fn build_local_router(state: LocalEngineState) -> Router {
+  let harness_router = crate::local_harness::build_harness_router(state.harness.clone());
   Router::new()
     .route("/health", get(health))
     .route("/v1/diagnostics", get(get_diagnostics))
@@ -216,8 +224,9 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
       get(download_artifact),
     )
     .route("/v1/runs/:id/preview", get(preview_file))
-    .layer(CorsLayer::permissive())
     .with_state(state)
+    .merge(harness_router)
+    .layer(CorsLayer::permissive())
 }
 
 async fn health() -> impl IntoResponse {
