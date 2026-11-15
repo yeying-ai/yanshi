@@ -42,6 +42,9 @@ import {
   InspectWorkflowResponseSchema,
   ListArtifactsResponseSchema,
   ListRunsEnvelopeSchema,
+  ResumePlanSchema,
+  RunApprovalDecisionResponseSchema,
+  RunApprovalsEnvelopeSchema,
   RunEnvelopeSchema,
   StreamedEventArraySchema,
   StreamedEventSchema,
@@ -50,6 +53,8 @@ import {
   type FlowDebugPause,
   type InspectedInput,
   type InspectWorkflowResponse,
+  type PendingApproval,
+  type ResumePlan,
   type RunRecord,
   type StreamedEvent,
 } from '../schemas';
@@ -141,13 +146,28 @@ function coerceInputsPayload(
   return { payload, error: null };
 }
 
-function reduceWorkflowEvents(events: StreamedEvent[]): {
+export interface CostLimitExceededInfo {
+  nodeId: string;
+  spentUsd: number;
+  limitUsd: number;
+}
+
+export function formatSpendUsd(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return '$0.00';
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+export function reduceWorkflowEvents(events: StreamedEvent[]): {
   telemetryByNode: Record<string, NodeRuntimeTelemetry>;
   nodeInputs: Record<string, unknown>;
   nodeOutputs: Record<string, unknown>;
   pausedAt: FlowDebugPause | null;
   workflowError: string | null;
   workflowDurationMs: number | null;
+  totalCostUsd: number;
+  costLimitExceeded: CostLimitExceededInfo | null;
 } {
   const telemetryByNode: Record<string, NodeRuntimeTelemetry> = {};
   const nodeInputs: Record<string, unknown> = {};
@@ -155,6 +175,8 @@ function reduceWorkflowEvents(events: StreamedEvent[]): {
   let pausedAt: FlowDebugPause | null = null;
   let workflowError: string | null = null;
   let workflowDurationMs: number | null = null;
+  let totalCostUsd = 0;
+  let costLimitExceeded: CostLimitExceededInfo | null = null;
 
   const ensureNode = (nodeId: string): NodeRuntimeTelemetry => {
     if (!telemetryByNode[nodeId]) {
@@ -168,6 +190,12 @@ function reduceWorkflowEvents(events: StreamedEvent[]): {
     const nodeId = typeof p.node_id === 'string' ? p.node_id : null;
 
     switch (ev.kind) {
+      case 'workflow.started':
+      case 'checkpoint.restored': {
+        workflowError = null;
+        costLimitExceeded = null;
+        break;
+      }
       case 'node.started': {
         if (nodeId) {
           const entry = ensureNode(nodeId);
@@ -200,6 +228,33 @@ function reduceWorkflowEvents(events: StreamedEvent[]): {
             entry.durationMs = p.duration_ms;
           }
         }
+        break;
+      }
+      case 'node.cost': {
+        if (nodeId && typeof p.cost_usd === 'number' && Number.isFinite(p.cost_usd)) {
+          const entry = ensureNode(nodeId);
+          entry.costUsd = p.cost_usd;
+        }
+        if (typeof p.total_cost_usd === 'number' && Number.isFinite(p.total_cost_usd)) {
+          totalCostUsd = Math.max(totalCostUsd, p.total_cost_usd);
+        } else if (typeof p.cost_usd === 'number' && Number.isFinite(p.cost_usd)) {
+          totalCostUsd += p.cost_usd;
+        }
+        break;
+      }
+      case 'cost.limit_exceeded': {
+        const spent =
+          typeof p.spent_usd === 'number' && Number.isFinite(p.spent_usd)
+            ? p.spent_usd
+            : totalCostUsd;
+        const limit =
+          typeof p.limit_usd === 'number' && Number.isFinite(p.limit_usd) ? p.limit_usd : 0;
+        totalCostUsd = Math.max(totalCostUsd, spent);
+        costLimitExceeded = {
+          nodeId: nodeId ?? 'unknown',
+          spentUsd: spent,
+          limitUsd: limit,
+        };
         break;
       }
       case 'node.skipped': {
@@ -255,6 +310,7 @@ function reduceWorkflowEvents(events: StreamedEvent[]): {
       }
       case 'workflow.completed': {
         pausedAt = null;
+        workflowError = null;
         if (typeof p.duration_ms === 'number') {
           workflowDurationMs = p.duration_ms;
         }
@@ -286,6 +342,8 @@ function reduceWorkflowEvents(events: StreamedEvent[]): {
     pausedAt,
     workflowError,
     workflowDurationMs,
+    totalCostUsd,
+    costLimitExceeded,
   };
 }
 
@@ -359,6 +417,16 @@ export function WorkflowStudioPage({
   const [submitBusy, setSubmitBusy] = useState<boolean>(false);
   const [debugActionBusy, setDebugActionBusy] = useState<boolean>(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
+  const [costLimitDraft, setCostLimitDraft] = useState<string>('');
+
+  // Checkpoint resume & run-level approvals state
+  const [resumeModalOpen, setResumeModalOpen] = useState<boolean>(false);
+  const [resumePlanLoading, setResumePlanLoading] = useState<boolean>(false);
+  const [resumePlanData, setResumePlanData] = useState<ResumePlan | null>(null);
+  const [resumePlanError, setResumePlanError] = useState<string | null>(null);
+  const [resumeActionBusy, setResumeActionBusy] = useState<boolean>(false);
+  const [pendingRunApprovals, setPendingRunApprovals] = useState<PendingApproval[]>([]);
+  const [approvalDecisionBusyId, setApprovalDecisionBusyId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const latestSeqRef = useRef<number>(-1);
@@ -757,6 +825,68 @@ export function WorkflowStudioPage({
       (!activeRun || !isTerminalRun(activeRun)),
   );
 
+  const effectiveCostLimitUsd = useMemo<number | null>(() => {
+    const trimmed = costLimitDraft.trim();
+    const userCap =
+      trimmed && Number.isFinite(Number(trimmed)) && Number(trimmed) > 0
+        ? Number(trimmed)
+        : null;
+    const yamlCap =
+      typeof inspected.cost_limit_usd === 'number' &&
+      Number.isFinite(inspected.cost_limit_usd) &&
+      inspected.cost_limit_usd > 0
+        ? inspected.cost_limit_usd
+        : null;
+    if (userCap !== null && yamlCap !== null) return Math.min(userCap, yamlCap);
+    return userCap ?? yamlCap;
+  }, [costLimitDraft, inspected.cost_limit_usd]);
+
+  const canResumeCurrentRun = Boolean(
+    runId &&
+      !isRunActive &&
+      (activeRun?.status === 'failed' ||
+        activeRun?.status === 'cancelled' ||
+        Boolean(reduced.workflowError)),
+  );
+
+  // Poll `/v1/runs/:id/approvals` while a run is active so gated tool calls can be approved inline.
+  useEffect(() => {
+    if (!runId || !isRunActive) {
+      setPendingRunApprovals([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const pollApprovals = async () => {
+      try {
+        const res = await apiFetch(
+          `/v1/runs/${encodeURIComponent(runId)}/approvals`,
+          apiToken,
+          {},
+          tenantId,
+        );
+        if (!res.ok || cancelled) return;
+        const parsed = await parseJsonResponse(
+          RunApprovalsEnvelopeSchema,
+          res,
+          `GET /v1/runs/${runId}/approvals`,
+        );
+        if (!cancelled) {
+          setPendingRunApprovals(parsed.approvals);
+        }
+      } catch {
+        // Non-fatal if endpoint is momentarily unreachable.
+      }
+    };
+    void pollApprovals();
+    const timer = window.setInterval(() => {
+      void pollApprovals();
+    }, 2400);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [runId, isRunActive, apiToken, tenantId]);
+
   const allPresets = useMemo(
     () => [
       ...personalTemplates.map((tpl) => ({
@@ -865,6 +995,17 @@ export function WorkflowStudioPage({
       return;
     }
 
+    let parsedCostLimit: number | undefined;
+    const rawLimit = costLimitDraft.trim();
+    if (rawLimit) {
+      const n = Number(rawLimit);
+      if (!Number.isFinite(n) || n <= 0) {
+        setBannerError('单次运行预算上限 (cost_limit_usd) 必须为大于 0 的数字');
+        return;
+      }
+      parsedCostLimit = n;
+    }
+
     setSubmitBusy(true);
     setBannerError(null);
     setServerDebugPaused(null);
@@ -880,6 +1021,7 @@ export function WorkflowStudioPage({
             workflow: yamlDraft,
             inputs: coerced.payload,
             model: modelOverride.trim() || undefined,
+            cost_limit_usd: parsedCostLimit,
             run_mode: targetRunMode,
             step_every_node: targetRunMode === 'debug' ? stepEveryNode : false,
             breakpoints: targetRunMode === 'debug' ? breakpoints : [],
@@ -898,6 +1040,7 @@ export function WorkflowStudioPage({
       );
       setEvents([]);
       setArtifacts([]);
+      setPendingRunApprovals([]);
       setRunId(created.run_id);
       setStreamState('loading');
       if (targetRunMode === 'release') {
@@ -978,6 +1121,112 @@ export function WorkflowStudioPage({
       setBannerError(err instanceof Error ? err.message : String(err));
     } finally {
       setDebugActionBusy(false);
+    }
+  };
+
+  const openResumePlanModal = async () => {
+    if (!runId) return;
+    setResumeModalOpen(true);
+    setResumePlanLoading(true);
+    setResumePlanError(null);
+    setResumePlanData(null);
+    try {
+      const res = await apiFetch(
+        `/v1/runs/${encodeURIComponent(runId)}/resume-plan`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          res.status === 404
+            ? '当前运行尚未落盘可用的断点记录（例如首个节点在完成前即失败）'
+            : `读取续跑计划失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`,
+        );
+      }
+      const plan = await parseJsonResponse(
+        ResumePlanSchema,
+        res,
+        `GET /v1/runs/${runId}/resume-plan`,
+      );
+      setResumePlanData(plan);
+    } catch (err) {
+      setResumePlanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResumePlanLoading(false);
+    }
+  };
+
+  const confirmResumeRun = async () => {
+    if (!runId || resumeActionBusy) return;
+    setResumeActionBusy(true);
+    setBannerError(null);
+    try {
+      const res = await apiFetch(
+        `/v1/runs/${encodeURIComponent(runId)}:resume`,
+        apiToken,
+        { method: 'POST' },
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `断点续跑启动失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`,
+        );
+      }
+      const envelope = await parseJsonResponse(
+        RunEnvelopeSchema,
+        res,
+        `POST /v1/runs/${runId}:resume`,
+      );
+      setActiveRun(runFromEnvelope(envelope));
+      setResumeModalOpen(false);
+      setBannerNotice(`已从断点 #${resumePlanData?.last_completed_node ?? 'latest'} 恢复运行`);
+      setStreamState('loading');
+    } catch (err) {
+      setResumePlanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResumeActionBusy(false);
+    }
+  };
+
+  const decideRunApproval = async (
+    requestId: string,
+    decision: 'allow' | 'deny_and_stop',
+    scope: 'once' | 'session' = 'once',
+  ) => {
+    if (!runId || approvalDecisionBusyId) return;
+    setApprovalDecisionBusyId(requestId);
+    try {
+      const res = await apiFetch(
+        `/v1/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            decision,
+            scope,
+            decided_by: 'user:studio',
+          }),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`提交审批决策失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`);
+      }
+      await parseJsonResponse(
+        RunApprovalDecisionResponseSchema,
+        res,
+        `POST /v1/runs/${runId}/approvals/${requestId}`,
+      );
+      setPendingRunApprovals((prev) => prev.filter((item) => item.id !== requestId));
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApprovalDecisionBusyId(null);
     }
   };
 
@@ -1414,6 +1663,76 @@ export function WorkflowStudioPage({
         </div>
       )}
 
+      {reduced.costLimitExceeded && (
+        <div className="studio-alert studio-alert--error" role="alert" data-testid="cost-limit-alert">
+          <span>
+            💰 预算熔断已触发：在节点 #{reduced.costLimitExceeded.nodeId} 处累计花费{' '}
+            {formatSpendUsd(reduced.costLimitExceeded.spentUsd)} 已超过预算上限{' '}
+            {formatSpendUsd(reduced.costLimitExceeded.limitUsd)}
+          </span>
+        </div>
+      )}
+
+      {pendingRunApprovals.length > 0 && (
+        <section
+          className="studio-run-approvals-banner"
+          role="region"
+          aria-label="运行期工具调用审批"
+          data-testid="run-approvals-banner"
+        >
+          {pendingRunApprovals.map((req) => {
+            const busy = approvalDecisionBusyId === req.id;
+            return (
+              <div key={req.id} className="studio-run-approval-card">
+                <div className="studio-run-approval-card__info">
+                  <div className="studio-run-approval-card__top">
+                    <span className="studio-approval-risk" data-risk={req.risk}>
+                      审批拦截 · {req.risk.toUpperCase()}
+                    </span>
+                    <strong>工具：{req.tool}</strong>
+                    <small>Step #{req.step_index}</small>
+                  </div>
+                  <p>{req.reason}</p>
+                  {req.params_summary !== undefined && req.params_summary !== null && (
+                    <pre className="studio-run-approval-card__params">
+                      {typeof req.params_summary === 'string'
+                        ? req.params_summary
+                        : JSON.stringify(req.params_summary, null, 2)}
+                    </pre>
+                  )}
+                </div>
+                <div className="studio-run-approval-card__actions">
+                  <button
+                    type="button"
+                    className="studio-btn-primary studio-btn-sm"
+                    disabled={busy}
+                    onClick={() => void decideRunApproval(req.id, 'allow', 'once')}
+                  >
+                    ✓ 允许一次
+                  </button>
+                  <button
+                    type="button"
+                    className="studio-btn-secondary studio-btn-sm"
+                    disabled={busy}
+                    onClick={() => void decideRunApproval(req.id, 'allow', 'session')}
+                  >
+                    ✓ 本轮始终允许
+                  </button>
+                  <button
+                    type="button"
+                    className="studio-btn-danger-ghost studio-btn-sm"
+                    disabled={busy}
+                    onClick={() => void decideRunApproval(req.id, 'deny_and_stop', 'once')}
+                  >
+                    ✕ 拒绝并中止
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      )}
+
       {/* ── Posture 1: DEBUG MODE (Studio) ──────────────────────── */}
       {mode === 'debug' ? (
         <main className={`studio-debug-grid ${leftCollapsed ? 'studio-debug-grid--collapsed' : ''}`}>
@@ -1577,6 +1896,27 @@ export function WorkflowStudioPage({
                       onChange={(ev) => setModelOverride(ev.target.value)}
                     />
                   </label>
+                  <label className="studio-input-field studio-cost-limit-field">
+                    <div className="studio-input-field__label">
+                      <strong>单次运行预算上限 USD (cost_limit_usd)</strong>
+                      <span>optional</span>
+                    </div>
+                    <small className="studio-input-field__desc">
+                      超出自动熔断防超支
+                      {typeof inspected.cost_limit_usd === 'number'
+                        ? `（YAML 已声明上限 $${inspected.cost_limit_usd}，取更严格值）`
+                        : ''}
+                    </small>
+                    <input
+                      type="number"
+                      min="0.0001"
+                      step="0.01"
+                      data-testid="studio-cost-limit-input"
+                      placeholder="例如 1.50（留空不设额外上限）"
+                      value={costLimitDraft}
+                      onChange={(ev) => setCostLimitDraft(ev.target.value)}
+                    />
+                  </label>
                   {renderTypedInputsForm(true)}
                 </div>
 
@@ -1716,6 +2056,17 @@ export function WorkflowStudioPage({
                   ⏹ 终止
                 </button>
 
+                {canResumeCurrentRun && (
+                  <button
+                    type="button"
+                    data-testid="open-resume-plan-btn"
+                    className="studio-btn-secondary studio-btn-sm"
+                    onClick={() => void openResumePlanModal()}
+                  >
+                    ↻ 断点续跑
+                  </button>
+                )}
+
                 {runId && (artifacts.length > 0 || deliverables.length > 0) && (
                   <button
                     type="button"
@@ -1730,6 +2081,19 @@ export function WorkflowStudioPage({
               </div>
 
               <div className="studio-debug-deck__status">
+                {(reduced.totalCostUsd > 0 || effectiveCostLimitUsd !== null) && (
+                  <span
+                    className={`studio-spend-pill ${
+                      reduced.costLimitExceeded ? 'studio-spend-pill--exceeded' : ''
+                    }`}
+                    data-testid="studio-live-spend-pill"
+                  >
+                    💰 {formatSpendUsd(reduced.totalCostUsd)}
+                    {effectiveCostLimitUsd !== null
+                      ? ` / ${formatSpendUsd(effectiveCostLimitUsd)}`
+                      : ''}
+                  </span>
+                )}
                 {effectivePausedAt ? (
                   <span className="studio-live-pill studio-live-pill--paused">
                     ⏸ 已暂停于 #{effectivePausedAt.node_id}（
@@ -1882,6 +2246,27 @@ export function WorkflowStudioPage({
                   onChange={(ev) => setModelOverride(ev.target.value)}
                 />
               </label>
+              <label className="studio-input-field studio-cost-limit-field">
+                <div className="studio-input-field__label">
+                  <strong>单次运行预算上限 USD (cost_limit_usd)</strong>
+                  <span>optional</span>
+                </div>
+                <small className="studio-input-field__desc">
+                  超出自动熔断防超支
+                  {typeof inspected.cost_limit_usd === 'number'
+                    ? `（YAML 已声明上限 $${inspected.cost_limit_usd}）`
+                    : ''}
+                </small>
+                <input
+                  type="number"
+                  min="0.0001"
+                  step="0.01"
+                  data-testid="studio-cost-limit-input"
+                  placeholder="例如 1.50（留空不设额外上限）"
+                  value={costLimitDraft}
+                  onChange={(ev) => setCostLimitDraft(ev.target.value)}
+                />
+              </label>
               {renderTypedInputsForm(false)}
             </div>
 
@@ -1899,6 +2284,17 @@ export function WorkflowStudioPage({
                     ? '🚀 重新一键运行整个流程'
                     : '🚀 一键运行整个流程'}
               </button>
+
+              {canResumeCurrentRun && (
+                <button
+                  type="button"
+                  data-testid="open-resume-plan-release-btn"
+                  className="studio-btn-secondary"
+                  onClick={() => void openResumePlanModal()}
+                >
+                  ↻ 从断点续跑
+                </button>
+              )}
 
               {isRunActive && (
                 <button
@@ -1934,6 +2330,18 @@ export function WorkflowStudioPage({
                   </small>
                 </div>
                 <div className="studio-progress-panel__right">
+                  {(reduced.totalCostUsd > 0 || effectiveCostLimitUsd !== null) && (
+                    <span
+                      className={`studio-spend-pill ${
+                        reduced.costLimitExceeded ? 'studio-spend-pill--exceeded' : ''
+                      }`}
+                    >
+                      💰 {formatSpendUsd(reduced.totalCostUsd)}
+                      {effectiveCostLimitUsd !== null
+                        ? ` / ${formatSpendUsd(effectiveCostLimitUsd)}`
+                        : ''}
+                    </span>
+                  )}
                   <span className="studio-pct">{progressPct}%</span>
                   {runId && (
                     <button
@@ -2129,6 +2537,153 @@ export function WorkflowStudioPage({
                 setYamlDraft(nextValue);
               }}
             />
+          </div>
+        </div>
+      )}
+
+      {resumeModalOpen && (
+        <div
+          className="studio-yaml-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="断点续跑计划预览"
+          onKeyDown={(ev) => {
+            if (ev.key === 'Escape') {
+              setResumeModalOpen(false);
+            }
+          }}
+        >
+          <div className="studio-resume-modal">
+            <header className="studio-yaml-modal__head">
+              <div>
+                <strong>↻ 断点续跑计划预览 (Checkpoint Resume Plan)</strong>
+                <span className="studio-yaml-modal__badge ok">
+                  Run {runId.slice(0, 12)}…
+                </span>
+              </div>
+              <button
+                type="button"
+                className="studio-btn-ghost studio-btn-sm"
+                onClick={() => setResumeModalOpen(false)}
+              >
+                关闭 (Esc)
+              </button>
+            </header>
+
+            <div className="studio-resume-modal__body">
+              {resumePlanLoading ? (
+                <p className="studio-muted-note">正在加载已落盘的 Checkpoint 状态与幂等性分析…</p>
+              ) : resumePlanError ? (
+                <div className="studio-node-error" role="alert">
+                  {resumePlanError}
+                </div>
+              ) : resumePlanData ? (
+                <>
+                  <div className="studio-resume-summary-grid">
+                    <div className="studio-resume-stat">
+                      <span>最近已完成断点节点</span>
+                      <strong>#{resumePlanData.last_completed_node}</strong>
+                    </div>
+                    <div className="studio-resume-stat">
+                      <span>断点保存时间</span>
+                      <strong>{formatTime(resumePlanData.created_at)}</strong>
+                    </div>
+                    <div className="studio-resume-stat">
+                      <span>未完成工具调用</span>
+                      <strong>
+                        {resumePlanData.summary.total} 项（跳过 {resumePlanData.summary.to_skip} · 重放{' '}
+                        {resumePlanData.summary.to_replay} · 需人工{' '}
+                        {resumePlanData.summary.requires_manual}）
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="studio-resume-nodes-split">
+                    <div className="studio-resume-nodes-col">
+                      <h4>✓ 将跳过并直接复用缓存结果</h4>
+                      <div className="studio-resume-tags">
+                        {inspected.execution_order
+                          .filter((nid) => {
+                            const st = reduced.telemetryByNode[nid]?.status;
+                            return st === 'succeeded' || st === 'skipped';
+                          })
+                          .map((nid) => (
+                            <span key={nid} className="studio-resume-tag studio-resume-tag--cached">
+                              #{nid}
+                            </span>
+                          ))}
+                      </div>
+                    </div>
+
+                    <div className="studio-resume-nodes-col">
+                      <h4>▶ 将从断点继续执行</h4>
+                      <div className="studio-resume-tags">
+                        {inspected.execution_order
+                          .filter((nid) => {
+                            const st = reduced.telemetryByNode[nid]?.status;
+                            return st !== 'succeeded' && st !== 'skipped';
+                          })
+                          .map((nid) => (
+                            <span key={nid} className="studio-resume-tag studio-resume-tag--rerun">
+                              #{nid}
+                            </span>
+                          ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {resumePlanData.tool_calls.length > 0 && (
+                    <div className="studio-resume-tools">
+                      <h4>内嵌 Agent 未决工具调用恢复决策</h4>
+                      <ul>
+                        {resumePlanData.tool_calls.map((tc) => (
+                          <li key={`${tc.node_id}-${tc.tool_call_id}`}>
+                            <strong>
+                              #{tc.node_id} · {tc.tool}
+                            </strong>
+                            <span data-decision={tc.decision}>{tc.decision}</span>
+                            <small>{tc.reason}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {resumePlanData.summary.requires_manual > 0 && (
+                    <div className="studio-alert studio-alert--warn" role="alert">
+                      <span>
+                        存在 {resumePlanData.summary.requires_manual}{' '}
+                        项非幂等外部副作用工具调用需要人工确认，自动续跑将被引擎安全拦截。
+                      </span>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+
+            <footer className="studio-resume-modal__foot">
+              <button
+                type="button"
+                className="studio-btn-ghost"
+                onClick={() => setResumeModalOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-resume-run-btn"
+                className="studio-btn-primary"
+                disabled={
+                  resumePlanLoading ||
+                  !resumePlanData ||
+                  resumeActionBusy ||
+                  resumePlanData.summary.requires_manual > 0
+                }
+                onClick={() => void confirmResumeRun()}
+              >
+                {resumeActionBusy ? '正在恢复运行…' : '▶ 确认从断点续跑'}
+              </button>
+            </footer>
           </div>
         </div>
       )}

@@ -364,6 +364,60 @@ export const ListArtifactsResponseSchema = z
   .loose();
 export type ListArtifactsResponse = z.infer<typeof ListArtifactsResponseSchema>;
 
+export const ResumeToolCallSchema = z
+  .object({
+    node_id: z.string(),
+    tool_call_id: z.string(),
+    tool: z.string(),
+    step_index: z.number(),
+    idempotency: z.enum(['idempotent', 'non_idempotent', 'unknown']),
+    decision: z.enum(['skip', 'replay', 'requires_manual']),
+    reason: z.string(),
+    has_recorded_result: z.boolean(),
+  })
+  .loose();
+export type ResumeToolCall = z.infer<typeof ResumeToolCallSchema>;
+
+export const ResumeSummarySchema = z
+  .object({
+    total: z.number(),
+    to_replay: z.number(),
+    to_skip: z.number(),
+    requires_manual: z.number(),
+  })
+  .loose();
+export type ResumeSummary = z.infer<typeof ResumeSummarySchema>;
+
+export const ResumePlanSchema = z
+  .object({
+    schema_version: z.number(),
+    workflow_id: z.string(),
+    last_completed_node: z.string(),
+    status: z.string(),
+    created_at: z.string(),
+    tool_calls: z.array(ResumeToolCallSchema),
+    summary: ResumeSummarySchema,
+    force_replay: z.boolean(),
+  })
+  .loose();
+export type ResumePlan = z.infer<typeof ResumePlanSchema>;
+
+export const RunApprovalsEnvelopeSchema = z
+  .object({
+    approvals: z.array(PendingApprovalSchema),
+  })
+  .loose();
+export type RunApprovalsEnvelope = z.infer<typeof RunApprovalsEnvelopeSchema>;
+
+export const RunApprovalDecisionResponseSchema = z
+  .object({
+    run_id: z.string(),
+    request_id: z.string(),
+    resolved: z.boolean(),
+  })
+  .loose();
+export type RunApprovalDecisionResponse = z.infer<typeof RunApprovalDecisionResponseSchema>;
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /**

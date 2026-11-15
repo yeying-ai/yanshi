@@ -137,6 +137,10 @@ impl LocalHarnessState {
   fn session_dir(&self, session_id: Uuid) -> PathBuf {
     self.harness_dir.join(session_id.to_string())
   }
+
+  pub(crate) fn approvals(&self) -> &LocalApprovalRegistry {
+    &self.approvals
+  }
 }
 
 fn is_terminal_harness_status(status: &str) -> bool {

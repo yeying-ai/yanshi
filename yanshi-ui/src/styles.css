@@ -4283,3 +4283,213 @@ button.studio-upload-btn:hover {
   color: #b91c1c;
   font-weight: 600;
 }
+
+/* ── Phase 4: Spend Metering, Run Approvals & Checkpoint Resume Modal ── */
+.studio-spend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-spend-pill--exceeded {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.studio-run-approvals-banner {
+  margin: 0 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.studio-run-approval-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #f59e0b;
+  background: #fffbeb;
+  box-shadow: 0 2px 8px rgba(217, 119, 6, 0.08);
+}
+
+.studio-run-approval-card__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.studio-run-approval-card__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.studio-approval-risk {
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.studio-approval-risk[data-risk='high'],
+.studio-approval-risk[data-risk='critical'] {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fca5a5;
+}
+
+.studio-run-approval-card__info p {
+  margin: 0;
+  font-size: 12px;
+  color: #78350f;
+}
+
+.studio-run-approval-card__params {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #ffffff;
+  border: 1px solid #fde68a;
+  font-size: 11px;
+  max-height: 76px;
+  overflow: auto;
+}
+
+.studio-run-approval-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.studio-resume-modal {
+  width: min(680px, 94vw);
+  max-height: 86vh;
+  background: #ffffff;
+  border-radius: 14px;
+  border: 1px solid #dbe3ef;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.22);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.studio-resume-modal__body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.studio-resume-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.studio-resume-stat {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.studio-resume-stat span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.studio-resume-stat strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.studio-resume-nodes-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.studio-resume-nodes-col {
+  padding: 12px;
+  border-radius: 9px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.studio-resume-nodes-col h4,
+.studio-resume-tools h4 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: #1e293b;
+}
+
+.studio-resume-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.studio-resume-tag {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.studio-resume-tag--cached {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.studio-resume-tag--rerun {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.studio-resume-tools ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.studio-resume-tools li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.studio-resume-modal__foot {
+  padding: 12px 20px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

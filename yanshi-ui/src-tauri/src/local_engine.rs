@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -37,12 +38,16 @@ use yanshi_config::{
   inspect::{InspectWorkflowResponse, inspect_workflow},
 };
 use yanshi_core::{
-  FlowCancellationToken, FlowDebugController, FlowDebugSnapshot, FlowExecutionConfig, FlowExt,
+  CheckpointConfig, CheckpointManager, FlowCancellationToken, FlowDebugController,
+  FlowDebugSnapshot, FlowExecutionConfig, FlowExt, ResumePlanOptions, build_resume_plan,
   events::{EventListener, WorkflowEvent},
   run_context::collect_file_outputs,
   value::FlowValue,
 };
+use yanshi_harness::{ApprovalDecision, ApprovalOutcome, ApprovalScope};
 use yanshi_llm::Yanshi;
+
+use crate::local_harness::LocalApprovalResolveError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalRunRecord {
@@ -77,6 +82,58 @@ pub struct LocalArtifactSummary {
   pub file_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedArtifactRecord {
+  id: Uuid,
+  node_id: String,
+  name: String,
+  mime_type: String,
+  size_bytes: u64,
+  created_at: DateTime<Utc>,
+  file_path: PathBuf,
+}
+
+impl From<&LocalArtifactSummary> for PersistedArtifactRecord {
+  fn from(value: &LocalArtifactSummary) -> Self {
+    Self {
+      id: value.id,
+      node_id: value.node_id.clone(),
+      name: value.name.clone(),
+      mime_type: value.mime_type.clone(),
+      size_bytes: value.size_bytes,
+      created_at: value.created_at,
+      file_path: value.file_path.clone(),
+    }
+  }
+}
+
+impl From<PersistedArtifactRecord> for LocalArtifactSummary {
+  fn from(value: PersistedArtifactRecord) -> Self {
+    Self {
+      id: value.id,
+      node_id: value.node_id,
+      name: value.name,
+      mime_type: value.mime_type,
+      size_bytes: value.size_bytes,
+      created_at: value.created_at,
+      file_path: value.file_path,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedRunMeta {
+  record: LocalRunRecord,
+  #[serde(default)]
+  artifacts: Vec<PersistedArtifactRecord>,
+  #[serde(default)]
+  model: Option<String>,
+  #[serde(default)]
+  cost_limit_usd: Option<f64>,
+}
+
+pub(crate) type RunCompletionHook = Arc<dyn Fn(Uuid, &str, &[LocalArtifactSummary]) + Send + Sync>;
+
 struct RunEntry {
   record: LocalRunRecord,
   events: Vec<LocalStreamedEvent>,
@@ -84,6 +141,10 @@ struct RunEntry {
   tx: broadcast::Sender<LocalStreamedEvent>,
   cancel_token: FlowCancellationToken,
   debug_controller: Option<FlowDebugController>,
+  attempt_start_seq: i64,
+  model: Option<String>,
+  cost_limit_usd: Option<f64>,
+  on_complete: Option<RunCompletionHook>,
 }
 
 type TenantPreferencesMap = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
@@ -99,9 +160,10 @@ pub struct LocalEngineState {
 impl LocalEngineState {
   pub fn new(base_dir: PathBuf) -> Self {
     let initial_prefs = load_preferences_from_disk(&base_dir);
+    let hydrated_runs = hydrate_runs_from_disk(&base_dir);
     let harness = crate::local_harness::LocalHarnessState::new(base_dir.clone());
     Self {
-      runs: Arc::new(Mutex::new(HashMap::new())),
+      runs: Arc::new(Mutex::new(hydrated_runs)),
       preferences: Arc::new(Mutex::new(initial_prefs)),
       harness,
       base_dir,
@@ -129,6 +191,109 @@ impl LocalEngineState {
       Err(poisoned) => poisoned.into_inner(),
     }
   }
+}
+
+fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
+  base_dir.join(run_id.to_string()).join("checkpoint")
+}
+
+fn write_run_meta_sync(run_dir: &Path, entry: &RunEntry) -> std::io::Result<()> {
+  std::fs::create_dir_all(run_dir)?;
+  let meta = PersistedRunMeta {
+    record: entry.record.clone(),
+    artifacts: entry
+      .artifacts
+      .iter()
+      .map(PersistedArtifactRecord::from)
+      .collect(),
+    model: entry.model.clone(),
+    cost_limit_usd: entry.cost_limit_usd,
+  };
+  let bytes = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
+  let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
+  let dst = run_dir.join("run_meta.json");
+  std::fs::write(&tmp, bytes)?;
+  std::fs::rename(tmp, dst)
+}
+
+fn append_run_event_jsonl_sync(run_dir: &Path, event: &LocalStreamedEvent) -> std::io::Result<()> {
+  std::fs::create_dir_all(run_dir)?;
+  let mut file = std::fs::OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(run_dir.join("events.jsonl"))?;
+  let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
+  writeln!(file, "{line}")
+}
+
+fn read_run_events_jsonl(path: &Path) -> Vec<LocalStreamedEvent> {
+  let Ok(text) = std::fs::read_to_string(path) else {
+    return Vec::new();
+  };
+  let mut events: Vec<LocalStreamedEvent> = text
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .filter_map(|line| serde_json::from_str::<LocalStreamedEvent>(line).ok())
+    .collect();
+  events.sort_by_key(|ev| ev.seq);
+  events
+}
+
+fn hydrate_runs_from_disk(base_dir: &Path) -> HashMap<Uuid, RunEntry> {
+  let mut out = HashMap::new();
+  let Ok(read_dir) = std::fs::read_dir(base_dir) else {
+    return out;
+  };
+  for item in read_dir.flatten() {
+    let path = item.path();
+    if !path.is_dir() {
+      continue;
+    }
+    let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+      continue;
+    };
+    let Ok(run_id) = Uuid::parse_str(dir_name) else {
+      continue;
+    };
+    let meta_path = path.join("run_meta.json");
+    let Ok(bytes) = std::fs::read(&meta_path) else {
+      continue;
+    };
+    let Ok(mut meta) = serde_json::from_slice::<PersistedRunMeta>(&bytes) else {
+      continue;
+    };
+    let mut needs_rewrite = false;
+    if !is_terminal_status(&meta.record.status) {
+      meta.record.status = "failed".to_string();
+      meta.record.finished_at = Some(Utc::now());
+      meta.record.error = Some("desktop_restarted_while_running".to_string());
+      needs_rewrite = true;
+    }
+    let events = read_run_events_jsonl(&path.join("events.jsonl"));
+    let attempt_start_seq = 0;
+    let (tx, _rx) = broadcast::channel(512);
+    let entry = RunEntry {
+      record: meta.record,
+      events,
+      artifacts: meta
+        .artifacts
+        .into_iter()
+        .map(LocalArtifactSummary::from)
+        .collect(),
+      tx,
+      cancel_token: FlowCancellationToken::new(),
+      debug_controller: None,
+      attempt_start_seq,
+      model: meta.model,
+      cost_limit_usd: meta.cost_limit_usd,
+      on_complete: None,
+    };
+    if needs_rewrite {
+      let _ = write_run_meta_sync(&path, &entry);
+    }
+    out.insert(run_id, entry);
+  }
+  out
 }
 
 fn preferences_file_path(base_dir: &Path) -> PathBuf {
@@ -215,6 +380,12 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
     .route("/v1/workflows/inspect", post(inspect_route))
     .route("/v1/runs", get(list_runs).post(create_run))
     .route("/v1/runs/:id", get(get_run).post(post_run_action))
+    .route("/v1/runs/:id/resume-plan", get(get_run_resume_plan))
+    .route("/v1/runs/:id/approvals", get(list_run_approvals))
+    .route(
+      "/v1/runs/:id/approvals/:request_id",
+      post(decide_run_approval),
+    )
     .route("/v1/runs/:id/debug", get(get_run_debug))
     .route("/v1/runs/:id/events", get(stream_events))
     .route("/v1/runs/:id/events/history", get(events_history))
@@ -436,11 +607,84 @@ struct CreateRunRequest {
   #[serde(default)]
   model: Option<String>,
   #[serde(default)]
+  cost_limit_usd: Option<f64>,
+  #[serde(default)]
   run_mode: RunMode,
   #[serde(default)]
   breakpoints: Vec<String>,
   #[serde(default)]
   step_every_node: Option<bool>,
+}
+
+pub(crate) struct SpawnLocalRunParams {
+  pub tenant_id: String,
+  pub workflow: String,
+  pub inputs: serde_json::Map<String, serde_json::Value>,
+  pub model: Option<String>,
+  pub cost_limit_usd: Option<f64>,
+  pub debug_controller: Option<FlowDebugController>,
+  pub on_complete: Option<RunCompletionHook>,
+}
+
+impl LocalEngineState {
+  pub(crate) async fn spawn_workflow_run(
+    &self,
+    params: SpawnLocalRunParams,
+  ) -> Result<Uuid, String> {
+    let run_id = Uuid::new_v4();
+    let run_dir = self.base_dir.join(run_id.to_string());
+    tokio::fs::create_dir_all(&run_dir)
+      .await
+      .map_err(|err| format!("failed to create run directory: {err}"))?;
+
+    let cancel_token = FlowCancellationToken::new();
+    let (tx, _rx) = broadcast::channel(512);
+    let record = LocalRunRecord {
+      id: run_id,
+      workflow: params.workflow.clone(),
+      status: "running".to_string(),
+      tenant_id: params.tenant_id,
+      started_at: Utc::now(),
+      finished_at: None,
+      run_dir: Some(run_dir.display().to_string()),
+      error: None,
+    };
+
+    let entry = RunEntry {
+      record,
+      events: Vec::new(),
+      artifacts: Vec::new(),
+      tx,
+      cancel_token: cancel_token.clone(),
+      debug_controller: params.debug_controller.clone(),
+      attempt_start_seq: 0,
+      model: params.model.clone(),
+      cost_limit_usd: params.cost_limit_usd,
+      on_complete: params.on_complete,
+    };
+    let _ = write_run_meta_sync(&run_dir, &entry);
+    self.lock_runs().insert(run_id, entry);
+
+    let state_bg = self.clone();
+    let base_dir_bg = self.base_dir.clone();
+    tokio::spawn(async move {
+      execute_local_flow(
+        state_bg,
+        base_dir_bg,
+        run_id,
+        params.workflow,
+        params.inputs,
+        params.model,
+        params.cost_limit_usd,
+        false,
+        cancel_token,
+        params.debug_controller,
+      )
+      .await;
+    });
+
+    Ok(run_id)
+  }
 }
 
 async fn create_run(
@@ -450,6 +694,14 @@ async fn create_run(
 ) -> Response {
   if req.workflow.trim().is_empty() {
     return error_json(StatusCode::BAD_REQUEST, "workflow YAML cannot be empty");
+  }
+  if let Some(limit) = req.cost_limit_usd
+    && (!limit.is_finite() || limit <= 0.0)
+  {
+    return error_json(
+      StatusCode::BAD_REQUEST,
+      "cost_limit_usd must be a finite number greater than 0",
+    );
   }
   let header_tenant = extract_tenant(&headers);
   let resolved_tenant = match req
@@ -470,15 +722,6 @@ async fn create_run(
     None => header_tenant,
   };
 
-  let run_id = Uuid::new_v4();
-  let run_dir = state.base_dir.join(run_id.to_string());
-  if let Err(err) = tokio::fs::create_dir_all(&run_dir).await {
-    return error_json(
-      StatusCode::INTERNAL_SERVER_ERROR,
-      &format!("failed to create run directory: {err}"),
-    );
-  }
-
   let debug_enabled = req.run_mode == RunMode::Debug
     || !req.breakpoints.is_empty()
     || req.step_every_node == Some(true);
@@ -491,46 +734,21 @@ async fn create_run(
     None
   };
 
-  let cancel_token = FlowCancellationToken::new();
-  let (tx, _rx) = broadcast::channel(512);
-  let record = LocalRunRecord {
-    id: run_id,
-    workflow: req.workflow.clone(),
-    status: "running".to_string(),
-    tenant_id: resolved_tenant,
-    started_at: Utc::now(),
-    finished_at: None,
-    run_dir: Some(run_dir.display().to_string()),
-    error: None,
-  };
-
-  state.lock_runs().insert(
-    run_id,
-    RunEntry {
-      record,
-      events: Vec::new(),
-      artifacts: Vec::new(),
-      tx,
-      cancel_token: cancel_token.clone(),
-      debug_controller: debug_controller.clone(),
-    },
-  );
-
-  let state_bg = state.clone();
-  let base_dir_bg = state.base_dir.clone();
-  tokio::spawn(async move {
-    execute_local_flow(
-      state_bg,
-      base_dir_bg,
-      run_id,
-      req.workflow,
-      req.inputs,
-      req.model,
-      cancel_token,
+  let run_id = match state
+    .spawn_workflow_run(SpawnLocalRunParams {
+      tenant_id: resolved_tenant,
+      workflow: req.workflow,
+      inputs: req.inputs,
+      model: req.model,
+      cost_limit_usd: req.cost_limit_usd,
       debug_controller,
-    )
-    .await;
-  });
+      on_complete: None,
+    })
+    .await
+  {
+    Ok(id) => id,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
 
   (
     StatusCode::OK,
@@ -544,6 +762,7 @@ async fn create_run(
 
 struct InMemoryEventListener {
   run_id: Uuid,
+  run_dir: PathBuf,
   state: LocalEngineState,
 }
 
@@ -551,18 +770,24 @@ impl EventListener for InMemoryEventListener {
   fn on_event(&self, event: &WorkflowEvent) {
     let kind = event.event_type().to_string();
     let payload = workflow_event_to_json(event);
-    let mut guard = self.state.lock_runs();
-    if let Some(entry) = guard.get_mut(&self.run_id) {
-      let seq = entry.events.len() as i64;
-      let streamed = LocalStreamedEvent {
-        run_id: self.run_id,
-        seq,
-        kind,
-        payload,
-        ts: Utc::now(),
-      };
-      entry.events.push(streamed.clone());
-      let _ = entry.tx.send(streamed);
+    let streamed_opt = {
+      let mut guard = self.state.lock_runs();
+      guard.get_mut(&self.run_id).map(|entry| {
+        let seq = entry.events.last().map_or(0, |last| last.seq + 1);
+        let streamed = LocalStreamedEvent {
+          run_id: self.run_id,
+          seq,
+          kind,
+          payload,
+          ts: Utc::now(),
+        };
+        entry.events.push(streamed.clone());
+        let _ = entry.tx.send(streamed.clone());
+        streamed
+      })
+    };
+    if let Some(streamed) = streamed_opt {
+      let _ = append_run_event_jsonl_sync(&self.run_dir, &streamed);
     }
   }
 }
@@ -575,23 +800,21 @@ async fn execute_local_flow(
   workflow_yaml: String,
   raw_inputs: serde_json::Map<String, serde_json::Value>,
   model_override: Option<String>,
+  cost_limit_usd: Option<f64>,
+  resume: bool,
   cancel_token: FlowCancellationToken,
   debug_controller: Option<FlowDebugController>,
 ) {
+  let run_dir = base_dir.join(run_id.to_string());
   let outcome: anyhow::Result<HashMap<String, yanshi_core::async_node::AsyncNodeResult>> = async {
     let _ = ensure_llm_initialized().await;
     let flow_def = yanshi_config::executor::parse_workflow_definition(&workflow_yaml)?;
     let mut flow =
       yanshi_config::executor::build_flow_from_definition(&flow_def, model_override.as_deref())?;
 
-    let mut initial_inputs: HashMap<String, FlowValue> = raw_inputs
-      .into_iter()
-      .map(|(k, v)| (k, FlowValue::Json(v)))
-      .collect();
-    yanshi_config::executor::apply_declared_inputs(&flow_def, &mut initial_inputs)?;
-
     let listener = InMemoryEventListener {
       run_id,
+      run_dir: run_dir.clone(),
       state: state.clone(),
     };
     flow = flow.with_event_listener(Arc::new(listener));
@@ -599,12 +822,42 @@ async fn execute_local_flow(
     let mut exec_cfg = FlowExecutionConfig::concurrent(8)
       .with_run_base_dir(base_dir.clone())
       .with_cancellation_token(cancel_token.clone());
+    if let Some(limit) = flow_def
+      .effective_cost_limit(cost_limit_usd)
+      .map_err(anyhow::Error::msg)?
+    {
+      exec_cfg = exec_cfg.with_cost_limit_usd(limit);
+    }
     if let Some(ctrl) = debug_controller.clone() {
       exec_cfg = exec_cfg.with_debug_controller(ctrl);
     }
-    let final_state = flow
-      .execute_from_inputs_with_id_and_config(run_id.to_string(), initial_inputs, exec_cfg)
-      .await?;
+
+    flow = flow.with_checkpointing(
+      CheckpointConfig::default()
+        .with_checkpoint_dir(checkpoint_dir_for_local_run(&base_dir, run_id)),
+    )?;
+
+    let final_state = if resume {
+      flow
+        .resume_with_config(
+          &run_id.to_string(),
+          &ResumePlanOptions::default(),
+          |recorded| match recorded.cost_limit_usd {
+            Some(limit) => exec_cfg.with_cost_limit_usd(limit),
+            None => exec_cfg,
+          },
+        )
+        .await?
+    } else {
+      let mut initial_inputs: HashMap<String, FlowValue> = raw_inputs
+        .into_iter()
+        .map(|(k, v)| (k, FlowValue::Json(v)))
+        .collect();
+      yanshi_config::executor::apply_declared_inputs(&flow_def, &mut initial_inputs)?;
+      flow
+        .execute_from_inputs_with_id_and_config(run_id.to_string(), initial_inputs, exec_cfg)
+        .await?
+    };
     Ok(final_state)
   }
   .await;
@@ -637,34 +890,54 @@ async fn execute_local_flow(
     }
   }
 
-  let mut guard = state.lock_runs();
-  if let Some(entry) = guard.get_mut(&run_id) {
-    entry.debug_controller = None;
-    entry.artifacts = discovered_artifacts;
-    entry.record.finished_at = Some(Utc::now());
-    match outcome {
-      Ok(pool) => {
-        if cancel_token.is_cancelled() {
-          entry.record.status = "cancelled".to_string();
-        } else if let Some(node_err) = first_pool_error(&pool) {
-          entry.record.status = "failed".to_string();
-          entry.record.error = Some(node_err.clone());
-          push_synthetic_terminal_event(entry, "workflow.failed", Some(&node_err));
-        } else {
-          entry.record.status = "succeeded".to_string();
+  let mut completion_notify: Option<(RunCompletionHook, String, Vec<LocalArtifactSummary>)> = None;
+  let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
+  {
+    let mut guard = state.lock_runs();
+    if let Some(entry) = guard.get_mut(&run_id) {
+      entry.debug_controller = None;
+      if !discovered_artifacts.is_empty() {
+        entry.artifacts = discovered_artifacts;
+      }
+      entry.record.finished_at = Some(Utc::now());
+      match outcome {
+        Ok(pool) => {
+          if cancel_token.is_cancelled() {
+            entry.record.status = "cancelled".to_string();
+          } else if let Some(node_err) = first_pool_error(&pool) {
+            entry.record.status = "failed".to_string();
+            entry.record.error = Some(node_err.clone());
+            synthetic_to_persist =
+              push_synthetic_terminal_event(entry, "workflow.failed", Some(&node_err));
+          } else {
+            entry.record.status = "succeeded".to_string();
+            entry.record.error = None;
+          }
+        }
+        Err(err) => {
+          if cancel_token.is_cancelled() {
+            entry.record.status = "cancelled".to_string();
+          } else {
+            let msg = err.to_string();
+            entry.record.status = "failed".to_string();
+            entry.record.error = Some(msg.clone());
+            synthetic_to_persist =
+              push_synthetic_terminal_event(entry, "workflow.failed", Some(&msg));
+          }
         }
       }
-      Err(err) => {
-        if cancel_token.is_cancelled() {
-          entry.record.status = "cancelled".to_string();
-        } else {
-          let msg = err.to_string();
-          entry.record.status = "failed".to_string();
-          entry.record.error = Some(msg.clone());
-          push_synthetic_terminal_event(entry, "workflow.failed", Some(&msg));
-        }
+      let _ = write_run_meta_sync(&run_dir, entry);
+      if let Some(hook) = entry.on_complete.clone() {
+        completion_notify = Some((hook, entry.record.status.clone(), entry.artifacts.clone()));
       }
     }
+  }
+
+  if let Some(ev) = synthetic_to_persist {
+    let _ = append_run_event_jsonl_sync(&run_dir, &ev);
+  }
+  if let Some((hook, final_status, final_artifacts)) = completion_notify {
+    hook(run_id, &final_status, &final_artifacts);
   }
 }
 
@@ -682,11 +955,19 @@ fn first_pool_error(
   None
 }
 
-fn push_synthetic_terminal_event(entry: &mut RunEntry, kind: &str, err_msg: Option<&str>) {
-  if entry.events.iter().any(|e| is_terminal_event_kind(&e.kind)) {
-    return;
+fn push_synthetic_terminal_event(
+  entry: &mut RunEntry,
+  kind: &str,
+  err_msg: Option<&str>,
+) -> Option<LocalStreamedEvent> {
+  if entry
+    .events
+    .iter()
+    .any(|e| e.seq >= entry.attempt_start_seq && is_terminal_event_kind(&e.kind))
+  {
+    return None;
   }
-  let seq = entry.events.len() as i64;
+  let seq = entry.events.last().map_or(0, |last| last.seq + 1);
   let ev = LocalStreamedEvent {
     run_id: entry.record.id,
     seq,
@@ -698,7 +979,8 @@ fn push_synthetic_terminal_event(entry: &mut RunEntry, kind: &str, err_msg: Opti
     ts: Utc::now(),
   };
   entry.events.push(ev.clone());
-  let _ = entry.tx.send(ev);
+  let _ = entry.tx.send(ev.clone());
+  Some(ev)
 }
 
 async fn get_run(
@@ -709,6 +991,148 @@ async fn get_run(
   match guard.get(&run_id) {
     Some(entry) => Json(entry.record.clone()).into_response(),
     None => error_json(StatusCode::NOT_FOUND, "run not found"),
+  }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ResumePlanQuery {
+  #[serde(default)]
+  force_replay: bool,
+}
+
+async fn get_run_resume_plan(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(run_id): RoutePath<Uuid>,
+  Query(query): Query<ResumePlanQuery>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    let Some(_entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
+      return error_json(StatusCode::NOT_FOUND, "run not found");
+    };
+  }
+
+  let ckpt_dir = checkpoint_dir_for_local_run(&state.base_dir, run_id);
+  let manager =
+    match CheckpointManager::new(CheckpointConfig::default().with_checkpoint_dir(ckpt_dir)) {
+      Ok(mgr) => mgr,
+      Err(err) => {
+        return error_json(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          &format!("checkpoint manager init failed: {err}"),
+        );
+      }
+    };
+
+  let checkpoint = match manager.load_latest_checkpoint(&run_id.to_string()).await {
+    Ok(Some(ckpt)) => ckpt,
+    Ok(None) => {
+      return error_json(
+        StatusCode::NOT_FOUND,
+        &format!("no checkpoint found for run {run_id}"),
+      );
+    }
+    Err(err) => {
+      return error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("failed to load checkpoint: {err}"),
+      );
+    }
+  };
+
+  match build_resume_plan(
+    &checkpoint,
+    &ResumePlanOptions {
+      force_replay: query.force_replay,
+    },
+  ) {
+    Ok(plan) => Json(plan).into_response(),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to build resume plan: {err}"),
+    ),
+  }
+}
+
+#[derive(Debug, Deserialize)]
+struct RunApprovalDecisionRequest {
+  decision: ApprovalOutcome,
+  #[serde(default)]
+  scope: Option<ApprovalScope>,
+  #[serde(default)]
+  decided_by: Option<String>,
+  #[serde(default)]
+  reason: Option<String>,
+}
+
+async fn list_run_approvals(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(run_id): RoutePath<Uuid>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    if !guard
+      .get(&run_id)
+      .is_some_and(|entry| entry.record.tenant_id == tenant)
+    {
+      return error_json(StatusCode::NOT_FOUND, "run not found");
+    }
+  }
+  let approvals = state.harness.approvals().list(&run_id.to_string());
+  Json(serde_json::json!({ "approvals": approvals })).into_response()
+}
+
+async fn decide_run_approval(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath((run_id, request_id)): RoutePath<(Uuid, String)>,
+  Json(body): Json<RunApprovalDecisionRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    if !guard
+      .get(&run_id)
+      .is_some_and(|entry| entry.record.tenant_id == tenant)
+    {
+      return error_json(StatusCode::NOT_FOUND, "run not found");
+    }
+  }
+
+  let decision = ApprovalDecision {
+    request_id: request_id.clone(),
+    decision: body.decision,
+    scope: body.scope.unwrap_or(ApprovalScope::Once),
+    decided_by: body
+      .decided_by
+      .unwrap_or_else(|| "user:desktop".to_string()),
+    decided_at: Utc::now(),
+    reason: body.reason,
+  };
+
+  match state
+    .harness
+    .approvals()
+    .decide(&run_id.to_string(), &request_id, decision)
+  {
+    Ok(()) => Json(serde_json::json!({
+      "run_id": run_id,
+      "request_id": request_id,
+      "resolved": true,
+    }))
+    .into_response(),
+    Err(LocalApprovalResolveError::NotFound) => error_json(
+      StatusCode::NOT_FOUND,
+      &format!("pending approval '{request_id}' not found for run {run_id}"),
+    ),
+    Err(LocalApprovalResolveError::ProviderGone) => error_json(
+      StatusCode::BAD_REQUEST,
+      &format!("approval {request_id} cannot be decided: provider future already dropped"),
+    ),
   }
 }
 
@@ -766,6 +1190,7 @@ async fn get_run_debug(
 
 async fn post_run_action(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(raw_segment): RoutePath<String>,
   body: Bytes,
 ) -> Response {
@@ -773,24 +1198,140 @@ async fn post_run_action(
     let Ok(run_id) = Uuid::parse_str(raw_id) else {
       return error_json(StatusCode::BAD_REQUEST, "invalid run UUID");
     };
-    let mut guard = state.lock_runs();
-    let Some(entry) = guard.get_mut(&run_id) else {
-      return error_json(StatusCode::NOT_FOUND, "run not found");
+    let run_dir = state.base_dir.join(run_id.to_string());
+    let (record, synthetic_ev) = {
+      let mut guard = state.lock_runs();
+      let Some(entry) = guard.get_mut(&run_id) else {
+        return error_json(StatusCode::NOT_FOUND, "run not found");
+      };
+      entry.cancel_token.cancel();
+      if let Some(ctrl) = entry.debug_controller.take() {
+        ctrl.abort();
+      }
+      let mut synthetic = None;
+      if !is_terminal_status(&entry.record.status) {
+        entry.record.status = "cancelled".to_string();
+        entry.record.finished_at = Some(Utc::now());
+        synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
+      }
+      let _ = write_run_meta_sync(&run_dir, entry);
+      (entry.record.clone(), synthetic)
     };
-    entry.cancel_token.cancel();
-    if let Some(ctrl) = entry.debug_controller.take() {
-      ctrl.abort();
-    }
-    if !is_terminal_status(&entry.record.status) {
-      entry.record.status = "cancelled".to_string();
-      entry.record.finished_at = Some(Utc::now());
-      push_synthetic_terminal_event(entry, "workflow.cancelled", None);
+    if let Some(ev) = synthetic_ev {
+      let _ = append_run_event_jsonl_sync(&run_dir, &ev);
     }
     return Json(serde_json::json!({
-      "run": entry.record,
+      "run": record,
       "cancelled": true,
     }))
     .into_response();
+  }
+
+  if let Some(raw_id) = raw_segment.strip_suffix(":resume") {
+    let Ok(run_id) = Uuid::parse_str(raw_id) else {
+      return error_json(StatusCode::BAD_REQUEST, "invalid run UUID");
+    };
+    let tenant = extract_tenant(&headers);
+    {
+      let guard = state.lock_runs();
+      let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
+        return error_json(StatusCode::NOT_FOUND, "run not found");
+      };
+      if entry.record.workflow.starts_with("@skill:") {
+        return error_json(
+          StatusCode::BAD_REQUEST,
+          "skill runs cannot be resumed; submit the skill again",
+        );
+      }
+      if entry.record.status != "failed" && entry.record.status != "cancelled" {
+        return error_json(
+          StatusCode::BAD_REQUEST,
+          &format!(
+            "run {run_id} is '{}'; only failed or cancelled runs can be resumed",
+            entry.record.status
+          ),
+        );
+      }
+    }
+
+    let ckpt_dir = checkpoint_dir_for_local_run(&state.base_dir, run_id);
+    let has_ckpt =
+      match CheckpointManager::new(CheckpointConfig::default().with_checkpoint_dir(ckpt_dir)) {
+        Ok(mgr) => match mgr.load_latest_checkpoint(&run_id.to_string()).await {
+          Ok(opt) => opt.is_some(),
+          Err(err) => {
+            return error_json(
+              StatusCode::INTERNAL_SERVER_ERROR,
+              &format!("failed to load checkpoint: {err}"),
+            );
+          }
+        },
+        Err(err) => {
+          return error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("checkpoint manager init failed: {err}"),
+          );
+        }
+      };
+    if !has_ckpt {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!("run {run_id} has no checkpoint on this gateway to resume from"),
+      );
+    }
+
+    let run_dir = state.base_dir.join(run_id.to_string());
+    let (reopened_record, workflow_yaml, model_override, cost_limit_usd, cancel_token) = {
+      let mut guard = state.lock_runs();
+      let Some(entry) = guard
+        .get_mut(&run_id)
+        .filter(|e| e.record.tenant_id == tenant)
+      else {
+        return error_json(StatusCode::NOT_FOUND, "run not found");
+      };
+      if entry.record.status != "failed" && entry.record.status != "cancelled" {
+        return error_json(
+          StatusCode::BAD_REQUEST,
+          &format!("run {run_id} is no longer failed or cancelled"),
+        );
+      }
+      let next_seq = entry.events.last().map_or(0, |last| last.seq + 1);
+      let new_cancel = FlowCancellationToken::new();
+      entry.attempt_start_seq = next_seq;
+      entry.cancel_token = new_cancel.clone();
+      entry.debug_controller = None;
+      entry.record.status = "running".to_string();
+      entry.record.finished_at = None;
+      entry.record.error = None;
+      let _ = write_run_meta_sync(&run_dir, entry);
+      (
+        entry.record.clone(),
+        entry.record.workflow.clone(),
+        entry.model.clone(),
+        entry.cost_limit_usd,
+        new_cancel,
+      )
+    };
+
+    let state_bg = state.clone();
+    let base_dir_bg = state.base_dir.clone();
+    tokio::spawn(async move {
+      execute_local_flow(
+        state_bg,
+        base_dir_bg,
+        run_id,
+        workflow_yaml,
+        serde_json::Map::new(),
+        model_override,
+        cost_limit_usd,
+        true,
+        cancel_token,
+        None,
+      )
+      .await;
+    });
+
+    return Json(reopened_record).into_response();
   }
 
   if let Some(raw_id) = raw_segment.strip_suffix(":debug") {
@@ -857,7 +1398,7 @@ async fn post_run_action(
 
   error_json(
     StatusCode::NOT_FOUND,
-    "unsupported run action (expected :cancel or :debug)",
+    "unsupported run action (expected :cancel, :resume, or :debug)",
   )
 }
 
@@ -903,8 +1444,11 @@ async fn stream_events(
       .filter(|e| e.seq > after)
       .cloned()
       .collect();
+    let attempt_start = entry.attempt_start_seq;
     let done = is_terminal_status(&entry.record.status)
-      || backfill.iter().any(|e| is_terminal_event_kind(&e.kind));
+      || backfill
+        .iter()
+        .any(|e| e.seq >= attempt_start && is_terminal_event_kind(&e.kind));
     (backfill, rx, done)
   };
 
@@ -1458,6 +2002,140 @@ fn workflow_event_to_json(event: &WorkflowEvent) -> serde_json::Value {
       "node_id": node_id,
       "reason": reason,
     }),
+    W::CheckpointSaved {
+      workflow_id,
+      checkpoint_id,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "checkpoint_id": checkpoint_id,
+    }),
+    W::CheckpointRestored {
+      workflow_id,
+      checkpoint_id,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "checkpoint_id": checkpoint_id,
+    }),
+    W::RetryAttempt {
+      workflow_id,
+      node_id,
+      attempt,
+      max_attempts,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "attempt": attempt,
+      "max_attempts": max_attempts,
+    }),
+    W::ResourceWarning {
+      workflow_id,
+      resource_type,
+      usage,
+      limit,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "resource_type": resource_type,
+      "usage": usage,
+      "limit": limit,
+    }),
+    W::NodeProgress {
+      workflow_id,
+      node_id,
+      kind,
+      detail,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "kind": kind,
+      "detail": detail,
+    }),
+    W::NodeCostRecorded {
+      workflow_id,
+      node_id,
+      cost_usd,
+      total_cost_usd,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "cost_usd": cost_usd,
+      "total_cost_usd": total_cost_usd,
+    }),
+    W::CostLimitExceeded {
+      workflow_id,
+      node_id,
+      spent_usd,
+      limit_usd,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "spent_usd": spent_usd,
+      "limit_usd": limit_usd,
+    }),
+    W::LLMPromptSent {
+      workflow_id,
+      node_id,
+      model,
+      provider,
+      temperature,
+      max_tokens,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "model": model,
+      "provider": provider,
+      "temperature": temperature,
+      "max_tokens": max_tokens,
+    }),
+    W::LLMResponseReceived {
+      workflow_id,
+      node_id,
+      model,
+      duration,
+      usage,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "model": model,
+      "duration_ms": duration.as_millis() as u64,
+      "usage": usage.as_ref().map(|u| serde_json::json!({
+        "prompt_tokens": u.prompt_tokens,
+        "completion_tokens": u.completion_tokens,
+        "total_tokens": u.total_tokens,
+      })),
+    }),
+    W::ResumeDecisionRecorded {
+      workflow_id,
+      node_id,
+      tool_call_id,
+      tool,
+      step_index,
+      idempotency,
+      decision,
+      reason,
+      force_replay,
+      ..
+    } => serde_json::json!({
+      "workflow_id": workflow_id,
+      "node_id": node_id,
+      "resume": {
+        "tool_call_id": tool_call_id,
+        "tool": tool,
+        "step_index": step_index,
+        "idempotency": idempotency,
+        "decision": decision,
+        "reason": reason,
+        "force_replay": force_replay,
+      },
+    }),
     other => serde_json::json!({
       "workflow_id": other.workflow_id(),
       "summary": other.to_string(),
@@ -1933,5 +2611,302 @@ nodes:
       .expect("reloaded json");
     assert_eq!(reloaded["preferences"]["theme"], "light");
     assert_eq!(reloaded["preferences"]["ui.run-list.page-size"], 50);
+  }
+
+  #[tokio::test]
+  async fn local_engine_supports_checkpoint_resume_plan_and_restart_recovery() {
+    let temp_runs = tempfile::tempdir().expect("temp_runs");
+    let temp_ws = tempfile::tempdir().expect("temp_ws");
+    let canon_ws = std::fs::canonicalize(temp_ws.path()).expect("canonicalize ws");
+    let step1_file = canon_ws.join("step1_marker.txt");
+    let gate_file = canon_ws.join("gate_input.txt");
+
+    let workflow = format!(
+      r#"name: resume_checkpoint_test
+nodes:
+  - id: first
+    type: file
+    parameters:
+      allowed_paths:
+        - "{ws}"
+      operation: write
+      path: "{step1}"
+      content: "written_on_attempt_1"
+  - id: second
+    type: file
+    dependencies: ["first"]
+    parameters:
+      allowed_paths:
+        - "{ws}"
+      operation: read
+      path: "{gate}"
+  - id: third
+    type: template
+    dependencies: ["second"]
+    input_mapping:
+      body: "{{{{ nodes.second.outputs.content }}}}"
+    parameters:
+      template: "Final: {{{{ body }}}}"
+"#,
+      ws = canon_ws.display(),
+      step1 = step1_file.display(),
+      gate = gate_file.display(),
+    );
+
+    let base_url = start_loopback_engine(Some(temp_runs.path().to_path_buf()))
+      .await
+      .expect("start engine");
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no_proxy client");
+
+    // 1. First run fails on `second` because `gate_input.txt` does not exist yet
+    let created: serde_json::Value = client
+      .post(format!("{base_url}/v1/runs"))
+      .header("X-Yanshi-Tenant", "team-resume")
+      .json(&serde_json::json!({
+        "workflow": workflow,
+        "cost_limit_usd": 2.5,
+      }))
+      .send()
+      .await
+      .expect("create run")
+      .json()
+      .await
+      .expect("create json");
+    let run_id = created["run_id"].as_str().expect("run_id").to_string();
+
+    let mut status = String::new();
+    for _ in 0..80 {
+      let run_json: serde_json::Value = client
+        .get(format!("{base_url}/v1/runs/{run_id}"))
+        .send()
+        .await
+        .expect("get run")
+        .json()
+        .await
+        .expect("run json");
+      status = run_json["status"].as_str().unwrap_or("").to_string();
+      if is_terminal_status(&status) {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(status, "failed");
+    assert_eq!(
+      std::fs::read_to_string(&step1_file).expect("step1 written"),
+      "written_on_attempt_1"
+    );
+
+    // Mutate `step1_marker.txt` so we can prove `first` is NOT re-executed on resume,
+    // and create `gate_input.txt` so `second` + `third` succeed on resume.
+    std::fs::write(&step1_file, "preserved_across_resume").expect("mutate step1");
+    std::fs::write(&gate_file, "gate_opened_payload").expect("write gate");
+
+    // 2. Restart a brand-new loopback engine over the same directory to verify `run_meta.json` reload
+    let restarted_url = start_loopback_engine(Some(temp_runs.path().to_path_buf()))
+      .await
+      .expect("restart engine");
+
+    // Cross-tenant resume-plan is 404
+    let wrong_tenant_plan = client
+      .get(format!("{restarted_url}/v1/runs/{run_id}/resume-plan"))
+      .header("X-Yanshi-Tenant", "intruder")
+      .send()
+      .await
+      .expect("wrong tenant plan");
+    assert_eq!(wrong_tenant_plan.status(), StatusCode::NOT_FOUND);
+
+    // Owner tenant gets valid ResumePlan showing `first` completed
+    let plan_res = client
+      .get(format!("{restarted_url}/v1/runs/{run_id}/resume-plan"))
+      .header("X-Yanshi-Tenant", "team-resume")
+      .send()
+      .await
+      .expect("get resume plan");
+    assert_eq!(plan_res.status(), StatusCode::OK);
+    let plan_json: serde_json::Value = plan_res.json().await.expect("plan json");
+    assert_eq!(plan_json["workflow_id"], run_id);
+    assert_eq!(plan_json["last_completed_node"], "first");
+
+    // 3. Resume the failed run via `POST /v1/runs/{id}:resume`
+    let resume_res = client
+      .post(format!("{restarted_url}/v1/runs/{run_id}:resume"))
+      .header("X-Yanshi-Tenant", "team-resume")
+      .send()
+      .await
+      .expect("post resume");
+    assert_eq!(resume_res.status(), StatusCode::OK);
+
+    let mut resumed_status = String::new();
+    for _ in 0..80 {
+      let run_json: serde_json::Value = client
+        .get(format!("{restarted_url}/v1/runs/{run_id}"))
+        .send()
+        .await
+        .expect("get resumed run")
+        .json()
+        .await
+        .expect("resumed run json");
+      resumed_status = run_json["status"].as_str().unwrap_or("").to_string();
+      if is_terminal_status(&resumed_status) {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(resumed_status, "succeeded");
+
+    // `first` was NOT re-executed
+    assert_eq!(
+      std::fs::read_to_string(&step1_file).expect("read step1 after resume"),
+      "preserved_across_resume"
+    );
+
+    // Events continue monotonically across both attempts and include `third`'s final output
+    let events: Vec<LocalStreamedEvent> = client
+      .get(format!("{restarted_url}/v1/runs/{run_id}/events/history"))
+      .send()
+      .await
+      .expect("events history")
+      .json()
+      .await
+      .expect("events json");
+    for pair in events.windows(2) {
+      assert!(
+        pair[0].seq < pair[1].seq,
+        "event seq must strictly increase"
+      );
+    }
+    assert_eq!(
+      events
+        .iter()
+        .filter(|e| e.kind == "node.started" && e.payload["node_id"] == "first")
+        .count(),
+      1,
+      "`first` must only execute once across initial run + checkpoint resume"
+    );
+    assert!(events.iter().any(|e| e.kind == "workflow.completed"));
+    let third_outputs: Vec<_> = events
+      .iter()
+      .filter(|e| e.kind == "node.output.captured" && e.payload["node_id"] == "third")
+      .collect();
+    assert!(!third_outputs.is_empty());
+    let out_str = serde_json::to_string(&third_outputs.last()).expect("serialize third out");
+    assert!(out_str.contains("Final: gate_opened_payload"));
+  }
+
+  #[tokio::test]
+  async fn local_engine_supports_run_level_approvals_and_rejects_bad_cost_limit() {
+    use yanshi_harness::{ApprovalRequest, ApprovalRisk};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = LocalEngineState::new(temp.path().to_path_buf());
+    let approvals_reg = state.harness().approvals().clone();
+    let app = build_local_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+      let _ = axum::serve(listener, app).await;
+    });
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no_proxy client");
+
+    // Rejects non-positive `cost_limit_usd`
+    let bad_cost = client
+      .post(format!("{base_url}/v1/runs"))
+      .json(&serde_json::json!({
+        "workflow": SAMPLE_YAML,
+        "cost_limit_usd": -0.5,
+      }))
+      .send()
+      .await
+      .expect("bad cost");
+    assert_eq!(bad_cost.status(), StatusCode::BAD_REQUEST);
+
+    // Submit a paused debug run so we can park and resolve a run-scoped approval
+    let created: serde_json::Value = client
+      .post(format!("{base_url}/v1/runs"))
+      .header("X-Yanshi-Tenant", "ops")
+      .json(&serde_json::json!({
+        "workflow": SAMPLE_YAML,
+        "run_mode": "debug",
+        "step_every_node": true,
+      }))
+      .send()
+      .await
+      .expect("create run")
+      .json()
+      .await
+      .expect("create json");
+    let run_id = created["run_id"].as_str().expect("run_id").to_string();
+
+    let rx = approvals_reg.park(ApprovalRequest {
+      id: "run-req-1".to_string(),
+      session_id: run_id.clone(),
+      step_index: 0,
+      tool: "shell".to_string(),
+      source: None,
+      permissions: Vec::new(),
+      idempotency: Default::default(),
+      effect: Default::default(),
+      params_summary: serde_json::json!({ "command": "ls -la" }),
+      risk: ApprovalRisk::High,
+      reason: "workflow tool approval".to_string(),
+      requested_at: Utc::now(),
+      expires_at: None,
+    });
+
+    // Cross-tenant cannot list run approvals
+    let cross_list = client
+      .get(format!("{base_url}/v1/runs/{run_id}/approvals"))
+      .header("X-Yanshi-Tenant", "other")
+      .send()
+      .await
+      .expect("cross list");
+    assert_eq!(cross_list.status(), StatusCode::NOT_FOUND);
+
+    // Owner tenant sees the parked approval and resolves it
+    let list_json: serde_json::Value = client
+      .get(format!("{base_url}/v1/runs/{run_id}/approvals"))
+      .header("X-Yanshi-Tenant", "ops")
+      .send()
+      .await
+      .expect("list approvals")
+      .json()
+      .await
+      .expect("list json");
+    assert_eq!(list_json["approvals"].as_array().map(Vec::len), Some(1));
+    assert_eq!(list_json["approvals"][0]["id"], "run-req-1");
+
+    let decide_res: serde_json::Value = client
+      .post(format!("{base_url}/v1/runs/{run_id}/approvals/run-req-1"))
+      .header("X-Yanshi-Tenant", "ops")
+      .json(&serde_json::json!({
+        "decision": "allow",
+        "scope": "once",
+        "decided_by": "studio-ui",
+      }))
+      .send()
+      .await
+      .expect("decide run approval")
+      .json()
+      .await
+      .expect("decide json");
+    assert_eq!(decide_res["resolved"], true);
+    let decision = rx.await.expect("approval oneshot");
+    assert_eq!(decision.decision, ApprovalOutcome::Allow);
+
+    // Clean up paused debug run
+    let _ = client
+      .post(format!("{base_url}/v1/runs/{run_id}:cancel"))
+      .send()
+      .await;
   }
 }
