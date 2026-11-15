@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NodeIoInspector } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
+import { SpaLink } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
+import { useCurrentRoute } from '../lib/router';
 import {
   WorkflowGraphCanvas,
   type NodeRuntimeTelemetry,
@@ -390,15 +392,17 @@ export function WorkflowStudioPage({
     };
   }, [yamlDraft, apiToken, tenantId, customBaseUrl]);
 
-  // Read `?run=<uuid>` deep link on mount (also satisfies `/ui/runs/new` -> `/ui?run=<uuid>`).
+  // Read `?run=<uuid>` deep link across both HTTP query and SPA/Tauri route transitions.
+  const currentRoute = useCurrentRoute();
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(currentRoute.search);
     const initialRun = params.get('run');
-    if (initialRun) {
+    if (initialRun && initialRun !== runId) {
       setRunId(initialRun);
       setStreamState('loading');
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoute.search]);
 
   const loadRecentRuns = useCallback(async () => {
     try {
@@ -1080,9 +1084,9 @@ export function WorkflowStudioPage({
           </div>
 
           <nav className="studio-aux-links" aria-label="辅助控制台导航">
-            <a href="/ui/console">经典事件台</a>
-            <a href="/ui/harness/sessions">Harness</a>
-            <a href="/ui/diagnostics">诊断</a>
+            <SpaLink to="/ui/console">经典事件台</SpaLink>
+            <SpaLink to="/ui/harness/sessions">Harness</SpaLink>
+            <SpaLink to="/ui/diagnostics">诊断</SpaLink>
           </nav>
         </div>
       </header>

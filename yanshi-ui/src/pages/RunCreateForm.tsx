@@ -4,8 +4,10 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 
+import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
 import { apiFetch } from '../lib/api';
+import { navigateTo } from '../lib/router';
 import {
   newFormInputsKey,
   newFormProfileKey,
@@ -178,7 +180,7 @@ export function RunCreateForm({
       writeStorage(workflowKey, workflowYaml);
       writeStorage(tenantKey, tenantId);
       // Redirect to the run detail view (`?run=<id>` parses on mount).
-      window.location.assign(`/ui?run=${encodeURIComponent(payload.run_id)}`);
+      navigateTo(`/ui?run=${encodeURIComponent(payload.run_id)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -188,17 +190,16 @@ export function RunCreateForm({
 
   return (
     <main className="shell create-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Yanshi</p>
-          <h1>Submit a run</h1>
-        </div>
-        <nav>
-          <a className="topbar-link" href="/ui">
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Runs"
+        title="Submit a run"
+        activeSection="runs-new"
+        actions={
+          <SpaLink className="topbar-link" to="/ui/console">
             ← Run console
-          </a>
-        </nav>
-      </header>
+          </SpaLink>
+        }
+      />
 
       {error ? <p className="error-line">{error}</p> : null}
       {info ? <p className="info-line">{info}</p> : null}

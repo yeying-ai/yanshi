@@ -4,7 +4,9 @@
 
 import React, { useEffect, useState } from 'react';
 
+import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch } from '../lib/api';
+import { navigateTo } from '../lib/router';
 import {
   HARNESS_PROFILES,
   HARNESS_RUNTIMES,
@@ -145,7 +147,7 @@ export function HarnessSubmitForm({
         tenantHeader && tenantHeader !== 'default'
           ? `?tenant=${encodeURIComponent(tenantHeader)}`
           : '';
-      window.location.assign(
+      navigateTo(
         `/ui/harness/sessions/${encodeURIComponent(raw.session_id)}${tenantQuery}`,
       );
     } catch (err) {
@@ -157,17 +159,16 @@ export function HarnessSubmitForm({
 
   return (
     <main className="shell create-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Yanshi / Harness</p>
-          <h1>New session</h1>
-        </div>
-        <nav className="harness-nav">
-          <a className="topbar-link" href="/ui/harness/sessions">
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Harness"
+        title="New session"
+        activeSection="harness"
+        actions={
+          <SpaLink className="topbar-link" to="/ui/harness/sessions">
             ← Sessions
-          </a>
-        </nav>
-      </header>
+          </SpaLink>
+        }
+      />
 
       {error ? <p className="error-line">{error}</p> : null}
 

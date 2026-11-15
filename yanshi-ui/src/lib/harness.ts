@@ -3,6 +3,7 @@
 // HarnessSubmitForm / HarnessSessionDetail / ApprovalCard).
 
 import type { HarnessSession } from '../schemas';
+import { getCurrentRoute } from './router';
 
 // ── Storage keys (HarnessSubmitForm) ─────────────────────────────────
 
@@ -44,8 +45,9 @@ export const isHarnessTerminal = (session: HarnessSession | null): boolean =>
  * Returns `null` for the list view, the create-form view, or any path
  * that doesn't match the deep-link shape. Used by the App router.
  */
-export const harnessSessionIdFromPath = (): string | null => {
-  const match = window.location.pathname.match(/^\/ui\/harness\/sessions\/([^/]+)$/);
+export const harnessSessionIdFromPath = (pathname?: string): string | null => {
+  const source = pathname ?? getCurrentRoute().pathname;
+  const match = source.match(/^\/ui\/harness\/sessions\/([^/]+)\/?$/);
   if (!match) {
     return null;
   }
@@ -53,7 +55,7 @@ export const harnessSessionIdFromPath = (): string | null => {
   if (candidate === 'new' || candidate.length === 0) {
     return null;
   }
-  return candidate;
+  return decodeURIComponent(candidate);
 };
 
 // ── Approval flow types (HarnessSessionDetail / ApprovalCard) ────────

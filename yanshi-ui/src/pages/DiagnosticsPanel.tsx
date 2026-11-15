@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+import { StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch } from '../lib/api';
 import {
   DiagnosticsReportSchema,
@@ -147,66 +148,73 @@ export function DiagnosticsPanel({
   const tokenDisplay = apiToken ? maskToken(apiToken) : '(none)';
 
   return (
-    <div className="diagnostics-panel">
-      <header className="diagnostics-header">
-        <h1>Diagnostics</h1>
-        <div className="diagnostics-controls">
-          <label>
-            API token (last 4 shown):{' '}
-            <code className="diag-token">{tokenDisplay}</code>
-          </label>
-          <input
-            type="password"
-            placeholder="paste bearer token"
-            value={apiToken}
-            onChange={(event) => onTokenChange(event.target.value)}
-          />
-          <button onClick={() => void fetchReport()} disabled={loading}>
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
-        </div>
-      </header>
-      {error && (
-        <div className="diagnostics-error">
-          <strong>Error:</strong> {error}
-        </div>
-      )}
-      {overall && (
-        <div className={`diagnostics-overall diagnostics-overall-${overall}`}>
-          Overall: {statusBadge(overall)}
-          {report?.version && (
-            <span className="diag-version">version {report.version}</span>
-          )}
-          {report?.profile && (
-            <span className="diag-profile">profile {report.profile}</span>
-          )}
-        </div>
-      )}
-      <table className="diagnostics-table">
-        <thead>
-          <tr>
-            <th>Component</th>
-            <th>Status</th>
-            <th>Detail</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && !error && (
+    <main className="shell diagnostics-shell">
+      <StudioSubpageHeader
+        eyebrow="Yanshi / System"
+        title="Diagnostics"
+        subtitle="In-process model registry, security profile, OS sandbox, and storage health check."
+        activeSection="diagnostics"
+      />
+      <div className="diagnostics-panel">
+        <header className="diagnostics-header">
+          <div className="diagnostics-controls">
+            <label>
+              API token (last 4 shown):{' '}
+              <code className="diag-token">{tokenDisplay}</code>
+            </label>
+            <input
+              type="password"
+              placeholder="paste bearer token"
+              value={apiToken}
+              onChange={(event) => onTokenChange(event.target.value)}
+            />
+            <button type="button" onClick={() => void fetchReport()} disabled={loading}>
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+        </header>
+        {error && (
+          <div className="diagnostics-error">
+            <strong>Error:</strong> {error}
+          </div>
+        )}
+        {overall && (
+          <div className={`diagnostics-overall diagnostics-overall-${overall}`}>
+            Overall: {statusBadge(overall)}
+            {report?.version && (
+              <span className="diag-version">version {report.version}</span>
+            )}
+            {report?.profile && (
+              <span className="diag-profile">profile {report.profile}</span>
+            )}
+          </div>
+        )}
+        <table className="diagnostics-table">
+          <thead>
             <tr>
-              <td colSpan={3} className="diagnostics-empty">
-                {loading ? 'Loading…' : 'No data yet'}
-              </td>
+              <th>Component</th>
+              <th>Status</th>
+              <th>Detail</th>
             </tr>
-          )}
-          {rows.map((row) => (
-            <tr key={row.component}>
-              <td>{row.component}</td>
-              <td>{statusBadge(row.status)}</td>
-              <td>{row.detail}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {rows.length === 0 && !error && (
+              <tr>
+                <td colSpan={3} className="diagnostics-empty">
+                  {loading ? 'Loading…' : 'No data yet'}
+                </td>
+              </tr>
+            )}
+            {rows.map((row) => (
+              <tr key={row.component}>
+                <td>{row.component}</td>
+                <td>{statusBadge(row.status)}</td>
+                <td>{row.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </main>
   );
 }

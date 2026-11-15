@@ -4,7 +4,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, parseSseChunk } from '../lib/api';
+import { getCurrentRoute } from '../lib/router';
 import {
   extractTokenDelta,
   harnessStatusTone,
@@ -37,7 +39,7 @@ type ConnectionState = 'idle' | 'loading' | 'streaming' | 'reconnecting' | 'clos
  */
 const readTenantFromUrl = (): string => {
   try {
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(getCurrentRoute().search);
     const value = params.get('tenant');
     if (value && value.trim()) {
       return value.trim();
@@ -492,20 +494,21 @@ export function HarnessSessionDetail({
 
   return (
     <main className="shell harness-detail-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Yanshi / Harness</p>
-          <h1>Session {sessionId.slice(0, 8)}…</h1>
-        </div>
-        <nav className="harness-nav">
-          <a className="topbar-link" href="/ui/harness/sessions">
-            ← Sessions
-          </a>
-          <a className="topbar-link" href="/ui/harness/sessions/new">
-            + New session
-          </a>
-        </nav>
-      </header>
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Harness"
+        title={`Session ${sessionId.slice(0, 8)}…`}
+        activeSection="harness"
+        actions={
+          <>
+            <SpaLink className="topbar-link" to="/ui/harness/sessions">
+              ← Sessions
+            </SpaLink>
+            <SpaLink className="topbar-link topbar-cta" to="/ui/harness/sessions/new">
+              + New session
+            </SpaLink>
+          </>
+        }
+      />
 
       <section className="harness-controls">
         <label>

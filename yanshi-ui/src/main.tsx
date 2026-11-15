@@ -4,6 +4,7 @@ import './styles.css';
 import { compileFilter, applyFilter, type FilterEvent } from './eventFilter';
 import { usePreferenceSync } from './usePreferenceSync';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { SpaLink, StudioSubpageHeader } from './components/StudioSubpageHeader';
 import { YamlCodeEditor } from './components/YamlCodeEditor';
 import { DiagnosticsPanel } from './pages/DiagnosticsPanel';
 import { HarnessSessionDetail } from './pages/HarnessSessionDetail';
@@ -13,6 +14,7 @@ import { RunCreateForm } from './pages/RunCreateForm';
 import { WorkflowStudioPage } from './pages/WorkflowStudioPage';
 import { harnessSessionIdFromPath } from './lib/harness';
 import { apiFetch, parseSseChunk } from './lib/api';
+import { navigateTo, useCurrentRoute } from './lib/router';
 import {
   eventFilterKeyPrefix,
   readSessionStorage,
@@ -108,20 +110,26 @@ async function fetchEventsHistory(
 
 function RunCompare({
   primaryRunId,
+  routeSearch,
   apiToken,
   onTokenChange,
 }: {
   primaryRunId: string;
+  routeSearch: string;
   apiToken: string;
   onTokenChange: (token: string) => void;
 }) {
-  const params = useMemo(() => new URLSearchParams(window.location.search), []);
+  const params = useMemo(() => new URLSearchParams(routeSearch), [routeSearch]);
   const against = params.get('against') ?? '';
   const [otherRunId, setOtherRunId] = useState(against);
   const [primaryEvents, setPrimaryEvents] = useState<StreamedEvent[]>([]);
   const [otherEvents, setOtherEvents] = useState<StreamedEvent[]>([]);
   const [state, setState] = useState<ConnectionState>('idle');
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOtherRunId(against);
+  }, [against]);
 
   useEffect(() => {
     if (!primaryRunId || !otherRunId) return;
@@ -163,14 +171,14 @@ function RunCompare({
   const otherSummary = useMemo(() => summarise(otherEvents), [otherEvents]);
 
   return (
-    <main className="run-compare">
+    <main className="shell run-compare">
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Runs"
+        title="Trace comparison"
+        subtitle="Side-by-side event timelines plus per-step diff highlight + hop latency."
+        activeSection="compare"
+      />
       <header className="run-compare-header">
-        <div>
-          <h1>Trace comparison</h1>
-          <p className="run-compare-subtitle">
-            Side-by-side event timelines plus per-step diff highlight + hop latency.
-          </p>
-        </div>
         <div className="run-compare-controls">
           <label>
             Primary run
@@ -198,7 +206,7 @@ function RunCompare({
             type="button"
             onClick={() => {
               const next = new URLSearchParams({ against: otherRunId });
-              window.location.assign(`/ui/runs/${encodeURIComponent(primaryRunId)}/compare?${next.toString()}`);
+              navigateTo(`/ui/runs/${encodeURIComponent(primaryRunId)}/compare?${next.toString()}`);
             }}
             disabled={!otherRunId || otherRunId === primaryRunId}
           >
@@ -481,14 +489,16 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
     [events],
   );
 
+  const currentRoute = useCurrentRoute();
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(currentRoute.search);
     const id = params.get('run');
-    if (id) {
+    if (id && id !== runId) {
       setRunId(id);
       setState('loading');
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoute.search]);
 
   useEffect(() => {
     writeStorage(tenantKey, tenantId);
@@ -847,30 +857,32 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
 
   return (
     <main className="shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Yanshi</p>
-          <h1>Run Console</h1>
-        </div>
-        <form className="run-form" onSubmit={connectExisting}>
-          <input
-            aria-label="Run ID"
-            value={runId}
-            onChange={(event) => setRunId(event.target.value)}
-            placeholder="Run ID"
-          />
-          <button type="submit">Connect</button>
-          <button disabled={!activeRun || isTerminalRun(activeRun) || submitState === 'cancelling'} type="button" onClick={cancelActiveRun}>
-            Cancel
-          </button>
-          <a className="topbar-link" href="/ui/studio">
-            Studio 画布 →
-          </a>
-          <a className="topbar-link" href="/ui/runs/new">
-            New run →
-          </a>
-        </form>
-      </header>
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Classic"
+        title="Run Console"
+        activeSection="console"
+        actions={
+          <form className="run-form" onSubmit={connectExisting}>
+            <input
+              aria-label="Run ID"
+              value={runId}
+              onChange={(event) => setRunId(event.target.value)}
+              placeholder="Run ID"
+            />
+            <button type="submit">Connect</button>
+            <button
+              disabled={!activeRun || isTerminalRun(activeRun) || submitState === 'cancelling'}
+              type="button"
+              onClick={cancelActiveRun}
+            >
+              Cancel
+            </button>
+            <SpaLink className="topbar-link topbar-cta" to="/ui/runs/new">
+              + New run
+            </SpaLink>
+          </form>
+        }
+      />
 
       <section className="status-strip" aria-label="Run status">
         <div>
@@ -1073,23 +1085,18 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
 // ─── Top-level router ────────────────────────────────────────────
 
 function App() {
-  const [pathname, setPathname] = useState(() => window.location.pathname);
+  const route = useCurrentRoute();
+  const pathname = route.pathname;
   // Q1.9.1: token comes from sessionStorage (tab-scoped) instead of
   // localStorage. Operators who close the tab re-enter it; an XSS
   // payload that fires after the operator left no longer finds it.
   const [apiToken, setApiToken] = useState(() => readSessionStorage(tokenKey, ''));
 
   useEffect(() => {
-    const handler = () => setPathname(window.location.pathname);
-    window.addEventListener('popstate', handler);
-    return () => window.removeEventListener('popstate', handler);
-  }, []);
-
-  useEffect(() => {
     writeSessionStorage(tokenKey, apiToken);
   }, [apiToken]);
 
-  if (pathname === '/ui/runs/new') {
+  if (pathname === '/ui/runs/new' || pathname === '/ui/runs/new/') {
     return <RunCreateForm apiToken={apiToken} onTokenChange={setApiToken} />;
   }
   if (pathname === '/ui/diagnostics' || pathname === '/ui/diagnostics/') {
@@ -1098,10 +1105,10 @@ function App() {
   if (pathname === '/ui/harness/sessions' || pathname === '/ui/harness/sessions/') {
     return <HarnessSessionList apiToken={apiToken} onTokenChange={setApiToken} />;
   }
-  if (pathname === '/ui/harness/sessions/new') {
+  if (pathname === '/ui/harness/sessions/new' || pathname === '/ui/harness/sessions/new/') {
     return <HarnessSubmitForm apiToken={apiToken} onTokenChange={setApiToken} />;
   }
-  const harnessId = harnessSessionIdFromPath();
+  const harnessId = harnessSessionIdFromPath(pathname);
   if (harnessId) {
     return (
       <HarnessSessionDetail
@@ -1117,6 +1124,7 @@ function App() {
     return (
       <RunCompare
         primaryRunId={decodeURIComponent(compareMatch[1])}
+        routeSearch={route.search}
         apiToken={apiToken}
         onTokenChange={setApiToken}
       />

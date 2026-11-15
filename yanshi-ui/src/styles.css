@@ -3657,3 +3657,110 @@ h1 {
   background: #fef3c7;
   color: #92400e;
 }
+
+/* ── Unified Studio Subpage Topbar ────────────────────────────── */
+
+.studio-subpage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  background: #ffffff;
+  border: 1px solid #dbe2ee;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.studio-subpage-header__lead {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.studio-subpage-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.studio-subpage-back:hover {
+  background: #eef2f7;
+  border-color: #94a3b8;
+}
+
+.studio-subpage-header__titles h1 {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 750;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.studio-subpage-subtitle {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.studio-subpage-header__right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.studio-subpage-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 9px;
+  background: #f1f5f9;
+  border: 1px solid #dbe2ee;
+  flex-wrap: wrap;
+}
+
+.studio-subpage-nav__link {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border-radius: 6px;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.studio-subpage-nav__link:hover {
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.studio-subpage-nav__link--active {
+  background: #ffffff;
+  color: #0f766e;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.studio-subpage-header__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+

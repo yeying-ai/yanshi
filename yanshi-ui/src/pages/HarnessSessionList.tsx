@@ -4,9 +4,11 @@
 
 import { useEffect, useState } from 'react';
 
+import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch } from '../lib/api';
 import { harnessNewFormTenantKey, harnessStatusTone } from '../lib/harness';
 import { formatTime } from '../lib/helpers';
+import { navigateTo } from '../lib/router';
 import { readStorage, writeStorage } from '../lib/storage';
 import { HarnessSessionArraySchema, type HarnessSession } from '../schemas';
 
@@ -97,24 +99,20 @@ export function HarnessSessionList({
 
   return (
     <main className="shell harness-list-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Yanshi / Harness</p>
-          <h1>Sessions</h1>
-        </div>
-        <nav className="harness-nav">
-          <a className="topbar-link" href="/ui">
-            ← Run console
-          </a>
-          <a
+      <StudioSubpageHeader
+        eyebrow="Yanshi / Harness"
+        title="Sessions"
+        activeSection="harness"
+        actions={
+          <SpaLink
             data-testid="harness-new-link"
             className="topbar-link topbar-cta"
-            href="/ui/harness/sessions/new"
+            to="/ui/harness/sessions/new"
           >
             + New session
-          </a>
-        </nav>
-      </header>
+          </SpaLink>
+        }
+      />
 
       <section className="harness-controls">
         <label>
@@ -162,7 +160,7 @@ export function HarnessSessionList({
               <tr>
                 <td colSpan={7} className="harness-table-empty">
                   No sessions yet for tenant "{tenantId || 'default'}". Use{' '}
-                  <a href="/ui/harness/sessions/new">+ New session</a> to create one.
+                  <SpaLink to="/ui/harness/sessions/new">+ New session</SpaLink> to create one.
                 </td>
               </tr>
             ) : (
@@ -179,9 +177,7 @@ export function HarnessSessionList({
                       trimmedTenant && trimmedTenant !== 'default'
                         ? `?tenant=${encodeURIComponent(trimmedTenant)}`
                         : '';
-                    window.location.assign(
-                      `/ui/harness/sessions/${session.id}${suffix}`,
-                    );
+                    navigateTo(`/ui/harness/sessions/${session.id}${suffix}`);
                   }}
                   className="harness-row"
                 >
