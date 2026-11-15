@@ -386,6 +386,246 @@ pub async fn preview_run_file(
   Ok(response)
 }
 
+/// Entry descriptor for bundling run files into a downloadable `.zip` archive.
+#[derive(Debug, Clone)]
+pub struct ZipSourceEntry {
+  pub node_id: String,
+  pub name: String,
+  pub mime_type: Option<String>,
+  pub path: PathBuf,
+}
+
+fn sanitize_zip_segment(raw: &str, fallback: &str) -> String {
+  let cleaned: String = raw
+    .chars()
+    .map(|c| {
+      if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+        '_'
+      } else {
+        c
+      }
+    })
+    .collect::<String>()
+    .trim_matches(|c: char| c == '.' || c.is_whitespace())
+    .to_string();
+  if cleaned.is_empty() {
+    fallback.to_string()
+  } else {
+    cleaned
+  }
+}
+
+fn deduplicate_entry_path(
+  seen: &mut std::collections::HashSet<String>,
+  dir: &str,
+  filename: &str,
+) -> String {
+  let primary = format!("{dir}/{filename}");
+  if seen.insert(primary.clone()) {
+    return primary;
+  }
+  let (stem, ext) = match filename.rsplit_once('.') {
+    Some((s, e)) if !s.is_empty() => (s, Some(e)),
+    _ => (filename, None),
+  };
+  let mut idx = 2usize;
+  loop {
+    let candidate = match ext {
+      Some(e) => format!("{dir}/{stem}_{idx}.{e}"),
+      None => format!("{dir}/{stem}_{idx}"),
+    };
+    if seen.insert(candidate.clone()) {
+      return candidate;
+    }
+    idx += 1;
+  }
+}
+
+fn discover_unregistered_run_files(run_dir: &Path) -> Vec<ZipSourceEntry> {
+  let artifacts_root = run_dir.join("artifacts");
+  let Ok(node_dirs) = std::fs::read_dir(&artifacts_root) else {
+    return Vec::new();
+  };
+  let mut entries = Vec::new();
+  let mut sorted_nodes: Vec<_> = node_dirs.filter_map(|e| e.ok()).collect();
+  sorted_nodes.sort_by_key(|e| e.file_name());
+  for node_entry in sorted_nodes {
+    let Ok(ft) = node_entry.file_type() else {
+      continue;
+    };
+    if !ft.is_dir() {
+      continue;
+    }
+    let node_id = node_entry.file_name().to_string_lossy().to_string();
+    let Ok(files) = std::fs::read_dir(node_entry.path()) else {
+      continue;
+    };
+    let mut sorted_files: Vec<_> = files.filter_map(|e| e.ok()).collect();
+    sorted_files.sort_by_key(|e| e.file_name());
+    for file_entry in sorted_files {
+      let path = file_entry.path();
+      if path.is_file() {
+        let name = file_entry.file_name().to_string_lossy().to_string();
+        let mime = Some(infer_preview_mime(&path).to_string());
+        entries.push(ZipSourceEntry {
+          node_id: node_id.clone(),
+          name,
+          mime_type: mime,
+          path,
+        });
+      }
+    }
+  }
+  entries
+}
+
+/// Build an unlinked temporary `.zip` file containing `<node_id>/<name>` entries
+/// plus a root `artifacts.json` manifest with byte sizes and SHA-256 digests.
+pub fn pack_artifacts_zip_blocking(
+  run_id: Uuid,
+  sources: Vec<ZipSourceEntry>,
+) -> std::io::Result<Option<(std::fs::File, u64)>> {
+  use std::io::{Read, Seek, SeekFrom, Write};
+
+  let tmp = tempfile::tempfile()?;
+  let mut writer = zip::ZipWriter::new(tmp);
+  let options =
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+  let mut seen_paths = std::collections::HashSet::new();
+  seen_paths.insert("artifacts.json".to_string());
+  let mut manifest_items = Vec::new();
+  let mut buf = vec![0u8; 64 * 1024];
+
+  for src in sources {
+    let mut file = match std::fs::File::open(&src.path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    let safe_node = sanitize_zip_segment(&src.node_id, "node");
+    let safe_name = sanitize_zip_segment(&src.name, "output.bin");
+    let entry_path = deduplicate_entry_path(&mut seen_paths, &safe_node, &safe_name);
+
+    writer
+      .start_file(&entry_path, options)
+      .map_err(std::io::Error::other)?;
+    let mut hasher = Sha256::new();
+    let mut size_bytes: u64 = 0;
+    loop {
+      let n = file.read(&mut buf)?;
+      if n == 0 {
+        break;
+      }
+      writer.write_all(&buf[..n])?;
+      hasher.update(&buf[..n]);
+      size_bytes += n as u64;
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    manifest_items.push(serde_json::json!({
+      "node_id": src.node_id,
+      "name": safe_name,
+      "entry_path": entry_path,
+      "mime_type": src.mime_type,
+      "size_bytes": size_bytes,
+      "sha256": sha256,
+    }));
+  }
+
+  if manifest_items.is_empty() {
+    return Ok(None);
+  }
+
+  let manifest = serde_json::json!({
+    "run_id": run_id,
+    "artifacts": manifest_items,
+  });
+  let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+  writer
+    .start_file("artifacts.json", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(&manifest_bytes)?;
+
+  let mut finished = writer.finish().map_err(std::io::Error::other)?;
+  let total_len = finished.seek(SeekFrom::End(0))?;
+  finished.seek(SeekFrom::Start(0))?;
+  Ok(Some((finished, total_len)))
+}
+
+/// `GET /v1/runs/{id}/artifacts.zip` — stream all deliverables of a run as a
+/// single `.zip` bundle (`<node_id>/<file>` + `artifacts.json`).
+pub async fn download_run_artifacts_zip(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  RoutePath(id): RoutePath<Uuid>,
+) -> Result<Response, ApiError> {
+  let run = state
+    .repos
+    .runs
+    .get(id)
+    .await?
+    .filter(|r| r.tenant_id == tenant.as_str())
+    .ok_or_else(|| ApiError::NotFound(format!("run {id} not found")))?;
+
+  let db_rows = state.repos.artifacts.list_for_run(id).await?;
+  let run_dir = run
+    .run_dir
+    .as_deref()
+    .map(PathBuf::from)
+    .unwrap_or_else(|| crate::runs::default_run_dir_for_id(id));
+
+  let sources: Vec<ZipSourceEntry> = if !db_rows.is_empty() {
+    db_rows
+      .into_iter()
+      .filter(|a| a.tenant_id == tenant.as_str())
+      .map(|a| ZipSourceEntry {
+        node_id: a.node_id,
+        name: a.name,
+        mime_type: a.mime_type,
+        path: PathBuf::from(a.path_or_url),
+      })
+      .collect()
+  } else {
+    let dir_clone = run_dir.clone();
+    tokio::task::spawn_blocking(move || discover_unregistered_run_files(&dir_clone))
+      .await
+      .map_err(|e| ApiError::Internal(format!("artifact discovery task failed: {e}")))?
+  };
+
+  if sources.is_empty() {
+    return Err(ApiError::NotFound(format!(
+      "run {id} has no downloadable artifacts"
+    )));
+  }
+
+  let packed = tokio::task::spawn_blocking(move || pack_artifacts_zip_blocking(id, sources))
+    .await
+    .map_err(|e| ApiError::Internal(format!("zip packaging task failed: {e}")))?
+    .map_err(|e| ApiError::Internal(format!("failed to build artifacts zip: {e}")))?;
+
+  let Some((std_file, total_len)) = packed else {
+    return Err(ApiError::NotFound(format!(
+      "run {id} has no readable artifact files on disk"
+    )));
+  };
+
+  let async_file = tokio::fs::File::from_std(std_file);
+  let short_id = &id.to_string()[..8];
+  let disposition = format!("attachment; filename=\"yanshi-run-{short_id}-artifacts.zip\"");
+
+  let mut response =
+    Body::from_stream(tokio_util::io::ReaderStream::new(async_file)).into_response();
+  let headers = response.headers_mut();
+  headers.insert(
+    header::CONTENT_TYPE,
+    HeaderValue::from_static("application/zip"),
+  );
+  headers.insert(header::CONTENT_LENGTH, HeaderValue::from(total_len));
+  if let Ok(val) = HeaderValue::from_str(&disposition) {
+    headers.insert(header::CONTENT_DISPOSITION, val);
+  }
+  Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -463,5 +703,66 @@ mod tests {
       infer_preview_mime(Path::new("deck.pptx")),
       "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     );
+  }
+
+  #[test]
+  fn pack_artifacts_zip_bundles_files_deduplicates_names_and_writes_manifest() {
+    use std::io::Read as _;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let f1 = dir.path().join("first.md");
+    let f2 = dir.path().join("second.md");
+    std::fs::write(&f1, b"# Report Part 1").expect("write f1");
+    std::fs::write(&f2, b"# Report Part 2").expect("write f2");
+
+    let run_id = Uuid::new_v4();
+    let sources = vec![
+      ZipSourceEntry {
+        node_id: "../report_md".to_string(),
+        name: "1.md".to_string(),
+        mime_type: Some("text/markdown".to_string()),
+        path: f1,
+      },
+      ZipSourceEntry {
+        node_id: "../report_md".to_string(),
+        name: "1.md".to_string(),
+        mime_type: Some("text/markdown".to_string()),
+        path: f2,
+      },
+    ];
+
+    let (zip_file, total_len) = pack_artifacts_zip_blocking(run_id, sources)
+      .expect("io ok")
+      .expect("non-empty archive");
+    assert!(total_len > 0);
+
+    let mut archive = zip::ZipArchive::new(zip_file).expect("valid zip");
+    assert_eq!(archive.len(), 3);
+
+    let mut first_body = String::new();
+    archive
+      .by_name("_report_md/1.md")
+      .expect("sanitized first entry")
+      .read_to_string(&mut first_body)
+      .expect("read first");
+    assert_eq!(first_body, "# Report Part 1");
+
+    let mut second_body = String::new();
+    archive
+      .by_name("_report_md/1_2.md")
+      .expect("deduplicated second entry")
+      .read_to_string(&mut second_body)
+      .expect("read second");
+    assert_eq!(second_body, "# Report Part 2");
+
+    let mut manifest_raw = String::new();
+    archive
+      .by_name("artifacts.json")
+      .expect("manifest entry")
+      .read_to_string(&mut manifest_raw)
+      .expect("read manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw).expect("valid json");
+    assert_eq!(manifest["run_id"], run_id.to_string());
+    assert_eq!(manifest["artifacts"].as_array().map(Vec::len), Some(2));
   }
 }

@@ -26,6 +26,8 @@ import {
   apiBaseUrlKey,
   readStorage,
   studioModeKey,
+  studioModelOverrideKey,
+  studioPersonalTemplatesCacheKey,
   studioPresetKey,
   tenantKey,
   writeStorage,
@@ -49,6 +51,14 @@ import {
   type StreamedEvent,
 } from '../schemas';
 import { collectRunDeliverables } from '../studio/mediaExtractor';
+import {
+  buildPersonalTemplatesPreferencePatch,
+  buildYamlDownloadFilename,
+  type PersonalWorkflowTemplate,
+  type PresetCategory,
+  removePersonalTemplatePatch,
+  restorePersonalTemplatesFromPreferences,
+} from '../studio/generatorCatalog';
 import { inspectYamlLocally, WORKFLOW_PRESETS } from '../studio/presets';
 
 export type StudioPosture = 'debug' | 'release';
@@ -295,6 +305,24 @@ export function WorkflowStudioPage({
   const [inputDrafts, setInputDrafts] = useState<Record<string, string>>({});
 
   const [tenantId, setTenantId] = useState<string>(() => readStorage(tenantKey, 'default'));
+  const [modelOverride, setModelOverride] = useState<string>(() =>
+    readStorage(studioModelOverrideKey, ''),
+  );
+  const [presetCategoryFilter, setPresetCategoryFilter] = useState<'全部' | PresetCategory>('全部');
+  const [personalTemplates, setPersonalTemplates] = useState<PersonalWorkflowTemplate[]>(() => {
+    const cached = readStorage(studioPersonalTemplatesCacheKey, '');
+    if (!cached) return [];
+    try {
+      const parsed = JSON.parse(cached) as unknown;
+      return Array.isArray(parsed) ? (parsed as PersonalWorkflowTemplate[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [saveTplPromptOpen, setSaveTplPromptOpen] = useState<boolean>(false);
+  const [saveTplTitleDraft, setSaveTplTitleDraft] = useState<string>('');
+  const [zipExportBusy, setZipExportBusy] = useState<boolean>(false);
+  const [bannerNotice, setBannerNotice] = useState<string | null>(null);
   const [customBaseUrl, setCustomBaseUrl] = useState<string>(() =>
     readStorage(apiBaseUrlKey, ''),
   );
@@ -355,6 +383,33 @@ export function WorkflowStudioPage({
   useEffect(() => {
     writeStorage(tenantKey, tenantId);
   }, [tenantId]);
+
+  useEffect(() => {
+    writeStorage(studioModelOverrideKey, modelOverride);
+  }, [modelOverride]);
+
+  // Hydrate personal workflow templates from `/v1/preferences` on mount / tenant change.
+  useEffect(() => {
+    let cancelled = false;
+    const loadPersonalTemplates = async () => {
+      try {
+        const res = await apiFetch('/v1/preferences', apiToken, {}, tenantId);
+        if (!res.ok || cancelled) return;
+        const json = (await res.json()) as { preferences?: Record<string, unknown> };
+        const restored = restorePersonalTemplatesFromPreferences(json.preferences);
+        if (!cancelled) {
+          setPersonalTemplates(restored);
+          writeStorage(studioPersonalTemplatesCacheKey, JSON.stringify(restored));
+        }
+      } catch {
+        // Keep localStorage cached templates when offline.
+      }
+    };
+    void loadPersonalTemplates();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiToken, tenantId, customBaseUrl]);
 
   // Debounced `/v1/workflows/inspect` call with immediate local fallback.
   useEffect(() => {
@@ -691,11 +746,34 @@ export function WorkflowStudioPage({
       (!activeRun || !isTerminalRun(activeRun)),
   );
 
+  const allPresets = useMemo(
+    () => [
+      ...personalTemplates.map((tpl) => ({
+        id: `personal:${tpl.id}`,
+        title: tpl.title,
+        subtitle: `个人收藏工作流 · 更新于 ${formatTime(tpl.updatedAt)}`,
+        badge: '个人收藏',
+        category: '个人收藏' as PresetCategory,
+        yaml: tpl.yaml,
+        personalId: tpl.id,
+      })),
+      ...WORKFLOW_PRESETS.map((p) => ({ ...p, personalId: undefined })),
+    ],
+    [personalTemplates],
+  );
+
+  const visiblePresets = useMemo(() => {
+    if (presetCategoryFilter === '全部') {
+      return allPresets;
+    }
+    return allPresets.filter((p) => p.category === presetCategoryFilter);
+  }, [allPresets, presetCategoryFilter]);
+
   const switchMode = (nextMode: StudioPosture) => {
     setMode(nextMode);
     const targetPath = nextMode === 'release' ? '/ui/app' : '/ui/studio';
     const suffix = runId ? `?run=${encodeURIComponent(runId)}` : '';
-    window.history.replaceState(null, '', `${targetPath}${suffix}`);
+    navigateTo(`${targetPath}${suffix}`, { replace: true });
     if (nextMode === 'release') {
       setMobilePane(runId ? 'deliverables' : 'config');
     } else {
@@ -704,7 +782,7 @@ export function WorkflowStudioPage({
   };
 
   const selectPreset = (presetId: string) => {
-    const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
+    const preset = allPresets.find((p) => p.id === presetId);
     if (!preset) return;
     setSelectedPresetId(preset.id);
     writeStorage(studioPresetKey, preset.id);
@@ -790,6 +868,7 @@ export function WorkflowStudioPage({
             tenant_id: tenantId.trim() || 'default',
             workflow: yamlDraft,
             inputs: coerced.payload,
+            model: modelOverride.trim() || undefined,
             run_mode: targetRunMode,
             step_every_node: targetRunMode === 'debug' ? stepEveryNode : false,
             breakpoints: targetRunMode === 'debug' ? breakpoints : [],
@@ -890,9 +969,127 @@ export function WorkflowStudioPage({
         setSelectedPresetId('custom');
         setYamlDraft(reader.result);
         setInputDrafts({});
+        setBannerNotice(`已加载本地工作流文件：${file.name}`);
       }
     };
     reader.readAsText(file);
+    ev.target.value = '';
+  };
+
+  const exportYamlToDisk = () => {
+    const filename = buildYamlDownloadFilename(inspected.name);
+    const blob = new Blob([yamlDraft], { type: 'text/yaml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const saveCurrentAsPersonalTemplate = async () => {
+    setBannerError(null);
+    try {
+      const existingPersonalId = selectedPresetId.startsWith('personal:')
+        ? selectedPresetId.slice('personal:'.length)
+        : undefined;
+      const { nextTemplates, preferencePatch } = buildPersonalTemplatesPreferencePatch(
+        personalTemplates,
+        {
+          id: existingPersonalId,
+          title: saveTplTitleDraft.trim() || inspected.name || '我的自定义工作流',
+          yaml: yamlDraft,
+        },
+      );
+      setPersonalTemplates(nextTemplates);
+      writeStorage(studioPersonalTemplatesCacheKey, JSON.stringify(nextTemplates));
+      const savedId = nextTemplates[0]?.id;
+      if (savedId) {
+        setSelectedPresetId(`personal:${savedId}`);
+      }
+      setSaveTplPromptOpen(false);
+      setSaveTplTitleDraft('');
+
+      const res = await apiFetch(
+        '/v1/preferences',
+        apiToken,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preferences: preferencePatch }),
+        },
+        tenantId,
+      );
+      if (res.ok) {
+        setBannerNotice(`已保存个人模板「${nextTemplates[0]?.title ?? ''}」并同步至偏好存储`);
+      } else {
+        setBannerNotice(`已将模板缓存至本地浏览器（远端偏好同步返回 HTTP ${res.status}）`);
+      }
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const deletePersonalTemplate = async (templateId: string, ev: React.MouseEvent) => {
+    ev.stopPropagation();
+    const { nextTemplates, preferencePatch } = removePersonalTemplatePatch(
+      personalTemplates,
+      templateId,
+    );
+    setPersonalTemplates(nextTemplates);
+    writeStorage(studioPersonalTemplatesCacheKey, JSON.stringify(nextTemplates));
+    if (selectedPresetId === `personal:${templateId}`) {
+      setSelectedPresetId('custom');
+    }
+    try {
+      await apiFetch(
+        '/v1/preferences',
+        apiToken,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preferences: preferencePatch }),
+        },
+        tenantId,
+      );
+    } catch {
+      // Local cache already updated.
+    }
+  };
+
+  const downloadAllArtifactsZip = async () => {
+    if (!runId || zipExportBusy) return;
+    setZipExportBusy(true);
+    setBannerError(null);
+    try {
+      const res = await apiFetch(
+        `/v1/runs/${encodeURIComponent(runId)}/artifacts.zip`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `批量导出产物失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`,
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `yanshi-run-${runId.slice(0, 8)}-artifacts.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setZipExportBusy(false);
+    }
   };
 
   const activeBase = getApiBaseUrl();
@@ -1115,6 +1312,15 @@ export function WorkflowStudioPage({
         </div>
       )}
 
+      {bannerNotice && (
+        <div className="studio-alert studio-alert--info" role="status">
+          <span>{bannerNotice}</span>
+          <button type="button" onClick={() => setBannerNotice(null)}>
+            关闭
+          </button>
+        </div>
+      )}
+
       {!inspected.diagnostics.valid && inspected.diagnostics.issues.length > 0 && (
         <div className="studio-alert studio-alert--warn" role="alert">
           <span>工作流校验问题：{inspected.diagnostics.issues.join('；')}</span>
@@ -1140,29 +1346,128 @@ export function WorkflowStudioPage({
               <div className="studio-pane__scroll">
                 <div className="studio-section">
                   <div className="studio-section__head">
-                    <span>预设工作流模板</span>
-                    <label className="studio-upload-btn">
-                      导入 YAML
-                      <input type="file" accept=".yml,.yaml" onChange={importLocalYaml} />
-                    </label>
-                  </div>
-                  <div className="studio-preset-list">
-                    {WORKFLOW_PRESETS.map((preset) => (
+                    <span>工作流模板库 ({allPresets.length})</span>
+                    <div className="studio-file-actions">
+                      <label className="studio-upload-btn" title="从磁盘导入本地 .yml/.yaml 工作流">
+                        📂 打开 .yml
+                        <input type="file" accept=".yml,.yaml" onChange={importLocalYaml} />
+                      </label>
                       <button
-                        key={preset.id}
                         type="button"
-                        className={`studio-preset-card ${
-                          selectedPresetId === preset.id ? 'studio-preset-card--active' : ''
-                        }`}
-                        onClick={() => selectPreset(preset.id)}
+                        className="studio-upload-btn"
+                        data-testid="export-yaml-btn"
+                        title="将当前工作流 YAML 保存到本地磁盘"
+                        onClick={exportYamlToDisk}
                       >
-                        <div className="studio-preset-card__top">
-                          <strong>{preset.title}</strong>
-                          <span>{preset.badge}</span>
-                        </div>
-                        <small>{preset.subtitle}</small>
+                        💾 导出 .yml
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-upload-btn"
+                        data-testid="bookmark-template-btn"
+                        title="收藏当前工作流到个人模板库"
+                        onClick={() => {
+                          setSaveTplTitleDraft(inspected.name || '我的自定义工作流');
+                          setSaveTplPromptOpen((v) => !v);
+                        }}
+                      >
+                        ★ 收藏
+                      </button>
+                    </div>
+                  </div>
+
+                  {saveTplPromptOpen && (
+                    <div className="studio-save-tpl-box">
+                      <input
+                        type="text"
+                        aria-label="个人模板名称"
+                        placeholder="输入收藏模板名称…"
+                        value={saveTplTitleDraft}
+                        onChange={(ev) => setSaveTplTitleDraft(ev.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="studio-btn-primary studio-btn-sm"
+                        onClick={() => void saveCurrentAsPersonalTemplate()}
+                      >
+                        确认保存
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-btn-ghost studio-btn-sm"
+                        onClick={() => setSaveTplPromptOpen(false)}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="studio-category-pills" role="tablist" aria-label="模板分类筛选">
+                    {(
+                      [
+                        '全部',
+                        '课件与视频',
+                        '研究报告与信息图',
+                        '导图与工程图',
+                        '播客音频',
+                        '互动学习',
+                        '免 Key 演练',
+                        '个人收藏',
+                      ] as const
+                    ).map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        role="tab"
+                        aria-selected={presetCategoryFilter === cat}
+                        className={`studio-cat-pill ${
+                          presetCategoryFilter === cat ? 'studio-cat-pill--active' : ''
+                        }`}
+                        onClick={() => setPresetCategoryFilter(cat)}
+                      >
+                        {cat}
                       </button>
                     ))}
+                  </div>
+
+                  <div className="studio-preset-list">
+                    {visiblePresets.length === 0 ? (
+                      <p className="studio-muted-note">
+                        当前分类暂无模板（点击上方「★ 收藏」可将任意工作流存入个人收藏）。
+                      </p>
+                    ) : (
+                      visiblePresets.map((preset) => (
+                        <div
+                          key={preset.id}
+                          className={`studio-preset-card ${
+                            selectedPresetId === preset.id ? 'studio-preset-card--active' : ''
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            className="studio-preset-card__main"
+                            onClick={() => selectPreset(preset.id)}
+                          >
+                            <div className="studio-preset-card__top">
+                              <strong>{preset.title}</strong>
+                              <span>{preset.badge}</span>
+                            </div>
+                            <small>{preset.subtitle}</small>
+                          </button>
+                          {preset.personalId && (
+                            <button
+                              type="button"
+                              className="studio-preset-card__delete"
+                              aria-label={`删除个人模板 ${preset.title}`}
+                              title="移除该收藏模板"
+                              onClick={(ev) => void deletePersonalTemplate(preset.personalId!, ev)}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
 
@@ -1170,6 +1475,21 @@ export function WorkflowStudioPage({
                   <div className="studio-section__head">
                     <span>调试输入参数 ({inspected.inputs.length})</span>
                   </div>
+                  <label className="studio-input-field studio-model-override-field">
+                    <div className="studio-input-field__label">
+                      <strong>全局推理模型覆盖 (model)</strong>
+                      <span>optional</span>
+                    </div>
+                    <small className="studio-input-field__desc">
+                      为未显式指定模型的 LLM / Agent 节点统一注入模型名（如官方生成器模板）
+                    </small>
+                    <input
+                      type="text"
+                      placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
+                      value={modelOverride}
+                      onChange={(ev) => setModelOverride(ev.target.value)}
+                    />
+                  </label>
                   {renderTypedInputsForm(true)}
                 </div>
 
@@ -1308,6 +1628,18 @@ export function WorkflowStudioPage({
                 >
                   ⏹ 终止
                 </button>
+
+                {runId && (artifacts.length > 0 || deliverables.length > 0) && (
+                  <button
+                    type="button"
+                    data-testid="download-artifacts-zip-debug"
+                    className="studio-btn-ghost studio-btn-sm"
+                    disabled={zipExportBusy}
+                    onClick={() => void downloadAllArtifactsZip()}
+                  >
+                    {zipExportBusy ? '打包中…' : '📦 打包导出 (.zip)'}
+                  </button>
+                )}
               </div>
 
               <div className="studio-debug-deck__status">
@@ -1375,6 +1707,16 @@ export function WorkflowStudioPage({
           <section className="studio-pane studio-pane--mobile-deliverables">
             <div className="studio-pane__head">
               <strong>本轮产出预览 ({deliverables.length})</strong>
+              {runId && (artifacts.length > 0 || deliverables.length > 0) && (
+                <button
+                  type="button"
+                  className="studio-btn-ghost studio-btn-sm"
+                  disabled={zipExportBusy}
+                  onClick={() => void downloadAllArtifactsZip()}
+                >
+                  {zipExportBusy ? '打包中…' : '📦 导出 .zip'}
+                </button>
+              )}
             </div>
             <div className="studio-pane__scroll">
               {deliverables.length === 0 && !finalTextSummary ? (
@@ -1417,16 +1759,33 @@ export function WorkflowStudioPage({
                 value={selectedPresetId}
                 onChange={(ev) => selectPreset(ev.target.value)}
               >
-                {WORKFLOW_PRESETS.map((p) => (
+                {allPresets.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.title}
+                    {p.category ? `[${p.category}] ${p.title}` : p.title}
                   </option>
                 ))}
                 {selectedPresetId === 'custom' && <option value="custom">自定义导入 YAML</option>}
               </select>
             </div>
 
-            <div className="studio-release-form-body">{renderTypedInputsForm(false)}</div>
+            <div className="studio-release-form-body">
+              <label className="studio-input-field studio-model-override-field">
+                <div className="studio-input-field__label">
+                  <strong>全局推理模型覆盖 (model)</strong>
+                  <span>optional</span>
+                </div>
+                <small className="studio-input-field__desc">
+                  为未显式指定模型的 LLM / Agent 节点统一注入模型名
+                </small>
+                <input
+                  type="text"
+                  placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
+                  value={modelOverride}
+                  onChange={(ev) => setModelOverride(ev.target.value)}
+                />
+              </label>
+              {renderTypedInputsForm(false)}
+            </div>
 
             <div className="studio-release-cta-bar">
               <button
@@ -1522,7 +1881,20 @@ export function WorkflowStudioPage({
             <div className="studio-deliverables-showcase">
               <div className="studio-section__head">
                 <span>最终成果展台 ({deliverables.length + (finalTextSummary ? 1 : 0)})</span>
-                {runId && <small>Run ID: {runId.slice(0, 12)}…</small>}
+                <div className="studio-deliverables-head-right">
+                  {runId && (artifacts.length > 0 || deliverables.length > 0) && (
+                    <button
+                      type="button"
+                      data-testid="download-artifacts-zip-release"
+                      className="studio-btn-secondary studio-btn-sm"
+                      disabled={zipExportBusy}
+                      onClick={() => void downloadAllArtifactsZip()}
+                    >
+                      {zipExportBusy ? '正在打包…' : '📦 一键打包下载 (.zip)'}
+                    </button>
+                  )}
+                  {runId && <small>Run ID: {runId.slice(0, 12)}…</small>}
+                </div>
               </div>
 
               {deliverables.length === 0 && !finalTextSummary ? (

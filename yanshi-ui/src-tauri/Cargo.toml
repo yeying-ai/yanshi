@@ -30,12 +30,15 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 dotenvy = "0.15"
 futures = "0.3"
+sha2 = "0.10"
+tempfile = "3"
 tokio = { version = "1.35", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7.11", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 uuid = { version = "1.6", features = ["v4", "serde"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 yanshi-agent-spi = { path = "../../yanshi-agent-spi" }
 yanshi-agents = { path = "../../yanshi-agents" }
 yanshi-config = { path = "../../yanshi-config" }

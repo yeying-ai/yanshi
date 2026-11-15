@@ -7650,6 +7650,7 @@ dependencies = [
  "yanshi-tracing",
  "yanshi-worker",
  "yanshi-worker-proto",
+ "zip",
 ]
 
 [[package]]

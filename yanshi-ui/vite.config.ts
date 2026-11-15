@@ -8,6 +8,9 @@ const devApiTarget = process.env.YANSHI_DEV_API ?? 'http://127.0.0.1:8080';
 export default defineConfig({
   base: '/ui/',
   server: {
+    fs: {
+      allow: ['..'],
+    },
     proxy: {
       '/v1': {
         target: devApiTarget,

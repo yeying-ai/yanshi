@@ -18,6 +18,8 @@ export const tenantKey = 'yanshi.ui.tenantId';
 export const apiBaseUrlKey = 'yanshi.ui.apiBaseUrl';
 export const studioModeKey = 'yanshi.ui.studioMode';
 export const studioPresetKey = 'yanshi.ui.studioPreset';
+export const studioModelOverrideKey = 'yanshi.ui.studioModelOverride';
+export const studioPersonalTemplatesCacheKey = 'yanshi.ui.studioPersonalTemplates';
 
 // P6.5: per-run event filter expression. Each run_id gets its own
 // localStorage slot so navigating between runs doesn't bleed the

@@ -219,6 +219,7 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
     .route("/v1/runs/:id/events", get(stream_events))
     .route("/v1/runs/:id/events/history", get(events_history))
     .route("/v1/runs/:id/artifacts", get(list_artifacts))
+    .route("/v1/runs/:id/artifacts.zip", get(download_artifacts_zip))
     .route(
       "/v1/runs/:id/artifacts/:artifact_id",
       get(download_artifact),
@@ -927,10 +928,12 @@ async fn stream_events(
 
 async fn list_artifacts(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let guard = state.lock_runs();
-  let Some(entry) = guard.get(&run_id) else {
+  let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
     return error_json(StatusCode::NOT_FOUND, "run not found");
   };
   Json(serde_json::json!({
@@ -942,18 +945,265 @@ async fn list_artifacts(
 
 async fn download_artifact(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath((run_id, artifact_id)): RoutePath<(Uuid, Uuid)>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let found = {
     let guard = state.lock_runs();
     guard
       .get(&run_id)
+      .filter(|e| e.record.tenant_id == tenant)
       .and_then(|e| e.artifacts.iter().find(|a| a.id == artifact_id).cloned())
   };
   let Some(artifact) = found else {
     return error_json(StatusCode::NOT_FOUND, "artifact not found");
   };
   serve_file_inline(&artifact.file_path, &artifact.mime_type).await
+}
+
+#[derive(Debug, Clone)]
+struct LocalZipEntry {
+  node_id: String,
+  name: String,
+  mime_type: String,
+  path: PathBuf,
+}
+
+fn sanitize_local_zip_segment(raw: &str, fallback: &str) -> String {
+  let cleaned: String = raw
+    .chars()
+    .map(|c| {
+      if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+        '_'
+      } else {
+        c
+      }
+    })
+    .collect::<String>()
+    .trim_matches(|c: char| c == '.' || c.is_whitespace())
+    .to_string();
+  if cleaned.is_empty() {
+    fallback.to_string()
+  } else {
+    cleaned
+  }
+}
+
+fn deduplicate_local_zip_path(
+  seen: &mut std::collections::HashSet<String>,
+  dir: &str,
+  filename: &str,
+) -> String {
+  let primary = format!("{dir}/{filename}");
+  if seen.insert(primary.clone()) {
+    return primary;
+  }
+  let (stem, ext) = match filename.rsplit_once('.') {
+    Some((s, e)) if !s.is_empty() => (s, Some(e)),
+    _ => (filename, None),
+  };
+  let mut idx = 2usize;
+  loop {
+    let candidate = match ext {
+      Some(e) => format!("{dir}/{stem}_{idx}.{e}"),
+      None => format!("{dir}/{stem}_{idx}"),
+    };
+    if seen.insert(candidate.clone()) {
+      return candidate;
+    }
+    idx += 1;
+  }
+}
+
+fn discover_local_run_files(run_dir: &Path) -> Vec<LocalZipEntry> {
+  let root = run_dir.join("artifacts");
+  let Ok(node_dirs) = std::fs::read_dir(&root) else {
+    return Vec::new();
+  };
+  let mut items = Vec::new();
+  let mut sorted_nodes: Vec<_> = node_dirs.filter_map(|e| e.ok()).collect();
+  sorted_nodes.sort_by_key(|e| e.file_name());
+  for node_entry in sorted_nodes {
+    let Ok(ft) = node_entry.file_type() else {
+      continue;
+    };
+    if !ft.is_dir() {
+      continue;
+    }
+    let node_id = node_entry.file_name().to_string_lossy().to_string();
+    let Ok(files) = std::fs::read_dir(node_entry.path()) else {
+      continue;
+    };
+    let mut sorted_files: Vec<_> = files.filter_map(|e| e.ok()).collect();
+    sorted_files.sort_by_key(|e| e.file_name());
+    for file_entry in sorted_files {
+      let path = file_entry.path();
+      if path.is_file() {
+        let name = file_entry.file_name().to_string_lossy().to_string();
+        items.push(LocalZipEntry {
+          node_id: node_id.clone(),
+          name,
+          mime_type: infer_mime(&path).to_string(),
+          path,
+        });
+      }
+    }
+  }
+  items
+}
+
+fn build_local_artifacts_zip_blocking(
+  run_id: Uuid,
+  sources: Vec<LocalZipEntry>,
+) -> std::io::Result<Option<(std::fs::File, u64)>> {
+  use sha2::{Digest, Sha256};
+  use std::io::{Read, Seek, SeekFrom, Write};
+
+  let tmp = tempfile::tempfile()?;
+  let mut writer = zip::ZipWriter::new(tmp);
+  let options =
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+  let mut seen = std::collections::HashSet::new();
+  seen.insert("artifacts.json".to_string());
+  let mut manifest_items = Vec::new();
+  let mut buf = vec![0u8; 64 * 1024];
+
+  for src in sources {
+    let mut file = match std::fs::File::open(&src.path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    let safe_node = sanitize_local_zip_segment(&src.node_id, "node");
+    let safe_name = sanitize_local_zip_segment(&src.name, "output.bin");
+    let entry_path = deduplicate_local_zip_path(&mut seen, &safe_node, &safe_name);
+
+    writer
+      .start_file(&entry_path, options)
+      .map_err(std::io::Error::other)?;
+    let mut hasher = Sha256::new();
+    let mut size_bytes: u64 = 0;
+    loop {
+      let n = file.read(&mut buf)?;
+      if n == 0 {
+        break;
+      }
+      writer.write_all(&buf[..n])?;
+      hasher.update(&buf[..n]);
+      size_bytes += n as u64;
+    }
+    manifest_items.push(serde_json::json!({
+      "node_id": src.node_id,
+      "name": safe_name,
+      "entry_path": entry_path,
+      "mime_type": src.mime_type,
+      "size_bytes": size_bytes,
+      "sha256": format!("{:x}", hasher.finalize()),
+    }));
+  }
+
+  if manifest_items.is_empty() {
+    return Ok(None);
+  }
+
+  let manifest = serde_json::json!({
+    "run_id": run_id,
+    "artifacts": manifest_items,
+  });
+  let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+  writer
+    .start_file("artifacts.json", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(&manifest_bytes)?;
+
+  let mut finished = writer.finish().map_err(std::io::Error::other)?;
+  let total_len = finished.seek(SeekFrom::End(0))?;
+  finished.seek(SeekFrom::Start(0))?;
+  Ok(Some((finished, total_len)))
+}
+
+async fn download_artifacts_zip(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(run_id): RoutePath<Uuid>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let registered = {
+    let guard = state.lock_runs();
+    let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
+      return error_json(StatusCode::NOT_FOUND, "run not found");
+    };
+    entry
+      .artifacts
+      .iter()
+      .map(|a| LocalZipEntry {
+        node_id: a.node_id.clone(),
+        name: a.name.clone(),
+        mime_type: a.mime_type.clone(),
+        path: a.file_path.clone(),
+      })
+      .collect::<Vec<_>>()
+  };
+
+  let run_dir = state.base_dir.join(run_id.to_string());
+  let sources = if !registered.is_empty() {
+    registered
+  } else {
+    match tokio::task::spawn_blocking(move || discover_local_run_files(&run_dir)).await {
+      Ok(found) => found,
+      Err(err) => {
+        return error_json(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          &format!("artifact scan task failed: {err}"),
+        );
+      }
+    }
+  };
+
+  if sources.is_empty() {
+    return error_json(StatusCode::NOT_FOUND, "run has no downloadable artifacts");
+  }
+
+  let packed =
+    match tokio::task::spawn_blocking(move || build_local_artifacts_zip_blocking(run_id, sources))
+      .await
+    {
+      Ok(Ok(Some(v))) => v,
+      Ok(Ok(None)) => {
+        return error_json(StatusCode::NOT_FOUND, "no readable artifact files on disk");
+      }
+      Ok(Err(err)) => {
+        return error_json(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          &format!("failed to build zip archive: {err}"),
+        );
+      }
+      Err(err) => {
+        return error_json(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          &format!("zip task panicked: {err}"),
+        );
+      }
+    };
+
+  let (std_file, total_len) = packed;
+  let async_file = tokio::fs::File::from_std(std_file);
+  let short_id = &run_id.to_string()[..8];
+  let disposition = format!("attachment; filename=\"yanshi-run-{short_id}-artifacts.zip\"");
+
+  let mut res = Response::new(Body::from_stream(ReaderStream::new(async_file)));
+  res.headers_mut().insert(
+    header::CONTENT_TYPE,
+    HeaderValue::from_static("application/zip"),
+  );
+  res
+    .headers_mut()
+    .insert(header::CONTENT_LENGTH, HeaderValue::from(total_len));
+  if let Ok(val) = HeaderValue::from_str(&disposition) {
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, val);
+  }
+  res
 }
 
 #[derive(Debug, Deserialize)]
@@ -1454,6 +1704,37 @@ nodes:
         .get("content-security-policy")
         .and_then(|v| v.to_str().ok()),
       Some("sandbox allow-scripts")
+    );
+
+    // Verify batch `.zip` download & cross-tenant 404 isolation
+    let cross_tenant_zip = client
+      .get(format!("{base_url}/v1/runs/{run_id}/artifacts.zip"))
+      .header("X-Yanshi-Tenant", "other-tenant")
+      .send()
+      .await
+      .expect("cross tenant zip");
+    assert_eq!(cross_tenant_zip.status(), StatusCode::NOT_FOUND);
+
+    let zip_res = client
+      .get(format!("{base_url}/v1/runs/{run_id}/artifacts.zip"))
+      .send()
+      .await
+      .expect("download artifacts zip");
+    assert_eq!(zip_res.status(), StatusCode::OK);
+    assert_eq!(
+      zip_res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok()),
+      Some("application/zip")
+    );
+    let zip_bytes = zip_res.bytes().await.expect("zip bytes");
+    let mut zip_archive =
+      zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid zip archive");
+    assert!(zip_archive.len() >= 2);
+    assert!(
+      zip_archive.by_name("artifacts.json").is_ok(),
+      "zip archive should contain artifacts.json manifest"
     );
   }
 

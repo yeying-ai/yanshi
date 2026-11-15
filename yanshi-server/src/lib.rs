@@ -682,6 +682,10 @@ pub fn create_router(state: AppState) -> Router {
     // Y1.3: what a run produced, and the bytes themselves.
     .route("/v1/runs/:id/artifacts", get(artifacts::list_run_artifacts))
     .route(
+      "/v1/runs/:id/artifacts.zip",
+      get(artifacts::download_run_artifacts_zip),
+    )
+    .route(
       "/v1/runs/:id/artifacts/:artifact_id",
       get(artifacts::download_run_artifact),
     )

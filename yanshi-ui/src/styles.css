@@ -3856,3 +3856,137 @@ h1 {
   flex-wrap: wrap;
 }
 
+/* ── Phase 1: Generator Catalog, File I/O, Bookmarks & Zip Export ───── */
+.studio-alert--info {
+  background: #eff6ff;
+  border-bottom: 1px solid #bfdbfe;
+  color: #1e40af;
+}
+
+.studio-file-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+button.studio-upload-btn {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  font-family: inherit;
+}
+
+button.studio-upload-btn:hover {
+  border-color: #0f766e;
+  color: #0f766e;
+}
+
+.studio-save-tpl-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+}
+
+.studio-save-tpl-box input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.studio-category-pills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.studio-cat-pill {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.studio-cat-pill:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+.studio-cat-pill--active {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+
+.studio-preset-list {
+  max-height: 270px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.studio-preset-card {
+  position: relative;
+  flex-direction: row;
+  align-items: stretch;
+  padding: 0;
+}
+
+.studio-preset-card__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.studio-preset-card__delete {
+  flex-shrink: 0;
+  width: 28px;
+  border: none;
+  border-left: 1px solid #e2e8f0;
+  border-radius: 0 8px 8px 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.studio-preset-card__delete:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.studio-model-override-field {
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px dashed #e2e8f0;
+}
+
+.studio-deliverables-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+

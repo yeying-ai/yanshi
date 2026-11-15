@@ -1,4 +1,9 @@
 import YAML from 'yaml';
+import {
+  OFFICIAL_GENERATOR_PRESETS,
+  type PresetCategory,
+  TECH_SLIDES_VIDEO_RAW_YAML,
+} from './generatorCatalog';
 import type {
   InspectedEdge,
   InspectedInput,
@@ -12,200 +17,11 @@ export interface WorkflowPreset {
   title: string;
   subtitle: string;
   badge: string;
+  category?: PresetCategory;
   yaml: string;
 }
 
-export const TECH_SLIDES_VIDEO_YAML = `name: tech_slides_video
-inputs:
-  topic:
-    description: "要精讲的技术主题"
-    default: "Rust Traits 深度讲解"
-  source_text:
-    description: "可选参考笔记或技术资料（用于锚定幻灯片内容）"
-    default: ""
-  slide_count:
-    description: "章节 / 幻灯片页数（建议 4-10）"
-    default: 6
-  language:
-    description: "课件文字与讲师口播语言"
-    default: "中文"
-  slide_theme:
-    description: "视觉配色方案：dark（极客深色）或 light（明亮白底）"
-    default: "dark"
-  model:
-    description: "推理 / 大纲生成模型名称"
-    default: "gemini-4-hydrogen"
-  tts_model:
-    description: "语音合成（TTS）模型名称"
-    default: "gemini-2.5-flash-preview-tts"
-  voice:
-    description: "讲师音色"
-    default: "Kore"
-  export_pptx:
-    description: "导出可编辑 PowerPoint (.pptx) 课件"
-    default: true
-  export_pdf:
-    description: "导出打印版 PDF 讲义"
-    default: false
-
-nodes:
-  - id: plan_prompt
-    type: template
-    parameters:
-      template: |
-        你是一位资深系统架构师与技术讲师。请围绕主题「{{ topic }}」设计一套包含 {{ slide_count }} 页幻灯片的硬核技术精讲课件（语言：{{ language }}，主题配色：{{ slide_theme }}）。
-
-        设计要求：
-        1. 拒绝空洞概念图，每页幻灯片必须使用最契合的工程可视化面板组合（left 必填，right 可选构成双栏对照）：
-           - code：真实可编译的核心代码片段（控制在 8-16 行内），可附带 callouts 行级批注；
-           - flowchart：编译管线、控制流或判定决策树（nodes + edges）；
-           - memory：栈/堆/虚表/结构体内存布局（regions 含字节偏移 slots + pointers 指针连线）；
-           - table：横向技术方案对比矩阵（用 ✓ / ✗ / ⚠ 开头标识优劣，highlight_col 标出主角列）；
-           - mindmap：全景知识结构树（root: {"label": "...", "children": [...]}）；
-           - bullets：带 badge 标签的结构化要点卡片（可设 grid: true 排成四象限）。
-        2. 每页的 notes 是讲师口播逐字稿（3-4 句自然流畅的口语化讲解，不要出现舞台提示词），渲染器会自动按句子拆分为分步点亮动画帧并与语音对齐。
-        3. 每页底部提供一句凝练的 takeaway 核心工程判据。
-        {% if source_text != "" %}
-        参考资料：
-        {{ source_text | truncate(length=20000) }}
-        {% endif %}
-
-  - id: deck
-    type: llm
-    dependencies: ["plan_prompt"]
-    input_mapping:
-      prompt: "{{ nodes.plan_prompt.outputs.output }}"
-    parameters:
-      max_tokens: 16384
-      system: "You author structured JSON technical slide decks (SlideDeck schema). Output valid JSON only."
-      json_schema:
-        type: object
-        required: [title, slides]
-        properties:
-          title: { type: string }
-          subtitle: { type: string }
-          author: { type: string }
-          theme: { type: string }
-          slides:
-            type: array
-            minItems: 1
-            maxItems: 12
-            items:
-              type: object
-              required: [title, left, notes, takeaway]
-              properties:
-                section: { type: string }
-                title: { type: string }
-                subtitle: { type: string }
-                left: { type: object }
-                right: { type: object }
-                split_ratio: { type: number }
-                takeaway: { type: string }
-                notes: { type: string }
-
-  - id: slides
-    type: render_slides
-    dependencies: ["deck"]
-    input_mapping:
-      deck: "{{ nodes.deck.outputs.output }}"
-    parameters:
-      width: 1920
-      progressive: true
-
-  - id: tts_items
-    type: template
-    dependencies: ["slides"]
-    input_mapping:
-      groups: "{{ nodes.slides.outputs.slides_frames }}"
-    parameters:
-      output_format: json
-      template: |
-        {"items": [{% for g in groups %}{"narration": {{ g.notes | json_encode() }}, "tts_model": {{ tts_model | json_encode() }}, "voice": {{ voice | json_encode() }}}{% if not loop.last %},{% endif %}{% endfor %}]}
-
-  - id: narrate
-    type: map
-    dependencies: ["tts_items"]
-    input_mapping:
-      input_list: "{{ nodes.tts_items.outputs.items }}"
-    parameters:
-      parallel: true
-      max_concurrent: 3
-      template:
-        - id: say
-          type: tts
-          input_mapping:
-            input_template: "{{ item.narration }}"
-            model: "{{ item.tts_model }}"
-            voice: "{{ item.voice }}"
-
-  - id: cut
-    type: template
-    dependencies: ["slides", "narrate"]
-    input_mapping:
-      groups: "{{ nodes.slides.outputs.slides_frames }}"
-      voiced: "{{ nodes.narrate.outputs.results }}"
-    parameters:
-      output_format: json
-      template: |
-        {"scenes": [{% for g in groups %}{% set r = voiced | nth(n=loop.index0) %}{"audio": {{ r.say.Ok.say_output.path | json_encode() }}, "caption": {{ g.notes | json_encode() }}, "frames": {{ g.frames | json_encode() }}}{% if not loop.last %},{% endif %}{% endfor %}]}
-
-  - id: film
-    type: render_video
-    dependencies: ["cut"]
-    input_mapping:
-      scenes: "{{ nodes.cut.outputs.scenes }}"
-    parameters:
-      width: 1920
-      height: 1080
-
-  - id: doc_opts
-    type: template
-    parameters:
-      output_format: json
-      template: '{"pptx": {{ export_pptx }}, "pdf": {{ export_pdf }}}'
-
-  - id: deck_pptx
-    type: render_document
-    dependencies: ["slides", "doc_opts"]
-    run_if: "{{ nodes.doc_opts.outputs.pptx }}"
-    input_mapping:
-      markdown: "{{ nodes.slides.outputs.slides_markdown }}"
-    parameters:
-      format: pptx
-
-  - id: deck_pdf
-    type: render_document
-    dependencies: ["slides", "doc_opts"]
-    run_if: "{{ nodes.doc_opts.outputs.pdf }}"
-    input_mapping:
-      markdown: "{{ nodes.slides.outputs.slides_markdown }}"
-    parameters:
-      format: pdf
-
-  - id: deliverable
-    type: template
-    dependencies: ["deck", "film", "slides"]
-    input_mapping:
-      plan: "{{ nodes.deck.outputs.output }}"
-      mp4: "{{ nodes.film.outputs.film_output }}"
-      srt: "{{ nodes.film.outputs.film_subtitles }}"
-      seconds: "{{ nodes.film.outputs.film_seconds }}"
-      html: "{{ nodes.slides.outputs.slides_html }}"
-    parameters:
-      output_format: json
-      template: |
-        {"deliverable": {
-          "kind": "video_overview",
-          "title": {{ plan.title | json_encode() }},
-          "content": {"slides": {{ plan.slides | json_encode() }}, "seconds": {{ seconds | json_encode() }}},
-          "citations": [],
-          "files": [
-            {"node_id": "film", "name": {{ mp4 | split(pat="/") | last | json_encode() }}, "mime_type": "video/mp4", "role": "primary"},
-            {"node_id": "film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"},
-            {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}
-          ]
-        }}
-`;
+export const TECH_SLIDES_VIDEO_YAML = TECH_SLIDES_VIDEO_RAW_YAML;
 
 export const INSTANT_STEP_DEBUG_YAML = `name: instant_step_debug_demo
 inputs:
@@ -331,18 +147,13 @@ nodes:
 `;
 
 export const WORKFLOW_PRESETS: WorkflowPreset[] = [
-  {
-    id: 'tech_slides_video',
-    title: 'PPT 级技术精讲视频生成',
-    subtitle: '11 节点完整多媒体流水线（大纲 → 幻灯片 → 并行配音 → 1080p 合成 → PPTX/PDF）',
-    badge: '旗舰工作流',
-    yaml: TECH_SLIDES_VIDEO_YAML,
-  },
+  ...OFFICIAL_GENERATOR_PRESETS,
   {
     id: 'instant_slide_render_demo',
     title: '免 Key 幻灯片秒级渲染演练',
     subtitle: '2 节点直出 1080p 代码/对比矩阵幻灯片与交互式 HTML，立即可观测图像预览',
     badge: '秒级图像观测',
+    category: '免 Key 演练',
     yaml: PARALLEL_SLIDE_PREVIEW_YAML,
   },
   {
@@ -350,6 +161,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
     title: '免 Key 单步与条件分支演练',
     subtitle: '4 节点含 run_if 条件边，零外部依赖体验每步暂停核查输入/输出',
     badge: '调试入门',
+    category: '免 Key 演练',
     yaml: INSTANT_STEP_DEBUG_YAML,
   },
 ];
