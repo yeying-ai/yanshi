@@ -1,0 +1,87 @@
+# Production overlay for Yanshi on server `cu` (`https://yanshi.yeying.dev`).
+# Modeled after `rustineverything.app/docker-compose.prod.yml`:
+#
+#   docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Key differences from base `docker-compose.yml`:
+# - `postgres` drops host port bindings (`ports: !reset []` — host :5432 is never exposed)
+#   and requires a strong `POSTGRES_PASSWORD`.
+# - `yanshi-server` binds strictly to host loopback (`127.0.0.1:18080 -> :3000`), runs under
+#   `YANSHI_SECURITY_PROFILE=production`, persists runs/notebooks/harness memory on `/data`,
+#   and requires a strong `YANSHI_API_TOKEN`.
+# - `gateway` (`yanshi-gateway`, Rust + Cloudflare Pingora 0.9) runs on `network_mode: host`,
+#   terminates TLS 1.2/1.3 + HTTP/2 on `:443`, redirects `:80 -> 301 https://`, and streams
+#   requests/SSE to `127.0.0.1:18080`.
+
+services:
+  postgres:
+    ports: !reset []
+    mem_limit: 512m
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong secret}
+
+  yanshi-server:
+    ports: !reset
+      - "127.0.0.1:${YANSHI_HOST_PORT:-18080}:3000"
+    mem_limit: 1536m
+    user: "10001:10001"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-yanshi}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-yanshi}
+      YANSHI_SECURITY_PROFILE: "production"
+      YANSHI_CORS_ALLOWED_ORIGINS: ${YANSHI_CORS_ALLOWED_ORIGINS:-https://yanshi.yeying.dev}
+      YANSHI_API_TOKEN: ${YANSHI_API_TOKEN:?YANSHI_API_TOKEN must be set to a strong secret}
+      YANSHI_API_TOKEN_TENANTS: ${YANSHI_API_TOKEN_TENANTS:-}
+      YANSHI_RUN_DIR: "/data/runs"
+      YANSHI_HARNESS_MEMORY_DB: "/data/harness_memory.sqlite"
+      YANSHI_GATEWAY_PATH_ROOTS: "/data"
+      YANSHI_GATEWAY_HOST_NODE_TYPES: ${YANSHI_GATEWAY_HOST_NODE_TYPES:-file,agent,skill_agent,multi_agent,shell}
+      YANSHI_GATEWAY_ALLOWED_COMMANDS: ${YANSHI_GATEWAY_ALLOWED_COMMANDS:-ffmpeg,ffprobe,typst,pandoc}
+      YANSHI_RUN_MAX_CONCURRENCY: ${YANSHI_RUN_MAX_CONCURRENCY:-4}
+      # Optional LLM provider credentials injected from host `.env`:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GLM_API_KEY: ${GLM_API_KEY:-}
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
+      MOONSHOT_API_KEY: ${MOONSHOT_API_KEY:-}
+      STEPFUN_API_KEY: ${STEPFUN_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      KLING_API_KEY: ${KLING_API_KEY:-}
+    volumes:
+      - ${YANSHI_DATA_HOST_DIR:-/data/yanshi-prod/data}:/data
+
+  gateway:
+    build:
+      context: ./crates/gateway
+      dockerfile: Dockerfile
+      args:
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
+    image: yanshi-gateway:local
+    container_name: yanshi-gateway
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 128m
+    depends_on:
+      yanshi-server:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    environment:
+      TLS_CERT_PATH: /certs/${TLS_CERT_FILE:-yeying.dev.cert}
+      TLS_KEY_PATH: /certs/${TLS_KEY_FILE:-yeying.dev.key}
+      UPSTREAM_ADDR: 127.0.0.1:${YANSHI_HOST_PORT:-18080}
+      HOST_UPSTREAMS: ${HOST_UPSTREAMS:-yanshi.yeying.dev=127.0.0.1:18080}
+      HOST_REDIRECTS: ${HOST_REDIRECTS:-www.yanshi.yeying.dev=https://yanshi.yeying.dev}
+      SNI_CERTS: ${SNI_CERTS:-}
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info}
+    volumes:
+      - ${CERT_HOST_DIR:-/data/yanshi-prod/certs}:/certs:ro
