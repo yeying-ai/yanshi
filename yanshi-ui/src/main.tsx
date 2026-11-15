@@ -26,11 +26,13 @@ import {
   writeStorage,
 } from './lib/storage';
 import {
+  buildRunCompareHref,
   eventNodeId,
   eventTone,
   findLatest,
   formatTime,
   isTerminalRun,
+  normalizeEventsHistoryPayload,
   prettyJson,
   reconnectDelayMs,
   runFromEnvelope,
@@ -103,12 +105,8 @@ async function fetchEventsHistory(
   if (!response.ok) {
     throw new Error(`run ${runId}: ${response.status} ${response.statusText}`);
   }
-  // Q3.7.2: validate the history payload before merging into compare
-  // view. Endpoint wraps events in `{ events: [...] }`; build a
-  // narrow inline schema so we don't need a one-off export.
-  const raw = (await response.json()) as { events?: unknown };
-  const events = StreamedEventArraySchema.parse(raw?.events ?? []);
-  return events;
+  const raw: unknown = await response.json();
+  return normalizeEventsHistoryPayload(raw);
 }
 
 function RunCompare({
@@ -125,6 +123,7 @@ function RunCompare({
   const params = useMemo(() => new URLSearchParams(routeSearch), [routeSearch]);
   const against = params.get('against') ?? '';
   const [otherRunId, setOtherRunId] = useState(against);
+  const [recentRuns, setRecentRuns] = useState<RunRecord[]>([]);
   const [primaryEvents, setPrimaryEvents] = useState<StreamedEvent[]>([]);
   const [otherEvents, setOtherEvents] = useState<StreamedEvent[]>([]);
   const [state, setState] = useState<ConnectionState>('idle');
@@ -140,14 +139,29 @@ function RunCompare({
   );
 
   useEffect(() => {
-    if (!primaryRunId || !otherRunId) return;
+    let cancelled = false;
+    apiFetch('/v1/runs?limit=25', apiToken, {}, tenantId)
+      .then((res) => (res.ok ? parseJsonResponse(ListRunsEnvelopeSchema, res, 'GET /v1/runs') : null))
+      .then((envelope) => {
+        if (cancelled || !envelope) return;
+        setRecentRuns(envelope.runs);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [apiToken, tenantId]);
+
+  useEffect(() => {
+    if (!primaryRunId) return;
     let cancelled = false;
     setState('loading');
     setError(null);
-    Promise.all([
-      fetchEventsHistory(primaryRunId, apiToken, tenantId),
-      fetchEventsHistory(otherRunId, apiToken, tenantId),
-    ])
+    const otherPromise =
+      otherRunId && otherRunId !== primaryRunId
+        ? fetchEventsHistory(otherRunId, apiToken, tenantId)
+        : Promise.resolve([] as StreamedEvent[]);
+    Promise.all([fetchEventsHistory(primaryRunId, apiToken, tenantId), otherPromise])
       .then(([primary, other]) => {
         if (cancelled) return;
         setPrimaryEvents(primary);
@@ -163,6 +177,11 @@ function RunCompare({
       cancelled = true;
     };
   }, [primaryRunId, otherRunId, apiToken, tenantId]);
+
+  const candidateRuns = useMemo(
+    () => recentRuns.filter((r) => r.id !== primaryRunId),
+    [recentRuns, primaryRunId],
+  );
 
   // Compute the union of compare keys so both columns can highlight
   // events that lack a counterpart in the other run.
@@ -192,6 +211,29 @@ function RunCompare({
             Primary run
             <input value={primaryRunId} readOnly />
           </label>
+          {candidateRuns.length > 0 && (
+            <label>
+              Quick pick recent run
+              <select
+                aria-label="Quick pick recent run"
+                value={candidateRuns.some((r) => r.id === otherRunId) ? otherRunId : ''}
+                onChange={(ev) => {
+                  const picked = ev.target.value;
+                  setOtherRunId(picked);
+                  if (picked) {
+                    navigateTo(buildRunCompareHref(primaryRunId, picked));
+                  }
+                }}
+              >
+                <option value="">-- 选择要对比的历史运行 --</option>
+                {candidateRuns.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.id.slice(0, 8)} · {r.status} · {formatTime(r.started_at)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label>
             Compare against
             <input
@@ -212,14 +254,19 @@ function RunCompare({
           </label>
           <button
             type="button"
-            onClick={() => {
-              const next = new URLSearchParams({ against: otherRunId });
-              navigateTo(`/ui/runs/${encodeURIComponent(primaryRunId)}/compare?${next.toString()}`);
-            }}
+            onClick={() => navigateTo(buildRunCompareHref(primaryRunId, otherRunId))}
             disabled={!otherRunId || otherRunId === primaryRunId}
           >
             Compare
           </button>
+          {otherRunId && otherRunId !== primaryRunId && (
+            <button
+              type="button"
+              onClick={() => navigateTo(buildRunCompareHref(otherRunId, primaryRunId))}
+            >
+              ⇄ Swap
+            </button>
+          )}
         </div>
         {state === 'loading' && <p className="run-compare-status">Loading…</p>}
         {error && (
@@ -884,6 +931,17 @@ function RunConsole({ apiToken, onTokenChange }: { apiToken: string; onTokenChan
             >
               Cancel
             </button>
+            {runId.trim() && (
+              <SpaLink
+                className="topbar-link"
+                to={buildRunCompareHref(
+                  runId.trim(),
+                  runs.find((r) => r.id !== runId.trim())?.id,
+                )}
+              >
+                ⇄ Compare
+              </SpaLink>
+            )}
             <SpaLink className="topbar-link topbar-cta" to="/ui/runs/new">
               + New run
             </SpaLink>

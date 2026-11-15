@@ -3,7 +3,7 @@ import { NodeIoInspector } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { SpaLink } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
-import { useCurrentRoute } from '../lib/router';
+import { navigateTo, useCurrentRoute } from '../lib/router';
 import {
   WorkflowGraphCanvas,
   type NodeRuntimeTelemetry,
@@ -15,7 +15,13 @@ import {
   parseSseChunk,
   setApiBaseUrl,
 } from '../lib/api';
-import { formatTime, isTerminalRun, reconnectDelayMs, runFromEnvelope } from '../lib/helpers';
+import {
+  buildRunCompareHref,
+  formatTime,
+  isTerminalRun,
+  reconnectDelayMs,
+  runFromEnvelope,
+} from '../lib/helpers';
 import {
   apiBaseUrlKey,
   readStorage,
@@ -546,13 +552,12 @@ export function WorkflowStudioPage({
         setArtifacts([]);
         setBannerError(null);
 
-        // Preserve `/ui?run=<uuid>` when already under `/ui`, or keep `/ui/app?run=...` / `/ui/studio?run=...`.
-        const currentPath = window.location.pathname || '/ui';
-        window.history.replaceState(
-          null,
-          '',
-          `${currentPath}?run=${encodeURIComponent(runId)}`,
-        );
+        // Preserve `/ui?run=<uuid>` when already matching, otherwise sync SPA route safely across HTTP & Tauri.
+        if (new URLSearchParams(currentRoute.search).get('run') !== runId) {
+          navigateTo(`${currentRoute.pathname}?run=${encodeURIComponent(runId)}`, {
+            replace: true,
+          });
+        }
 
         // Best-effort debug snapshot check in case we reattach while paused.
         void apiFetch(`/v1/runs/${encodeURIComponent(runId)}/debug`, apiToken, {}, tenantId)
@@ -1084,6 +1089,16 @@ export function WorkflowStudioPage({
           </div>
 
           <nav className="studio-aux-links" aria-label="辅助控制台导航">
+            {(runId || recentRuns.length > 0) && (
+              <SpaLink
+                to={buildRunCompareHref(
+                  runId || recentRuns[0].id,
+                  recentRuns.find((r) => r.id !== (runId || recentRuns[0].id))?.id,
+                )}
+              >
+                运行对比
+              </SpaLink>
+            )}
             <SpaLink to="/ui/console">经典事件台</SpaLink>
             <SpaLink to="/ui/harness/sessions">Harness</SpaLink>
             <SpaLink to="/ui/diagnostics">诊断</SpaLink>
@@ -1191,7 +1206,7 @@ export function WorkflowStudioPage({
                     </div>
                     <ul className="studio-recent-runs">
                       {recentRuns.slice(0, 6).map((r) => (
-                        <li key={r.id}>
+                        <li key={r.id} className="studio-recent-runs__item">
                           <button
                             type="button"
                             className={r.id === runId ? 'active' : ''}
@@ -1204,6 +1219,24 @@ export function WorkflowStudioPage({
                             <em>{r.status}</em>
                             <small>{formatTime(r.started_at)}</small>
                           </button>
+                          <SpaLink
+                            className="studio-compare-pill"
+                            title={
+                              runId && r.id !== runId
+                                ? `将当前运行与 ${r.id.slice(0, 8)} 对比`
+                                : `以此运行为基准开启对比`
+                            }
+                            to={
+                              runId && r.id !== runId
+                                ? buildRunCompareHref(runId, r.id)
+                                : buildRunCompareHref(
+                                    r.id,
+                                    recentRuns.find((cand) => cand.id !== r.id)?.id,
+                                  )
+                            }
+                          >
+                            对比
+                          </SpaLink>
                         </li>
                       ))}
                     </ul>

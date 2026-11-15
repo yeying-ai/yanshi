@@ -5,7 +5,13 @@
 // `reconnectDelayMs(attempt)` from a long-lived `connect()` closure.
 
 import { describe, it } from 'vitest';
-import { eventTone, isTerminalRun, reconnectDelayMs } from './helpers';
+import {
+  buildRunCompareHref,
+  eventTone,
+  isTerminalRun,
+  normalizeEventsHistoryPayload,
+  reconnectDelayMs,
+} from './helpers';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -92,5 +98,51 @@ describe('eventTone', () => {
   it('falls through to neutral for unknown kinds', () => {
     assert(eventTone('whatever_else') === 'neutral', 'unknown → neutral');
     assert(eventTone('') === 'neutral', 'empty → neutral');
+  });
+});
+
+describe('normalizeEventsHistoryPayload', () => {
+  const sampleEvent = {
+    run_id: '11111111-1111-1111-1111-111111111111',
+    seq: 0,
+    kind: 'workflow.started',
+    payload: { workflow_id: 'demo' },
+    ts: '2026-11-15T00:00:00Z',
+  };
+
+  it('accepts bare JSON array returned by yanshi-server and Tauri local_engine', () => {
+    const parsed = normalizeEventsHistoryPayload([sampleEvent]);
+    assert(parsed.length === 1, `expected 1 event, got ${parsed.length}`);
+    assert(parsed[0].kind === 'workflow.started', 'preserves event kind');
+  });
+
+  it('accepts legacy { events: [...] } envelope', () => {
+    const parsed = normalizeEventsHistoryPayload({ events: [sampleEvent] });
+    assert(parsed.length === 1, `expected 1 event, got ${parsed.length}`);
+  });
+
+  it('returns empty array on null or missing events field', () => {
+    assert(normalizeEventsHistoryPayload(null).length === 0, 'null → []');
+    assert(normalizeEventsHistoryPayload({}).length === 0, '{} → []');
+  });
+});
+
+describe('buildRunCompareHref', () => {
+  it('builds bare compare path when no comparison target is provided', () => {
+    assert(
+      buildRunCompareHref('run-a') === '/ui/runs/run-a/compare',
+      'expected /ui/runs/run-a/compare',
+    );
+  });
+
+  it('includes ?against= query when comparison target differs from primary', () => {
+    assert(
+      buildRunCompareHref('run-a', 'run-b') === '/ui/runs/run-a/compare?against=run-b',
+      'expected ?against=run-b',
+    );
+    assert(
+      buildRunCompareHref('run-a', 'run-a') === '/ui/runs/run-a/compare',
+      'omits against when equal to primary',
+    );
   });
 });

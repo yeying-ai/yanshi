@@ -1496,12 +1496,15 @@ h1 {
   color: #374151;
   gap: 4px;
 }
-.run-compare-controls input {
+.run-compare-controls input,
+.run-compare-controls select {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px;
   padding: 6px 10px;
   border: 1px solid #d1d5db;
   border-radius: 4px;
+  background: #ffffff;
+  color: #111827;
 }
 .run-compare-controls button {
   height: 32px;
@@ -2326,8 +2329,15 @@ h1 {
   gap: 4px;
 }
 
+.studio-recent-runs__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .studio-recent-runs button {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2337,6 +2347,26 @@ h1 {
   border: 1px solid #e2e8f0;
   background: #ffffff;
   font-size: 12px;
+}
+
+.studio-compare-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.studio-compare-pill:hover {
+  border-color: #0f766e;
+  color: #0f766e;
+  background: #f0fdfa;
 }
 
 .studio-recent-runs button.active {

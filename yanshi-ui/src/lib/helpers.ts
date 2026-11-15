@@ -2,7 +2,7 @@
 // Non-React, no DOM side-effects (except `formatTime` which calls into
 // Intl.DateTimeFormat in browser timezones).
 
-import type { RunEnvelope, RunRecord, StreamedEvent } from '../schemas';
+import { StreamedEventArraySchema, type RunEnvelope, type RunRecord, type StreamedEvent } from '../schemas';
 
 /**
  * Format an ISO timestamp into a wall-clock HH:MM:SS string in the
@@ -110,4 +110,33 @@ export const reconnectDelayMs = (attempt: number): number => {
   const safe = Math.max(0, Math.floor(attempt));
   const base = 250 * Math.pow(2, safe);
   return Math.min(base, 30_000);
+};
+
+/**
+ * Normalize `GET /v1/runs/{id}/events/history` payloads across both bare JSON
+ * arrays (`[...]`, returned by `yanshi-server` and Tauri `local_engine`) and
+ * legacy `{ events: [...] }` envelopes.
+ */
+export const normalizeEventsHistoryPayload = (raw: unknown): StreamedEvent[] => {
+  const candidate = Array.isArray(raw)
+    ? raw
+    : raw !== null && typeof raw === 'object' && 'events' in raw
+      ? (raw as { events?: unknown }).events ?? []
+      : [];
+  return StreamedEventArraySchema.parse(candidate);
+};
+
+/**
+ * Construct the SPA route for comparing `primaryRunId` against an optional
+ * secondary `againstRunId`.
+ */
+export const buildRunCompareHref = (primaryRunId: string, againstRunId?: string | null): string => {
+  const primary = primaryRunId.trim();
+  const base = `/ui/runs/${encodeURIComponent(primary)}/compare`;
+  const against = againstRunId?.trim() ?? '';
+  if (against && against !== primary) {
+    const query = new URLSearchParams({ against });
+    return `${base}?${query.toString()}`;
+  }
+  return base;
 };
