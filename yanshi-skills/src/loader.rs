@@ -13,6 +13,7 @@ const KNOWN_TOOLS: &[&str] = &[
   "shell",
   "file",
   "http",
+  "web_search",
   "script",
   "code_exec",
   // Modality Tool adapters from `yanshi-tools-ai` — thin wrappers over

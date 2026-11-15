@@ -56,6 +56,13 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
       KLING_API_KEY: ${KLING_API_KEY:-}
+      # Optional web_search / GitHub API credentials:
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      BOCHA_API_KEY: ${BOCHA_API_KEY:-}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      SEARXNG_URL: ${SEARXNG_URL:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - ${YANSHI_DATA_HOST_DIR:-/data/yanshi-prod/data}:/data
 

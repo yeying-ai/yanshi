@@ -6,6 +6,8 @@
 
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "http")]
+pub mod web_search;
 
 #[cfg(feature = "file")]
 pub mod file;

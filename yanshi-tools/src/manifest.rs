@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::builtin::{FileTool, HttpTool};
+use crate::builtin::{FileTool, HttpTool, WebSearchTool};
 use crate::sandbox::SandboxPolicy;
 use crate::{Capability, ToolDefinition, ToolError, ToolRegistry};
 
@@ -29,6 +29,7 @@ use crate::{Capability, ToolDefinition, ToolError, ToolRegistry};
 pub enum BuiltinToolKind {
   File,
   Http,
+  WebSearch,
 }
 
 /// One tool a manifest grants. `definition` and `required` are
@@ -77,6 +78,9 @@ pub fn build_registry_from_manifest(
       }
       BuiltinToolKind::Http => {
         registry.register(Arc::new(HttpTool::new(policy)?));
+      }
+      BuiltinToolKind::WebSearch => {
+        registry.register(Arc::new(WebSearchTool::new(policy)?));
       }
     }
   }

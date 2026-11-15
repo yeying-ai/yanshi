@@ -11,7 +11,9 @@ use yanshi_memory::{
 };
 use yanshi_rag::embeddings::OpenAIEmbedding;
 use yanshi_rag::{Bm25KnowledgeBackend, RagSearchTool};
-use yanshi_tools::builtin::{CodeExecTool, FileTool, HttpTool, ScriptTool, ShellTool};
+use yanshi_tools::builtin::{
+  CodeExecTool, FileTool, HttpTool, ScriptTool, ShellTool, WebSearchTool,
+};
 use yanshi_tools::{Capability, SandboxPolicy, Tool, ToolPolicy, ToolRegistry};
 use yanshi_tools_ai::{
   AsrTool, Image2ImageTool, ImageEditTool, ImageUnderstandTool, Text2ImageTool, Text2VideoTool,
@@ -374,6 +376,11 @@ fn build_tool_registry(
         let http_tool = HttpTool::new(policy.clone())
           .map_err(|err| SkillError::ToolBuildError(err.to_string()))?;
         registry.register(Arc::new(http_tool));
+      }
+      "web_search" => {
+        let search_tool = WebSearchTool::new(policy.clone())
+          .map_err(|err| SkillError::ToolBuildError(err.to_string()))?;
+        registry.register(Arc::new(search_tool));
       }
       "script" => {
         let scripts_dir = skill_dir.join("scripts");

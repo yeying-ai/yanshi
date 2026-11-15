@@ -430,6 +430,12 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("headers", ParamType::Object),
       ParamSpec::optional("body", ParamType::String),
     ]),
+    "web_search" => Some(vec![
+      ParamSpec::required_input("query", ParamType::String),
+      ParamSpec::optional("provider", ParamType::String),
+      ParamSpec::optional("max_results", ParamType::Integer),
+      ParamSpec::optional("topic", ParamType::String),
+    ]),
     "file" => Some(vec![
       // V0.2 closure: `file` node requires explicit `allowed_paths` to
       // avoid permissive-by-default arbitrary filesystem read/write
