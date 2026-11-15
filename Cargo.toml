@@ -27,6 +27,9 @@ members = [
   "yanshi-harness",
   "xtask",
 ]
+exclude = [
+  "yanshi-ui/src-tauri",
+]
 resolver = "2"
 
 # Shared package metadata (Rust 1.64+ workspace inheritance, P10.0.2-FU1).

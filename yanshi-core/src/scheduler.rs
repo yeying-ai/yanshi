@@ -307,6 +307,12 @@ impl FlowDebugController {
     guard.breakpoints = breakpoints.into_iter().map(Into::into).collect();
   }
 
+  /// Enable or disable automatic pausing after every completed node.
+  pub fn set_step_every_node(&self, enabled: bool) {
+    let mut guard = self.lock_state();
+    guard.step_every_node = enabled;
+  }
+
   /// Advance one node boundary and keep single-step pausing active.
   /// Returns `true` if the controller was currently paused.
   pub fn step(&self) -> bool {

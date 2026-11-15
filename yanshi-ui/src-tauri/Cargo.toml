@@ -1,0 +1,44 @@
+[package]
+name = "yanshi-studio-desktop"
+version = "0.1.0"
+description = "Cross-platform Tauri v2 shell for Yanshi Studio & One-Click App Runner"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "yanshi_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "yanshi-studio"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+anyhow = "1.0"
+axum = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+dotenvy = "0.15"
+futures = "0.3"
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7.11", features = ["io"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+yanshi-config = { path = "../../yanshi-config" }
+yanshi-core = { path = "../../yanshi-core" }
+yanshi-llm = { path = "../../yanshi-llm" }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tempfile = "3"

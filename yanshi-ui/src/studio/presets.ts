@@ -287,42 +287,44 @@ nodes:
       output_format: json
       template: |
         {
-          "title": {{ deck_title | json_encode() }},
-          "subtitle": "静态单态化 vs vtable 胖指针内存模型",
-          "author": "Yanshi Studio",
-          "theme": {{ slide_theme | json_encode() }},
-          "slides": [
-            {
-              "section": "01 · 核心抽象",
-              "title": "用行为契约替代继承层级",
-              "left": {
-                "kind": "code",
-                "language": "rust",
-                "title": "trait Summary",
-                "code": "pub trait Summary {\\n  fn summarize(&self) -> String;\\n}\\n\\npub fn notify(item: &impl Summary) {\\n  println!(\\"Breaking: {}\\", item.summarize());\\n}",
-                "callouts": [{"line": 5, "text": "静态分发：编译期单态化零虚表开销"}]
-              },
-              "right": {
-                "kind": "table",
-                "headers": ["维度", "Rust Trait", "OOP 继承", "C 函数指针"],
-                "highlight_col": 1,
-                "rows": [
-                  ["编译期类型安全", "✓ 强约束", "✓ 强约束", "✗ void* 易出错"],
-                  ["运行期零开销", "✓ 单态化内联", "✗ 虚表跳转", "✗ 间接调用"],
-                  ["为外部类型扩展", "✓ 孤儿规则内支持", "✗ 需改基类", "⚠ 手工封装"]
-                ]
-              },
-              "takeaway": "优先使用泛型静态分发，仅在异构集合边界按需退化到 &dyn Trait。",
-              "notes": "我们先看 Trait 的声明方式。编译器通过单态化把泛型调用直接内联。右边对比了三种抽象方案的取舍。"
-            }
-          ]
+          "deck": {
+            "title": {{ deck_title | json_encode() }},
+            "subtitle": "静态单态化 vs vtable 胖指针内存模型",
+            "author": "Yanshi Studio",
+            "theme": {{ slide_theme | json_encode() }},
+            "slides": [
+              {
+                "section": "01 · 核心抽象",
+                "title": "用行为契约替代继承层级",
+                "left": {
+                  "kind": "code",
+                  "language": "rust",
+                  "title": "trait Summary",
+                  "code": "pub trait Summary {\\n  fn summarize(&self) -> String;\\n}\\n\\npub fn notify(item: &impl Summary) {\\n  println!(\\"Breaking: {}\\", item.summarize());\\n}",
+                  "callouts": [{"line": 5, "text": "静态分发：编译期单态化零虚表开销", "tone": "rust"}]
+                },
+                "right": {
+                  "kind": "table",
+                  "columns": ["维度", "Rust Trait", "OOP 继承", "C 函数指针"],
+                  "highlight_col": 1,
+                  "rows": [
+                    ["编译期类型安全", "✓ 强约束", "✓ 强约束", "✗ void* 易出错"],
+                    ["运行期零开销", "✓ 单态化内联", "✗ 虚表跳转", "✗ 间接调用"],
+                    ["为外部类型扩展", "✓ 孤儿规则内支持", "✗ 需改基类", "⚠ 手工封装"]
+                  ]
+                },
+                "takeaway": "优先使用泛型静态分发，仅在异构集合边界按需退化到 &dyn Trait。",
+                "notes": "我们先看 Trait 的声明方式。编译器通过单态化把泛型调用直接内联。右边对比了三种抽象方案的取舍。"
+              }
+            ]
+          }
         }
 
   - id: render_preview
     type: render_slides
     dependencies: ["sample_deck"]
     input_mapping:
-      deck: "{{ nodes.sample_deck.outputs }}"
+      deck: "{{ nodes.sample_deck.outputs.deck }}"
     parameters:
       width: 1920
       progressive: true

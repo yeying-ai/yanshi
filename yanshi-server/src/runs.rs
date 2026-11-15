@@ -1894,6 +1894,8 @@ pub enum DebugActionRequest {
   SetBreakpoints {
     #[serde(default)]
     breakpoints: Vec<String>,
+    #[serde(default)]
+    step_every_node: Option<bool>,
   },
 }
 
@@ -1962,8 +1964,14 @@ async fn debug_run_action(
   let resumed = match req {
     DebugActionRequest::Step => Some(controller.step()),
     DebugActionRequest::Continue => Some(controller.continue_run()),
-    DebugActionRequest::SetBreakpoints { breakpoints } => {
+    DebugActionRequest::SetBreakpoints {
+      breakpoints,
+      step_every_node,
+    } => {
       controller.set_breakpoints(breakpoints);
+      if let Some(step_each) = step_every_node {
+        controller.set_step_every_node(step_each);
+      }
       None
     }
   };
