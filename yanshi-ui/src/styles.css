@@ -3990,3 +3990,255 @@ button.studio-upload-btn:hover {
 }
 
 
+/* ── Phase 2: Visual DAG Bi-Directional Builder & Node Config Form ──── */
+.studio-dag-handle--interactive {
+  width: 12px !important;
+  height: 12px !important;
+  background: #0f766e !important;
+  border: 2px solid #ffffff !important;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
+  cursor: crosshair !important;
+}
+
+.studio-dag-handle--interactive:hover {
+  transform: scale(1.25);
+  background: #0d9488 !important;
+}
+
+.studio-cost-pill {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.studio-canvas-builder-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(360px, 86vw);
+}
+
+.studio-canvas-builder-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 5px 7px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #dde3ed;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+
+.studio-node-palette-drawer {
+  width: 340px;
+  max-width: 86vw;
+  max-height: 410px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
+}
+
+.studio-node-palette__cats {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.studio-cat-pill.active {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ffffff;
+}
+
+.studio-palette-chain-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #334155;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #f0fdfa;
+  border: 1px solid #ccfbf1;
+  cursor: pointer;
+}
+
+.studio-node-palette__list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.studio-palette-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.studio-palette-item:hover {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.studio-palette-item strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.studio-palette-item small {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.35;
+}
+
+.studio-empty-add-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* NodeConfigEditor inside Right Inspector */
+.studio-node-config-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.studio-config-readonly-banner {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.studio-config-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.studio-config-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.studio-dep-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.studio-dep-pill {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.studio-dep-pill--active {
+  border-color: #0f766e;
+  background: #ccfbf1;
+  color: #115e59;
+  font-weight: 700;
+}
+
+.studio-mapping-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.studio-mapping-row {
+  display: grid;
+  grid-template-columns: 92px 16px 1fr auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.studio-mapping-row input {
+  padding: 5px 7px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-width: 0;
+}
+
+.studio-mapping-arrow {
+  text-align: center;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.studio-icon-del-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.studio-icon-del-btn:hover {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.studio-mono-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 11.5px !important;
+}
+
+.studio-config-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.studio-saved-hint {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #059669;
+}

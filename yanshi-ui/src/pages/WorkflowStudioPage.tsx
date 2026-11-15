@@ -60,6 +60,14 @@ import {
   restorePersonalTemplatesFromPreferences,
 } from '../studio/generatorCatalog';
 import { inspectYamlLocally, WORKFLOW_PRESETS } from '../studio/presets';
+import {
+  addNodeToYaml,
+  connectNodesInYaml,
+  deleteNodeFromYaml,
+  disconnectEdgeInYaml,
+  type NodeUpdatePatch,
+  updateNodeInYaml,
+} from '../studio/yamlGraphMutator';
 
 export type StudioPosture = 'debug' | 'release';
 type MobilePane = 'config' | 'canvas' | 'inspector' | 'deliverables';
@@ -1092,6 +1100,72 @@ export function WorkflowStudioPage({
     }
   };
 
+  const handleAddCanvasNode = (nodeType: string, afterNodeId?: string) => {
+    const res = addNodeToYaml(yamlDraft, nodeType, { afterNodeId });
+    if (!res.ok) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerError(null);
+    setSelectedPresetId('custom');
+    setYamlDraft(res.yaml);
+    if (res.createdNodeId) {
+      setSelectedNodeId(res.createdNodeId);
+    }
+  };
+
+  const handleConnectCanvasNodes = (sourceId: string, targetId: string) => {
+    const res = connectNodesInYaml(yamlDraft, sourceId, targetId);
+    if (!res.ok) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerError(null);
+    setSelectedPresetId('custom');
+    setYamlDraft(res.yaml);
+    setSelectedNodeId(targetId);
+  };
+
+  const handleDisconnectCanvasEdge = (sourceId: string, targetId: string) => {
+    const res = disconnectEdgeInYaml(yamlDraft, sourceId, targetId);
+    if (!res.ok) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerError(null);
+    setSelectedPresetId('custom');
+    setYamlDraft(res.yaml);
+  };
+
+  const handleDeleteCanvasNode = (nodeId: string) => {
+    const res = deleteNodeFromYaml(yamlDraft, nodeId);
+    if (!res.ok) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerError(null);
+    setSelectedPresetId('custom');
+    setYamlDraft(res.yaml);
+    setBreakpoints((prev) => prev.filter((id) => id !== nodeId));
+    setSelectedNodeId((prev) => (prev === nodeId ? null : prev));
+  };
+
+  const handleApplyNodePatch = (nodeId: string, patch: NodeUpdatePatch): string | null => {
+    const res = updateNodeInYaml(yamlDraft, nodeId, patch);
+    if (!res.ok) {
+      return res.error;
+    }
+    setBannerError(null);
+    setSelectedPresetId('custom');
+    setYamlDraft(res.yaml);
+    if (res.renamedTo) {
+      const nextId = res.renamedTo;
+      setSelectedNodeId(nextId);
+      setBreakpoints((prev) => prev.map((id) => (id === nodeId ? nextId : id)));
+    }
+    return null;
+  };
+
   const activeBase = getApiBaseUrl();
   const connectionBadge = customBaseUrl.trim()
     ? `远端网关 · ${customBaseUrl.trim().replace(/^https?:\/\//, '')}`
@@ -1675,6 +1749,7 @@ export function WorkflowStudioPage({
               telemetryByNode={reduced.telemetryByNode}
               breakpoints={breakpoints}
               selectedNodeId={selectedNodeId}
+              editable={!isRunActive}
               onSelectNode={(nid) => {
                 setSelectedNodeId(nid);
                 if (window.innerWidth < 860) {
@@ -1682,6 +1757,10 @@ export function WorkflowStudioPage({
                 }
               }}
               onToggleBreakpoint={(nid) => void toggleBreakpoint(nid)}
+              onAddNode={handleAddCanvasNode}
+              onConnectNodes={handleConnectCanvasNodes}
+              onDisconnectEdge={handleDisconnectCanvasEdge}
+              onDeleteNode={handleDeleteCanvasNode}
             />
           </section>
 
@@ -1691,6 +1770,8 @@ export function WorkflowStudioPage({
               apiToken={apiToken}
               tenantId={tenantId}
               node={selectedNode}
+              allNodes={inspected.nodes}
+              editable={!isRunActive}
               telemetry={selectedNode ? reduced.telemetryByNode[selectedNode.id] : undefined}
               capturedInput={selectedNode ? reduced.nodeInputs[selectedNode.id] : undefined}
               capturedOutput={selectedNode ? reduced.nodeOutputs[selectedNode.id] : undefined}
@@ -1700,6 +1781,10 @@ export function WorkflowStudioPage({
               onStepDebug={() => void sendDebugAction('step')}
               onContinueDebug={() => void sendDebugAction('continue')}
               debugActionBusy={debugActionBusy}
+              onApplyNodePatch={handleApplyNodePatch}
+              onDeleteNode={
+                inspected.nodes.length > 1 ? handleDeleteCanvasNode : undefined
+              }
             />
           </aside>
 

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -9,6 +9,7 @@ import {
   Panel,
   Position,
   ReactFlow,
+  type Connection,
   type Edge,
   type Node,
   type NodeProps,
@@ -16,6 +17,11 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { InspectedEdge, InspectedNode } from '../schemas';
+import {
+  NODE_PALETTE,
+  NODE_PALETTE_CATEGORIES,
+  type NodePaletteCategory,
+} from '../studio/yamlGraphMutator';
 
 export type StudioNodeRunStatus =
   | 'idle'
@@ -29,6 +35,7 @@ export type StudioNodeRunStatus =
 export interface NodeRuntimeTelemetry {
   status: StudioNodeRunStatus;
   durationMs?: number;
+  costUsd?: number;
   hasInput?: boolean;
   hasOutput?: boolean;
   error?: string;
@@ -40,6 +47,7 @@ export interface StudioDagNodeData extends Record<string, unknown> {
   telemetry: NodeRuntimeTelemetry;
   hasBreakpoint: boolean;
   isSelected: boolean;
+  editable: boolean;
   stepOrderIndex: number;
   onToggleBreakpoint: (nodeId: string) => void;
   onSelectNode: (nodeId: string) => void;
@@ -52,20 +60,24 @@ function nodeTypePalette(nodeType: string): { label: string; accent: string; tin
   if (normalized === 'llm' || normalized.includes('agent')) {
     return { label: nodeType, accent: '#6d4aff', tint: '#f3effe' };
   }
-  if (normalized === 'render_slides') {
-    return { label: 'render_slides', accent: '#0b7a8f', tint: '#e8f7fa' };
+  if (normalized === 'render_slides' || normalized === 'render_study') {
+    return { label: nodeType, accent: '#0b7a8f', tint: '#e8f7fa' };
   }
-  if (normalized === 'tts') {
-    return { label: 'tts', accent: '#0d8a6a', tint: '#e7f8f2' };
+  if (normalized === 'tts' || normalized === 'render_audio' || normalized === 'asr') {
+    return { label: nodeType, accent: '#0d8a6a', tint: '#e7f8f2' };
   }
   if (normalized === 'map' || normalized === 'while') {
     return { label: `${nodeType} 并发子流`, accent: '#0f766e', tint: '#ecfdf5' };
   }
-  if (normalized === 'render_video') {
-    return { label: 'render_video', accent: '#c84b24', tint: '#fff1ec' };
+  if (normalized === 'render_video' || normalized === 'text_to_video') {
+    return { label: nodeType, accent: '#c84b24', tint: '#fff1ec' };
   }
-  if (normalized === 'render_document') {
-    return { label: 'render_document', accent: '#3b5bdb', tint: '#edf2ff' };
+  if (
+    normalized === 'render_document' ||
+    normalized === 'render_markdown' ||
+    normalized === 'render_mindmap'
+  ) {
+    return { label: nodeType, accent: '#3b5bdb', tint: '#edf2ff' };
   }
   return { label: nodeType, accent: '#475569', tint: '#f1f5f9' };
 }
@@ -80,9 +92,22 @@ const STATUS_LABELS: Record<StudioNodeRunStatus, string> = {
   failed: '✕ 失败',
 };
 
+function formatUsdBadge(usd: number): string {
+  if (usd < 0.001 && usd > 0) return '<$0.001';
+  return `$${usd.toFixed(usd < 0.1 ? 4 : 3)}`;
+}
+
 function StudioDagNodeComponent({ data }: NodeProps<StudioFlowNode>): React.ReactElement {
-  const { node, telemetry, hasBreakpoint, isSelected, stepOrderIndex, onToggleBreakpoint, onSelectNode } =
-    data;
+  const {
+    node,
+    telemetry,
+    hasBreakpoint,
+    isSelected,
+    editable,
+    stepOrderIndex,
+    onToggleBreakpoint,
+    onSelectNode,
+  } = data;
   const palette = nodeTypePalette(node.type);
   const subCount = node.sub_nodes?.length ?? 0;
 
@@ -92,6 +117,7 @@ function StudioDagNodeComponent({ data }: NodeProps<StudioFlowNode>): React.Reac
         'studio-dag-node',
         `studio-dag-node--${telemetry.status}`,
         isSelected ? 'studio-dag-node--selected' : '',
+        editable ? 'studio-dag-node--editable' : '',
       ]
         .filter(Boolean)
         .join(' ')}
@@ -106,7 +132,11 @@ function StudioDagNodeComponent({ data }: NodeProps<StudioFlowNode>): React.Reac
       }}
       style={{ '--node-accent': palette.accent, '--node-tint': palette.tint } as React.CSSProperties}
     >
-      <Handle type="target" position={Position.Left} className="studio-dag-handle" />
+      <Handle
+        type="target"
+        position={Position.Left}
+        className={`studio-dag-handle ${editable ? 'studio-dag-handle--interactive' : ''}`}
+      />
 
       <div className="studio-dag-node__top">
         <span className="studio-dag-node__step">#{stepOrderIndex + 1}</span>
@@ -147,6 +177,11 @@ function StudioDagNodeComponent({ data }: NodeProps<StudioFlowNode>): React.Reac
           {STATUS_LABELS[telemetry.status]}
         </span>
         <span className="studio-dag-node__metrics">
+          {typeof telemetry.costUsd === 'number' && telemetry.costUsd > 0 && (
+            <b className="studio-cost-pill" title={`节点累计模型费用 $${telemetry.costUsd.toFixed(6)}`}>
+              {formatUsdBadge(telemetry.costUsd)}
+            </b>
+          )}
           {typeof telemetry.durationMs === 'number' && <em>{telemetry.durationMs} ms</em>}
           {(telemetry.hasInput || telemetry.hasOutput) && (
             <b className="studio-io-pill" title="已捕获节点输入/输出快照">
@@ -156,7 +191,11 @@ function StudioDagNodeComponent({ data }: NodeProps<StudioFlowNode>): React.Reac
         </span>
       </div>
 
-      <Handle type="source" position={Position.Right} className="studio-dag-handle" />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className={`studio-dag-handle ${editable ? 'studio-dag-handle--interactive' : ''}`}
+      />
     </div>
   );
 }
@@ -173,8 +212,13 @@ export interface WorkflowGraphCanvasProps {
   telemetryByNode: Record<string, NodeRuntimeTelemetry>;
   breakpoints: string[];
   selectedNodeId: string | null;
+  editable?: boolean;
   onSelectNode: (nodeId: string) => void;
   onToggleBreakpoint: (nodeId: string) => void;
+  onAddNode?: (nodeType: string, afterNodeId?: string) => void;
+  onConnectNodes?: (sourceId: string, targetId: string) => void;
+  onDisconnectEdge?: (sourceId: string, targetId: string) => void;
+  onDeleteNode?: (nodeId: string) => void;
 }
 
 export function WorkflowGraphCanvas({
@@ -185,9 +229,21 @@ export function WorkflowGraphCanvas({
   telemetryByNode,
   breakpoints,
   selectedNodeId,
+  editable = false,
   onSelectNode,
   onToggleBreakpoint,
+  onAddNode,
+  onConnectNodes,
+  onDisconnectEdge,
+  onDeleteNode,
 }: WorkflowGraphCanvasProps): React.ReactElement {
+  const [paletteOpen, setPaletteOpen] = useState<boolean>(false);
+  const [paletteCategory, setPaletteCategory] = useState<NodePaletteCategory>('LLM / Agent');
+  const [chainAfterSelected, setChainAfterSelected] = useState<boolean>(true);
+  const [selectedEdgePair, setSelectedEdgePair] = useState<{ from: string; to: string } | null>(
+    null,
+  );
+
   const bpSet = useMemo(() => new Set(breakpoints), [breakpoints]);
 
   const orderIndexMap = useMemo(() => {
@@ -232,9 +288,13 @@ export function WorkflowGraphCanvas({
           telemetry,
           hasBreakpoint: bpSet.has(node.id),
           isSelected: selectedNodeId === node.id,
+          editable,
           stepOrderIndex: orderIndexMap.get(node.id) ?? fallbackIdx,
           onToggleBreakpoint,
-          onSelectNode,
+          onSelectNode: (nid: string) => {
+            setSelectedEdgePair(null);
+            onSelectNode(nid);
+          },
         },
       };
     });
@@ -244,6 +304,7 @@ export function WorkflowGraphCanvas({
     telemetryByNode,
     bpSet,
     selectedNodeId,
+    editable,
     orderIndexMap,
     onToggleBreakpoint,
     onSelectNode,
@@ -254,17 +315,21 @@ export function WorkflowGraphCanvas({
       const sourceStatus = telemetryByNode[edge.from]?.status ?? 'idle';
       const targetStatus = telemetryByNode[edge.to]?.status ?? 'idle';
       const isCond = edge.kind === 'condition';
+      const isEdgeSelected =
+        selectedEdgePair?.from === edge.from && selectedEdgePair?.to === edge.to;
       const isLive =
         targetStatus === 'running' ||
         targetStatus === 'paused_before' ||
         sourceStatus === 'paused_after';
-      const stroke = isCond
-        ? '#d97706'
-        : sourceStatus === 'succeeded'
-          ? '#0d8a6a'
-          : isLive
-            ? '#2563eb'
-            : '#94a3b8';
+      const stroke = isEdgeSelected
+        ? '#dc2626'
+        : isCond
+          ? '#d97706'
+          : sourceStatus === 'succeeded'
+            ? '#0d8a6a'
+            : isLive
+              ? '#2563eb'
+              : '#94a3b8';
 
       return {
         id: `e-${edge.from}-${edge.to}-${edge.kind}-${idx}`,
@@ -272,6 +337,7 @@ export function WorkflowGraphCanvas({
         target: edge.to,
         type: 'smoothstep',
         animated: isLive,
+        selected: isEdgeSelected,
         label: edge.label ?? undefined,
         labelStyle: {
           fill: isCond ? '#92400e' : '#334155',
@@ -286,7 +352,7 @@ export function WorkflowGraphCanvas({
         labelBgBorderRadius: 4,
         style: {
           stroke,
-          strokeWidth: isLive || sourceStatus === 'succeeded' ? 2.2 : 1.7,
+          strokeWidth: isEdgeSelected ? 2.8 : isLive || sourceStatus === 'succeeded' ? 2.2 : 1.7,
           strokeDasharray: isCond ? '6 4' : undefined,
         },
         markerEnd: {
@@ -297,12 +363,49 @@ export function WorkflowGraphCanvas({
         },
       };
     });
-  }, [edges, telemetryByNode]);
+  }, [edges, telemetryByNode, selectedEdgePair]);
+
+  const filteredPalette = useMemo(
+    () => NODE_PALETTE.filter((item) => item.category === paletteCategory),
+    [paletteCategory],
+  );
+
+  const handleConnect = (conn: Connection) => {
+    if (!editable || !onConnectNodes) return;
+    if (conn.source && conn.target) {
+      onConnectNodes(conn.source, conn.target);
+    }
+  };
+
+  const handlePaletteAdd = (nodeType: string) => {
+    if (!onAddNode) return;
+    const afterId = chainAfterSelected && selectedNodeId ? selectedNodeId : undefined;
+    onAddNode(nodeType, afterId);
+    setPaletteOpen(false);
+  };
 
   if (nodes.length === 0) {
     return (
       <div className="studio-canvas-empty">
-        <p>当前 YAML 尚未解析出节点，请在左侧选择预设模板或修复语法错误。</p>
+        <p>当前 YAML 尚未解析出节点，请在左侧选择预设模板、修复语法错误，或直接添加首个节点。</p>
+        {editable && onAddNode && (
+          <div className="studio-empty-add-row">
+            <button
+              type="button"
+              className="studio-btn-primary studio-btn-sm"
+              onClick={() => onAddNode('llm')}
+            >
+              + 添加 LLM 节点起步
+            </button>
+            <button
+              type="button"
+              className="studio-btn-secondary studio-btn-sm"
+              onClick={() => onAddNode('template')}
+            >
+              + 添加 Template 节点起步
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -317,7 +420,14 @@ export function WorkflowGraphCanvas({
         fitViewOptions={{ padding: 0.18, maxZoom: 1.15 }}
         minZoom={0.25}
         maxZoom={1.8}
-        nodesConnectable={false}
+        nodesConnectable={editable && Boolean(onConnectNodes)}
+        onConnect={handleConnect}
+        onEdgeClick={(_ev, edge) => {
+          if (editable) {
+            setSelectedEdgePair({ from: edge.source, to: edge.target });
+          }
+        }}
+        onPaneClick={() => setSelectedEdgePair(null)}
         elementsSelectable
         proOptions={{ hideAttribution: true }}
       >
@@ -345,9 +455,100 @@ export function WorkflowGraphCanvas({
             <i className="legend-line legend-line--cond" /> run_if 条件边
           </span>
           <span>
-            <i className="legend-bp" /> 点击节点右上圆点设执行前断点
+            <i className="legend-bp" /> {editable ? '拖拽节点右端口连线 · 点右上圆点设断点' : '点击节点右上圆点设执行前断点'}
           </span>
         </Panel>
+
+        {editable && (
+          <Panel position="top-right" className="studio-canvas-builder-panel">
+            <div className="studio-canvas-builder-bar">
+              {selectedEdgePair && onDisconnectEdge && (
+                <button
+                  type="button"
+                  data-testid="canvas-disconnect-edge-btn"
+                  className="studio-btn-danger-ghost studio-btn-sm"
+                  onClick={() => {
+                    onDisconnectEdge(selectedEdgePair.from, selectedEdgePair.to);
+                    setSelectedEdgePair(null);
+                  }}
+                >
+                  ✂ 断开 {selectedEdgePair.from} → {selectedEdgePair.to}
+                </button>
+              )}
+
+              {selectedNodeId && onDeleteNode && nodes.length > 1 && (
+                <button
+                  type="button"
+                  data-testid="canvas-delete-node-btn"
+                  className="studio-btn-ghost studio-btn-sm"
+                  title={`删除当前选中节点 #${selectedNodeId} 并自动清理下游引用`}
+                  onClick={() => onDeleteNode(selectedNodeId)}
+                >
+                  🗑 删除 #{selectedNodeId}
+                </button>
+              )}
+
+              {onAddNode && (
+                <button
+                  type="button"
+                  data-testid="canvas-open-palette-btn"
+                  className="studio-btn-primary studio-btn-sm"
+                  aria-expanded={paletteOpen}
+                  onClick={() => setPaletteOpen((prev) => !prev)}
+                >
+                  {paletteOpen ? '✕ 收起组件库' : '+ 添加节点'}
+                </button>
+              )}
+            </div>
+
+            {paletteOpen && onAddNode && (
+              <div
+                className="studio-node-palette-drawer"
+                role="region"
+                aria-label="可视化添加工作流节点"
+              >
+                <div className="studio-node-palette__cats">
+                  {NODE_PALETTE_CATEGORIES.map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      className={`studio-cat-pill ${paletteCategory === cat ? 'active' : ''}`}
+                      onClick={() => setPaletteCategory(cat)}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                {selectedNodeId && (
+                  <label className="studio-palette-chain-toggle">
+                    <input
+                      type="checkbox"
+                      checked={chainAfterSelected}
+                      onChange={(ev) => setChainAfterSelected(ev.target.checked)}
+                    />
+                    <span>自动连接在当前选中节点 #{selectedNodeId} 之后</span>
+                  </label>
+                )}
+
+                <div className="studio-node-palette__list">
+                  {filteredPalette.map((item) => (
+                    <button
+                      key={item.type}
+                      type="button"
+                      data-testid={`palette-add-${item.type}`}
+                      className="studio-palette-item"
+                      onClick={() => handlePaletteAdd(item.type)}
+                    >
+                      <strong>{item.label}</strong>
+                      <small>{item.description}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Panel>
+        )}
       </ReactFlow>
     </div>
   );

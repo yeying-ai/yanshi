@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { prettyJson } from '../lib/helpers';
 import type { FlowDebugPause, InspectedNode } from '../schemas';
 import { extractNodeMediaPreviews } from '../studio/mediaExtractor';
+import type { NodeUpdatePatch } from '../studio/yamlGraphMutator';
 import { AuthorizedMedia } from './AuthorizedMedia';
+import { NodeConfigEditor } from './NodeConfigEditor';
 import type { NodeRuntimeTelemetry } from './WorkflowGraphCanvas';
 
 type InspectorTab = 'io' | 'media' | 'config';
@@ -12,6 +14,8 @@ export interface NodeIoInspectorProps {
   apiToken: string;
   tenantId: string;
   node: InspectedNode | null;
+  allNodes?: InspectedNode[];
+  editable?: boolean;
   telemetry?: NodeRuntimeTelemetry;
   capturedInput: unknown;
   capturedOutput: unknown;
@@ -21,6 +25,8 @@ export interface NodeIoInspectorProps {
   onStepDebug: () => void;
   onContinueDebug: () => void;
   debugActionBusy: boolean;
+  onApplyNodePatch?: (nodeId: string, patch: NodeUpdatePatch) => string | null;
+  onDeleteNode?: (nodeId: string) => void;
 }
 
 export function NodeIoInspector({
@@ -28,6 +34,8 @@ export function NodeIoInspector({
   apiToken,
   tenantId,
   node,
+  allNodes = [],
+  editable = false,
   telemetry,
   capturedInput,
   capturedOutput,
@@ -37,27 +45,40 @@ export function NodeIoInspector({
   onStepDebug,
   onContinueDebug,
   debugActionBusy,
+  onApplyNodePatch,
+  onDeleteNode,
 }: NodeIoInspectorProps): React.ReactElement {
-  const [activeTab, setActiveTab] = useState<InspectorTab>('io');
+  const [activeTab, setActiveTab] = useState<InspectorTab>(() =>
+    !runId && onApplyNodePatch ? 'config' : 'io',
+  );
 
   const mediaPreviews = useMemo(
     () => (node && runId ? extractNodeMediaPreviews(runId, node.id, capturedOutput) : []),
     [runId, node, capturedOutput],
   );
 
-  // Keep user on I/O tab by default when switching nodes unless the current tab is valid.
+  // Switch to I/O tab automatically when a run starts or pauses at this node.
+  useEffect(() => {
+    if (runId || pausedAt) {
+      setActiveTab((prev) => (prev === 'media' && mediaPreviews.length > 0 ? 'media' : 'io'));
+    }
+  }, [runId, pausedAt?.node_id, pausedAt?.phase]);
+
+  // Keep user off an empty media tab when switching nodes.
   useEffect(() => {
     if (activeTab === 'media' && mediaPreviews.length === 0) {
-      setActiveTab('io');
+      setActiveTab(!runId && onApplyNodePatch ? 'config' : 'io');
     }
-  }, [node?.id, activeTab, mediaPreviews.length]);
+  }, [node?.id, activeTab, mediaPreviews.length, runId, onApplyNodePatch]);
 
   if (!node) {
     return (
-      <section className="studio-inspector studio-inspector--empty" aria-label="节点输入输出观测台">
+      <section className="studio-inspector studio-inspector--empty" aria-label="节点配置与观测台">
         <div className="studio-empty-box">
-          <h3>节点 I/O 观测台</h3>
-          <p>点击拓扑画布中的任意节点，或启动「单步调试」，即可在此实时观测该节点的解析后输入、实际输出与多媒体产物。</p>
+          <h3>节点配置与 I/O 观测台</h3>
+          <p>
+            点击拓扑画布中的任意节点即可表单化编辑参数与依赖连线（实时同步左侧 YAML）；启动「单步调试」后在此实时核查输入、输出与多媒体产物。
+          </p>
         </div>
       </section>
     );
@@ -68,9 +89,9 @@ export function NodeIoInspector({
   const hasOutput = capturedOutput !== undefined;
 
   const tabs: { id: InspectorTab; label: string; badge?: number }[] = [
-    { id: 'io', label: '输入 / 输出观测' },
+    { id: 'io', label: '运行 I/O 观测' },
     { id: 'media', label: '媒体预览', badge: mediaPreviews.length || undefined },
-    { id: 'config', label: '映射与配置' },
+    { id: 'config', label: '节点配置' },
   ];
 
   const onTabKeyDown = (ev: React.KeyboardEvent<HTMLDivElement>) => {
@@ -92,6 +113,11 @@ export function NodeIoInspector({
             <span className="studio-inspector__type-pill">{node.type}</span>
             {typeof telemetry?.durationMs === 'number' && (
               <span className="studio-inspector__duration">{telemetry.durationMs} ms</span>
+            )}
+            {typeof telemetry?.costUsd === 'number' && telemetry.costUsd > 0 && (
+              <span className="studio-inspector__duration">
+                ${telemetry.costUsd.toFixed(telemetry.costUsd < 0.1 ? 4 : 3)}
+              </span>
             )}
           </div>
           <h2 className="studio-inspector__title">{node.id}</h2>
@@ -278,47 +304,46 @@ export function NodeIoInspector({
           </div>
         )}
 
-        {activeTab === 'config' && (
-          <div className="studio-io-stack">
-            {node.run_if && (
+        {activeTab === 'config' &&
+          (onApplyNodePatch ? (
+            <NodeConfigEditor
+              node={node}
+              allNodes={allNodes}
+              editable={editable}
+              onApplyPatch={onApplyNodePatch}
+              onDeleteNode={onDeleteNode}
+            />
+          ) : (
+            <div className="studio-io-stack">
+              {node.run_if && (
+                <div className="studio-io-block">
+                  <div className="studio-io-block__head">
+                    <span>条件守卫 (run_if)</span>
+                  </div>
+                  <pre className="studio-json-box">{node.run_if}</pre>
+                </div>
+              )}
+
               <div className="studio-io-block">
                 <div className="studio-io-block__head">
-                  <span>条件守卫 (run_if)</span>
+                  <span>输入映射表达式 (input_mapping)</span>
+                  <small>{Object.keys(node.input_mapping).length} 项</small>
                 </div>
-                <pre className="studio-json-box">{node.run_if}</pre>
+                <pre className="studio-json-box">
+                  {Object.keys(node.input_mapping).length > 0
+                    ? prettyJson(node.input_mapping)
+                    : '// 无上游显式字段映射'}
+                </pre>
               </div>
-            )}
 
-            <div className="studio-io-block">
-              <div className="studio-io-block__head">
-                <span>输入映射表达式 (input_mapping)</span>
-                <small>{Object.keys(node.input_mapping).length} 项</small>
-              </div>
-              <pre className="studio-json-box">
-                {Object.keys(node.input_mapping).length > 0
-                  ? prettyJson(node.input_mapping)
-                  : '// 无上游显式字段映射'}
-              </pre>
-            </div>
-
-            {node.sub_nodes && node.sub_nodes.length > 0 && (
               <div className="studio-io-block">
                 <div className="studio-io-block__head">
-                  <span>内嵌子流水线 ({node.type})</span>
-                  <small>{node.sub_nodes.length} 个子节点</small>
+                  <span>静态参数 (parameters)</span>
                 </div>
-                <pre className="studio-json-box">{prettyJson(node.sub_nodes)}</pre>
+                <pre className="studio-json-box">{prettyJson(node.parameters)}</pre>
               </div>
-            )}
-
-            <div className="studio-io-block">
-              <div className="studio-io-block__head">
-                <span>静态参数 (parameters)</span>
-              </div>
-              <pre className="studio-json-box">{prettyJson(node.parameters)}</pre>
             </div>
-          </div>
-        )}
+          ))}
       </div>
     </section>
   );
