@@ -444,6 +444,12 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("max_files", ParamType::Integer),
       ParamSpec::optional("allowed_paths", ParamType::Sequence),
     ]),
+    "pdf_extract" => Some(vec![
+      ParamSpec::required_input("source", ParamType::Any),
+      ParamSpec::optional("max_chars", ParamType::Integer),
+      ParamSpec::optional("max_pages", ParamType::Integer),
+      ParamSpec::optional("allowed_paths", ParamType::Sequence),
+    ]),
     "file" => Some(vec![
       // V0.2 closure: `file` node requires explicit `allowed_paths` to
       // avoid permissive-by-default arbitrary filesystem read/write

@@ -32,6 +32,15 @@ pub struct HttpResponse {
   pub body: String,
 }
 
+/// Final status, optional `Content-Type`, and raw body bytes of a request
+/// made by [`HttpTool::send_bytes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpBytesResponse {
+  pub status: StatusCode,
+  pub content_type: Option<String>,
+  pub body: Vec<u8>,
+}
+
 /// Make HTTP GET / POST requests with domain sandbox enforcement.
 pub struct HttpTool {
   policy: Arc<SandboxPolicy>,
@@ -44,11 +53,26 @@ pub struct HttpTool {
 
 impl HttpTool {
   /// Perform the request (sandbox checks, pinned DNS, per-hop redirect
-  /// re-validation) and return the final status with the full body.
+  /// re-validation) and return the final status with the text body.
   /// `execute` builds the agent-facing [`ToolOutput`] from this; callers
   /// that need the real status code (the workflow `http` node) use it
   /// directly.
   pub async fn send(&self, params: &Value) -> Result<HttpResponse, ToolError> {
+    let raw = self.send_bytes(params, None).await?;
+    Ok(HttpResponse {
+      status: raw.status,
+      body: String::from_utf8_lossy(&raw.body).into_owned(),
+    })
+  }
+
+  /// Perform the request with all sandbox/DNS-pinning/redirect checks and
+  /// return raw bytes without UTF-8 lossy conversion, optionally enforcing
+  /// an upper bound `max_bytes` while streaming the response body.
+  pub async fn send_bytes(
+    &self,
+    params: &Value,
+    max_bytes: Option<usize>,
+  ) -> Result<HttpBytesResponse, ToolError> {
     let url = params["url"]
       .as_str()
       .ok_or_else(|| ToolError::InvalidParams {
@@ -108,7 +132,7 @@ impl HttpTool {
         builder = builder.body(body.to_string());
       }
 
-      let response = builder.send().await.map_err(|e| ToolError::HttpError {
+      let mut response = builder.send().await.map_err(|e| ToolError::HttpError {
         message: e.to_string(),
       })?;
 
@@ -141,11 +165,42 @@ impl HttpTool {
         continue;
       }
 
+      if let (Some(limit), Some(len)) = (max_bytes, response.content_length())
+        && len > limit as u64
+      {
+        return Err(ToolError::HttpError {
+          message: format!(
+            "Response Content-Length ({len} bytes) exceeds maximum allowed ({limit} bytes)"
+          ),
+        });
+      }
+
       let status = response.status();
-      let body = response.text().await.map_err(|e| ToolError::HttpError {
+      let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+      let mut body = Vec::new();
+      while let Some(chunk) = response.chunk().await.map_err(|e| ToolError::HttpError {
         message: e.to_string(),
-      })?;
-      return Ok(HttpResponse { status, body });
+      })? {
+        if let Some(limit) = max_bytes
+          && body.len().saturating_add(chunk.len()) > limit
+        {
+          return Err(ToolError::HttpError {
+            message: format!("Response body exceeded maximum allowed size ({limit} bytes)"),
+          });
+        }
+        body.extend_from_slice(&chunk);
+      }
+
+      return Ok(HttpBytesResponse {
+        status,
+        content_type,
+        body,
+      });
     }
 
     Err(ToolError::HttpError {
@@ -197,6 +252,12 @@ impl HttpTool {
     self
   }
 
+  /// Override the per-request HTTP timeout (default: 30s).
+  pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    self.timeout = timeout;
+    self
+  }
+
   pub fn default_policy() -> Result<Self, ToolError> {
     Self::new(Arc::new(SandboxPolicy::default()))
   }
@@ -233,6 +294,17 @@ impl HttpTool {
       .map_err(|err| ToolError::ExecutionFailed {
         message: format!("failed to build pinned reqwest client for host '{host}': {err}"),
       })
+  }
+
+  /// Validate a URL string against the configured [`SandboxPolicy`] (scheme,
+  /// cloud-metadata hosts, domain allowlist, and resolved IP address classes)
+  /// without sending a request. Used by media downloaders (`video_ingest`)
+  /// before invoking an external fetcher.
+  pub async fn validate_url_str(&self, raw_url: &str) -> Result<Vec<SocketAddr>, ToolError> {
+    let parsed = Url::parse(raw_url).map_err(|error| ToolError::InvalidParams {
+      message: format!("Invalid URL '{raw_url}': {error}"),
+    })?;
+    self.validate_url_allowed(&parsed).await
   }
 
   async fn validate_url_allowed(&self, url: &Url) -> Result<Vec<SocketAddr>, ToolError> {
