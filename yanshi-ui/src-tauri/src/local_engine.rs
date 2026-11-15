@@ -6,7 +6,7 @@
 //! `yanshi-core` so desktop users can visually debug or one-click execute
 //! workflows offline without installing PostgreSQL.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -17,7 +17,7 @@ use axum::{
   Json, Router,
   body::{Body, Bytes},
   extract::{Path as RoutePath, Query, State},
-  http::{HeaderValue, StatusCode, header},
+  http::{HeaderMap, HeaderValue, StatusCode, header},
   response::{
     IntoResponse, Response,
     sse::{Event as SseEvent, KeepAlive, Sse},
@@ -32,7 +32,10 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-use yanshi_config::inspect::{InspectWorkflowResponse, inspect_workflow};
+use yanshi_config::{
+  diagnostics::{DoctorProfile, build_report},
+  inspect::{InspectWorkflowResponse, inspect_workflow},
+};
 use yanshi_core::{
   FlowCancellationToken, FlowDebugController, FlowDebugSnapshot, FlowExecutionConfig, FlowExt,
   events::{EventListener, WorkflowEvent},
@@ -83,18 +86,27 @@ struct RunEntry {
   debug_controller: Option<FlowDebugController>,
 }
 
+type TenantPreferencesMap = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
+
 #[derive(Clone)]
 pub struct LocalEngineState {
   runs: Arc<Mutex<HashMap<Uuid, RunEntry>>>,
+  preferences: Arc<Mutex<TenantPreferencesMap>>,
   base_dir: PathBuf,
 }
 
 impl LocalEngineState {
   pub fn new(base_dir: PathBuf) -> Self {
+    let initial_prefs = load_preferences_from_disk(&base_dir);
     Self {
       runs: Arc::new(Mutex::new(HashMap::new())),
+      preferences: Arc::new(Mutex::new(initial_prefs)),
       base_dir,
     }
+  }
+
+  pub fn base_dir(&self) -> &Path {
+    &self.base_dir
   }
 
   fn lock_runs(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, RunEntry>> {
@@ -103,6 +115,35 @@ impl LocalEngineState {
       Err(poisoned) => poisoned.into_inner(),
     }
   }
+
+  fn lock_preferences(&self) -> std::sync::MutexGuard<'_, TenantPreferencesMap> {
+    match self.preferences.lock() {
+      Ok(guard) => guard,
+      Err(poisoned) => poisoned.into_inner(),
+    }
+  }
+}
+
+fn preferences_file_path(base_dir: &Path) -> PathBuf {
+  base_dir.join("_preferences.json")
+}
+
+fn load_preferences_from_disk(base_dir: &Path) -> TenantPreferencesMap {
+  let path = preferences_file_path(base_dir);
+  let Ok(bytes) = std::fs::read(&path) else {
+    return BTreeMap::new();
+  };
+  serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+pub(crate) fn extract_tenant(headers: &HeaderMap) -> String {
+  headers
+    .get("x-yanshi-tenant")
+    .and_then(|v| v.to_str().ok())
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .unwrap_or("default")
+    .to_string()
 }
 
 fn default_studio_runs_dir() -> PathBuf {
@@ -118,7 +159,7 @@ fn default_studio_runs_dir() -> PathBuf {
     .join("studio-runs")
 }
 
-fn load_user_dotenv() {
+pub(crate) fn load_user_dotenv() {
   let _ = dotenvy::dotenv();
   if let Some(home) = dirs::home_dir() {
     let user_env = home.join(".yanshi").join(".env");
@@ -128,7 +169,7 @@ fn load_user_dotenv() {
   }
 }
 
-async fn ensure_llm_initialized() -> anyhow::Result<()> {
+pub(crate) async fn ensure_llm_initialized() -> anyhow::Result<()> {
   static INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
   INIT
     .get_or_try_init(|| async {
@@ -158,6 +199,11 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
 pub fn build_local_router(state: LocalEngineState) -> Router {
   Router::new()
     .route("/health", get(health))
+    .route("/v1/diagnostics", get(get_diagnostics))
+    .route(
+      "/v1/preferences",
+      get(list_preferences).put(put_preferences),
+    )
     .route("/v1/workflows/inspect", post(inspect_route))
     .route("/v1/runs", get(list_runs).post(create_run))
     .route("/v1/runs/:id", get(get_run).post(post_run_action))
@@ -178,6 +224,158 @@ async fn health() -> impl IntoResponse {
   Json(serde_json::json!({ "status": "ok", "engine": "tauri-local" }))
 }
 
+async fn get_diagnostics() -> Response {
+  load_user_dotenv();
+  let report = build_report(DoctorProfile::Local, None, false, false, (None, Vec::new())).await;
+  match serde_json::to_value(&report) {
+    Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to serialize diagnostics report: {err}"),
+    ),
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PreferencesEnvelope {
+  preferences: BTreeMap<String, serde_json::Value>,
+}
+
+const MAX_PREFERENCE_VALUE_BYTES: usize = 16 * 1024;
+
+fn is_valid_preference_key(key: &str) -> bool {
+  let len = key.len();
+  if !(1..=128).contains(&len) {
+    return false;
+  }
+  key
+    .bytes()
+    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-' || b == b':')
+}
+
+fn looks_like_token(value: &serde_json::Value) -> Option<&'static str> {
+  let serde_json::Value::String(s) = value else {
+    return None;
+  };
+  let trimmed = s.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  let lower = trimmed.to_lowercase();
+  if lower.starts_with("bearer ") {
+    return Some("Bearer-prefixed");
+  }
+  for prefix in ["sk-", "sk_", "ant-", "api_", "ghp_", "ghs_", "gho_"] {
+    if trimmed.starts_with(prefix) && trimmed.len() >= prefix.len() + 16 {
+      return Some("API-key-shaped");
+    }
+  }
+  if trimmed.len() >= 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    return Some("long hex digest");
+  }
+  if trimmed.len() >= 40
+    && trimmed.chars().all(|c| {
+      c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '_' || c == '-' || c == '='
+    })
+    && !trimmed.chars().any(|c| c == ' ')
+  {
+    let alpha = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    let digit = trimmed.chars().filter(|c| c.is_ascii_digit()).count();
+    if alpha > 0 && digit > 0 {
+      return Some("long opaque token-shaped string");
+    }
+  }
+  None
+}
+
+async fn list_preferences(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+) -> impl IntoResponse {
+  let tenant = extract_tenant(&headers);
+  let preferences = state
+    .lock_preferences()
+    .get(&tenant)
+    .cloned()
+    .unwrap_or_default();
+  Json(PreferencesEnvelope { preferences })
+}
+
+async fn put_preferences(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  Json(body): Json<PreferencesEnvelope>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let mut validated: Vec<(String, serde_json::Value)> = Vec::with_capacity(body.preferences.len());
+  for (key, value) in body.preferences {
+    if !is_valid_preference_key(&key) {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!("preference key '{key}' is invalid; must match ^[a-zA-Z0-9_.\\-:]{{1,128}}$"),
+      );
+    }
+    let serialized = match serde_json::to_vec(&value) {
+      Ok(bytes) => bytes,
+      Err(err) => return error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    if serialized.len() > MAX_PREFERENCE_VALUE_BYTES {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!(
+          "preference value for '{key}' is too large ({} bytes; max {MAX_PREFERENCE_VALUE_BYTES})",
+          serialized.len()
+        ),
+      );
+    }
+    if let Some(reason) = looks_like_token(&value) {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!(
+          "preference value for '{key}' looks like a secret token ({reason}); refusing to store"
+        ),
+      );
+    }
+    validated.push((key, value));
+  }
+
+  let (tenant_snapshot, full_snapshot) = {
+    let mut guard = state.lock_preferences();
+    let tenant_map = guard.entry(tenant).or_default();
+    for (key, value) in validated {
+      tenant_map.insert(key, value);
+    }
+    (tenant_map.clone(), guard.clone())
+  };
+
+  if let Err(err) = persist_preferences_to_disk(&state.base_dir, &full_snapshot).await {
+    return error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to persist preferences: {err}"),
+    );
+  }
+
+  (
+    StatusCode::OK,
+    Json(PreferencesEnvelope {
+      preferences: tenant_snapshot,
+    }),
+  )
+    .into_response()
+}
+
+async fn persist_preferences_to_disk(
+  base_dir: &Path,
+  snapshot: &TenantPreferencesMap,
+) -> std::io::Result<()> {
+  tokio::fs::create_dir_all(base_dir).await?;
+  let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
+  let final_path = preferences_file_path(base_dir);
+  let tmp_path = base_dir.join(format!("_preferences.json.tmp.{}", Uuid::new_v4()));
+  tokio::fs::write(&tmp_path, bytes).await?;
+  tokio::fs::rename(&tmp_path, &final_path).await
+}
+
 #[derive(Debug, Deserialize)]
 struct InspectRequest {
   workflow: String,
@@ -194,12 +392,15 @@ struct ListRunsQuery {
 
 async fn list_runs(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   Query(query): Query<ListRunsQuery>,
 ) -> impl IntoResponse {
+  let tenant = extract_tenant(&headers);
   let cap = query.limit.unwrap_or(20).clamp(1, 100);
   let mut list: Vec<LocalRunRecord> = state
     .lock_runs()
     .values()
+    .filter(|e| e.record.tenant_id == tenant)
     .map(|e| e.record.clone())
     .collect();
   list.sort_by_key(|a| std::cmp::Reverse(a.started_at));
@@ -234,11 +435,30 @@ struct CreateRunRequest {
 
 async fn create_run(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   Json(req): Json<CreateRunRequest>,
 ) -> Response {
   if req.workflow.trim().is_empty() {
     return error_json(StatusCode::BAD_REQUEST, "workflow YAML cannot be empty");
   }
+  let header_tenant = extract_tenant(&headers);
+  let resolved_tenant = match req
+    .tenant_id
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+  {
+    Some(explicit) if headers.contains_key("x-yanshi-tenant") && explicit != header_tenant => {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!(
+          "request body tenant_id '{explicit}' conflicts with X-Yanshi-Tenant header '{header_tenant}'"
+        ),
+      );
+    }
+    Some(explicit) => explicit.to_string(),
+    None => header_tenant,
+  };
 
   let run_id = Uuid::new_v4();
   let run_dir = state.base_dir.join(run_id.to_string());
@@ -267,7 +487,7 @@ async fn create_run(
     id: run_id,
     workflow: req.workflow.clone(),
     status: "running".to_string(),
-    tenant_id: req.tenant_id.unwrap_or_else(|| "default".to_string()),
+    tenant_id: resolved_tenant,
     started_at: Utc::now(),
     finished_at: None,
     run_dir: Some(run_dir.display().to_string()),
@@ -964,7 +1184,7 @@ fn workflow_event_to_json(event: &WorkflowEvent) -> serde_json::Value {
   }
 }
 
-fn error_json(status: StatusCode, message: &str) -> Response {
+pub(crate) fn error_json(status: StatusCode, message: &str) -> Response {
   (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
@@ -1226,5 +1446,168 @@ nodes:
         .and_then(|v| v.to_str().ok()),
       Some("sandbox allow-scripts")
     );
+  }
+
+  #[tokio::test]
+  async fn local_engine_serves_diagnostics_without_leaking_tokens() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let base_url = start_loopback_engine(Some(temp.path().to_path_buf()))
+      .await
+      .expect("start local engine");
+
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no_proxy client");
+
+    let key = "YANSHI_API_TOKEN";
+    let previous = std::env::var(key).ok();
+    let secret = "sk-local-engine-diagnostics-secret-never-leak";
+    // SAFETY: test-local env mutation restored before assertions.
+    unsafe {
+      std::env::set_var(key, secret);
+    }
+
+    let res = client
+      .get(format!("{base_url}/v1/diagnostics"))
+      .send()
+      .await;
+
+    // SAFETY: restore env before asserting.
+    unsafe {
+      match previous {
+        Some(val) => std::env::set_var(key, val),
+        None => std::env::remove_var(key),
+      }
+    }
+
+    let res = res.expect("diagnostics request");
+    assert_eq!(res.status(), StatusCode::OK);
+    let json: serde_json::Value = res.json().await.expect("diagnostics json");
+    let status = json["status"].as_str().expect("status string");
+    assert!(matches!(status, "ok" | "warning" | "fail"));
+    let serialized = serde_json::to_string(&json).expect("serialize");
+    assert!(
+      !serialized.contains(secret),
+      "diagnostics response leaked YANSHI_API_TOKEN value"
+    );
+    assert_eq!(
+      json
+        .pointer("/environment/yanshi_api_token_set")
+        .and_then(|v| v.as_bool()),
+      Some(true)
+    );
+  }
+
+  #[tokio::test]
+  async fn local_engine_persists_tenant_preferences_and_rejects_secrets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let base_url = start_loopback_engine(Some(temp.path().to_path_buf()))
+      .await
+      .expect("start local engine");
+
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no_proxy client");
+
+    // 1. Starts empty
+    let initial: serde_json::Value = client
+      .get(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .send()
+      .await
+      .expect("get initial prefs")
+      .json()
+      .await
+      .expect("initial json");
+    assert_eq!(initial, serde_json::json!({ "preferences": {} }));
+
+    // 2. Upsert preferences for tenant `alpha`
+    let put_res = client
+      .put(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .json(&serde_json::json!({
+        "preferences": {
+          "theme": "light",
+          "ui.run-list.page-size": 50
+        }
+      }))
+      .send()
+      .await
+      .expect("put prefs");
+    assert_eq!(put_res.status(), StatusCode::OK);
+    let saved: serde_json::Value = put_res.json().await.expect("put json");
+    assert_eq!(saved["preferences"]["theme"], "light");
+    assert_eq!(saved["preferences"]["ui.run-list.page-size"], 50);
+
+    // 3. Tenant `beta` stays isolated
+    let beta: serde_json::Value = client
+      .get(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "beta")
+      .send()
+      .await
+      .expect("get beta prefs")
+      .json()
+      .await
+      .expect("beta json");
+    assert_eq!(beta, serde_json::json!({ "preferences": {} }));
+
+    // 4. Rejects token-shaped secret values and aborts batch atomically
+    let secret_attempt = client
+      .put(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .json(&serde_json::json!({
+        "preferences": {
+          "theme": "dark",
+          "leaked_token": "sk-abcdefghijklmnopqrstuvwxyz0123456789"
+        }
+      }))
+      .send()
+      .await
+      .expect("secret put");
+    assert_eq!(secret_attempt.status(), StatusCode::BAD_REQUEST);
+
+    // `theme` stays `"light"` because the rejected batch was atomic
+    let after_reject: serde_json::Value = client
+      .get(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .send()
+      .await
+      .expect("get alpha after reject")
+      .json()
+      .await
+      .expect("alpha json");
+    assert_eq!(after_reject["preferences"]["theme"], "light");
+
+    // 5. Rejects invalid key names
+    let invalid_key = client
+      .put(format!("{base_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .json(&serde_json::json!({
+        "preferences": {
+          "invalid key with spaces": true
+        }
+      }))
+      .send()
+      .await
+      .expect("invalid key put");
+    assert_eq!(invalid_key.status(), StatusCode::BAD_REQUEST);
+
+    // 6. Restart loopback engine against the same directory and verify persistence
+    let restarted_url = start_loopback_engine(Some(temp.path().to_path_buf()))
+      .await
+      .expect("restart local engine");
+    let reloaded: serde_json::Value = client
+      .get(format!("{restarted_url}/v1/preferences"))
+      .header("X-Yanshi-Tenant", "alpha")
+      .send()
+      .await
+      .expect("get reloaded prefs")
+      .json()
+      .await
+      .expect("reloaded json");
+    assert_eq!(reloaded["preferences"]["theme"], "light");
+    assert_eq!(reloaded["preferences"]["ui.run-list.page-size"], 50);
   }
 }
