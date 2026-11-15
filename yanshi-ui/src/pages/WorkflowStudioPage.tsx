@@ -352,6 +352,7 @@ export function WorkflowStudioPage({
   apiToken,
   onTokenChange,
 }: WorkflowStudioPageProps): React.ReactElement {
+  const currentRoute = useCurrentRoute();
   const [mode, setMode] = useState<StudioPosture>(() => {
     if (initialMode) return initialMode;
     const saved = readStorage(studioModeKey, 'debug');
@@ -432,6 +433,26 @@ export function WorkflowStudioPage({
   const latestSeqRef = useRef<number>(-1);
   const reconnectAttemptRef = useRef<number>(0);
   const lastAutoFocusedPauseRef = useRef<string>('');
+
+  // Sync deep-link query params (`?preset=<id>&run_id=<uuid>` or `?run=<uuid>`) across HTTP & SPA/Tauri navigation.
+  useEffect(() => {
+    if (!currentRoute.search) return;
+    const qs = new URLSearchParams(currentRoute.search);
+    const presetParam = qs.get('preset')?.trim();
+    if (presetParam) {
+      const matched = WORKFLOW_PRESETS.find((p) => p.id === presetParam);
+      if (matched) {
+        setSelectedPresetId(matched.id);
+        setYamlDraft(matched.yaml);
+      }
+    }
+    const runParam = (qs.get('run_id') ?? qs.get('run'))?.trim();
+    if (runParam && runParam !== runId) {
+      setRunId(runParam);
+      setStreamState('loading');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoute.search]);
 
   // Sync input defaults whenever `inspected.inputs` introduces new keys.
   useEffect(() => {
@@ -531,18 +552,6 @@ export function WorkflowStudioPage({
       window.clearTimeout(timer);
     };
   }, [yamlDraft, apiToken, tenantId, customBaseUrl]);
-
-  // Read `?run=<uuid>` deep link across both HTTP query and SPA/Tauri route transitions.
-  const currentRoute = useCurrentRoute();
-  useEffect(() => {
-    const params = new URLSearchParams(currentRoute.search);
-    const initialRun = params.get('run');
-    if (initialRun && initialRun !== runId) {
-      setRunId(initialRun);
-      setStreamState('loading');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoute.search]);
 
   const loadRecentRuns = useCallback(async () => {
     try {
@@ -1622,6 +1631,9 @@ export function WorkflowStudioPage({
           </div>
 
           <nav className="studio-aux-links" aria-label="辅助控制台导航">
+            <SpaLink to="/ui/notebooks" data-testid="studio-nav-notebooks">
+              📚 内容笔记本
+            </SpaLink>
             {(runId || recentRuns.length > 0) && (
               <SpaLink
                 to={buildRunCompareHref(

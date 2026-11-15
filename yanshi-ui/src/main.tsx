@@ -10,6 +10,10 @@ import { DiagnosticsPanel } from './pages/DiagnosticsPanel';
 import { HarnessSessionDetail } from './pages/HarnessSessionDetail';
 import { HarnessSessionList } from './pages/HarnessSessionList';
 import { HarnessSubmitForm } from './pages/HarnessSubmitForm';
+import {
+  NotebookWorkspacePage,
+  notebookIdFromPath,
+} from './pages/NotebookWorkspacePage';
 import { RunCreateForm } from './pages/RunCreateForm';
 import { WorkflowStudioPage } from './pages/WorkflowStudioPage';
 import { harnessSessionIdFromPath } from './lib/harness';
@@ -1161,6 +1165,19 @@ function App() {
     writeSessionStorage(tokenKey, apiToken);
   }, [apiToken]);
 
+  if (pathname === '/ui/notebooks' || pathname === '/ui/notebooks/') {
+    return <NotebookWorkspacePage apiToken={apiToken} onTokenChange={setApiToken} />;
+  }
+  const notebookId = notebookIdFromPath(pathname);
+  if (notebookId) {
+    return (
+      <NotebookWorkspacePage
+        initialNotebookId={notebookId}
+        apiToken={apiToken}
+        onTokenChange={setApiToken}
+      />
+    );
+  }
   if (pathname === '/ui/runs/new' || pathname === '/ui/runs/new/') {
     return <RunCreateForm apiToken={apiToken} onTokenChange={setApiToken} />;
   }

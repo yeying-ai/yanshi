@@ -418,6 +418,102 @@ export const RunApprovalDecisionResponseSchema = z
   .loose();
 export type RunApprovalDecisionResponse = z.infer<typeof RunApprovalDecisionResponseSchema>;
 
+// ── Content Studio Notebooks (`/v1/notebooks/*`) ─────────────────────
+
+export const NotebookSchema = z
+  .object({
+    id: z.string(),
+    tenant_id: z.string(),
+    title: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .loose();
+export type Notebook = z.infer<typeof NotebookSchema>;
+
+export const ListNotebooksEnvelopeSchema = z
+  .object({
+    notebooks: z.array(NotebookSchema),
+  })
+  .loose();
+export type ListNotebooksEnvelope = z.infer<typeof ListNotebooksEnvelopeSchema>;
+
+export const NotebookSourceSchema = z
+  .object({
+    id: z.string(),
+    notebook_id: z.string(),
+    tenant_id: z.string(),
+    kind: z.string(),
+    title: z.string(),
+    uri: z.string().nullable().optional(),
+    status: z.string(),
+    error: z.string().nullable().optional(),
+    sha256: z.string().nullable().optional(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .loose();
+export type NotebookSource = z.infer<typeof NotebookSourceSchema>;
+
+export const NotebookDetailEnvelopeSchema = z
+  .object({
+    notebook: NotebookSchema,
+    sources: z.array(NotebookSourceSchema),
+  })
+  .loose();
+export type NotebookDetailEnvelope = z.infer<typeof NotebookDetailEnvelopeSchema>;
+
+export const NotebookSearchHitSchema = z
+  .object({
+    source_id: z.string(),
+    chunk_id: z.string(),
+    content: z.string(),
+    score: z.number(),
+  })
+  .loose();
+export type NotebookSearchHit = z.infer<typeof NotebookSearchHitSchema>;
+
+export const NotebookSearchEnvelopeSchema = z
+  .object({
+    chunks: z.array(NotebookSearchHitSchema),
+  })
+  .loose();
+export type NotebookSearchEnvelope = z.infer<typeof NotebookSearchEnvelopeSchema>;
+
+export const NotebookGenerateResponseSchema = z
+  .object({
+    run_id: z.string(),
+    kind: z.string(),
+    status: z.string().optional(),
+  })
+  .loose();
+export type NotebookGenerateResponse = z.infer<typeof NotebookGenerateResponseSchema>;
+
+export const NotebookArtifactSchema = z
+  .object({
+    kind: z.string(),
+    id: z.string(),
+    run_id: z.string(),
+    node_id: z.string(),
+    name: z.string(),
+    path_or_url: z.string(),
+    mime_type: z.string().nullable().optional(),
+    created_at: z.string(),
+    tenant_id: z.string().optional(),
+    size_bytes: z.number().nullable().optional(),
+    sha256: z.string().nullable().optional(),
+  })
+  .loose();
+export type NotebookArtifact = z.infer<typeof NotebookArtifactSchema>;
+
+export const NotebookArtifactsEnvelopeSchema = z
+  .object({
+    notebook_id: z.string(),
+    artifacts: z.array(NotebookArtifactSchema),
+  })
+  .loose();
+export type NotebookArtifactsEnvelope = z.infer<typeof NotebookArtifactsEnvelopeSchema>;
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /**

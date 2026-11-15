@@ -42,6 +42,7 @@ export function SpaLink({
 }
 
 export type SubpageNavSection =
+  | 'notebooks'
   | 'console'
   | 'runs-new'
   | 'compare'
@@ -61,6 +62,7 @@ const SUBPAGE_LINKS: ReadonlyArray<{
   label: string;
   to: string;
 }> = [
+  { id: 'notebooks', label: '内容笔记本', to: '/ui/notebooks' },
   { id: 'console', label: '经典事件台', to: '/ui/console' },
   { id: 'runs-new', label: '新建运行', to: '/ui/runs/new' },
   { id: 'harness', label: 'Harness 会话', to: '/ui/harness/sessions' },
