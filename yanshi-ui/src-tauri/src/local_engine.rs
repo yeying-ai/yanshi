@@ -154,6 +154,7 @@ pub struct LocalEngineState {
   runs: Arc<Mutex<HashMap<Uuid, RunEntry>>>,
   preferences: Arc<Mutex<TenantPreferencesMap>>,
   harness: crate::local_harness::LocalHarnessState,
+  notebooks: crate::local_notebooks::LocalNotebooksState,
   base_dir: PathBuf,
 }
 
@@ -162,10 +163,12 @@ impl LocalEngineState {
     let initial_prefs = load_preferences_from_disk(&base_dir);
     let hydrated_runs = hydrate_runs_from_disk(&base_dir);
     let harness = crate::local_harness::LocalHarnessState::new(base_dir.clone());
+    let notebooks = crate::local_notebooks::LocalNotebooksState::new(base_dir.clone());
     Self {
       runs: Arc::new(Mutex::new(hydrated_runs)),
       preferences: Arc::new(Mutex::new(initial_prefs)),
       harness,
+      notebooks,
       base_dir,
     }
   }
@@ -176,6 +179,10 @@ impl LocalEngineState {
 
   pub fn harness(&self) -> &crate::local_harness::LocalHarnessState {
     &self.harness
+  }
+
+  pub fn notebooks(&self) -> &crate::local_notebooks::LocalNotebooksState {
+    &self.notebooks
   }
 
   fn lock_runs(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, RunEntry>> {
@@ -346,7 +353,7 @@ pub(crate) async fn ensure_llm_initialized() -> anyhow::Result<()> {
   INIT
     .get_or_try_init(|| async {
       load_user_dotenv();
-      Yanshi::init().await
+      Yanshi::ensure_init().await
     })
     .await?;
   Ok(())
@@ -370,6 +377,7 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
 
 pub fn build_local_router(state: LocalEngineState) -> Router {
   let harness_router = crate::local_harness::build_harness_router(state.harness.clone());
+  let notebooks_router = crate::local_notebooks::build_notebooks_router(state.clone());
   Router::new()
     .route("/health", get(health))
     .route("/v1/diagnostics", get(get_diagnostics))
@@ -398,6 +406,7 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
     .route("/v1/runs/:id/preview", get(preview_file))
     .with_state(state)
     .merge(harness_router)
+    .merge(notebooks_router)
     .layer(CorsLayer::permissive())
 }
 
@@ -890,7 +899,32 @@ async fn execute_local_flow(
     }
   }
 
-  let mut completion_notify: Option<(RunCompletionHook, String, Vec<LocalArtifactSummary>)> = None;
+  let preview_status = match &outcome {
+    Ok(pool) => {
+      if cancel_token.is_cancelled() {
+        "cancelled"
+      } else if first_pool_error(pool).is_some() {
+        "failed"
+      } else {
+        "succeeded"
+      }
+    }
+    Err(_) => {
+      if cancel_token.is_cancelled() {
+        "cancelled"
+      } else {
+        "failed"
+      }
+    }
+  };
+  let completion_hook = state
+    .lock_runs()
+    .get(&run_id)
+    .and_then(|entry| entry.on_complete.clone());
+  if let Some(hook) = completion_hook {
+    hook(run_id, preview_status, &discovered_artifacts);
+  }
+
   let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
   {
     let mut guard = state.lock_runs();
@@ -927,17 +961,11 @@ async fn execute_local_flow(
         }
       }
       let _ = write_run_meta_sync(&run_dir, entry);
-      if let Some(hook) = entry.on_complete.clone() {
-        completion_notify = Some((hook, entry.record.status.clone(), entry.artifacts.clone()));
-      }
     }
   }
 
   if let Some(ev) = synthetic_to_persist {
     let _ = append_run_event_jsonl_sync(&run_dir, &ev);
-  }
-  if let Some((hook, final_status, final_artifacts)) = completion_notify {
-    hook(run_id, &final_status, &final_artifacts);
   }
 }
 

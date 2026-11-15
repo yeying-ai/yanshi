@@ -1792,19 +1792,19 @@ async fn apply_run_failure(state: &LocalHarnessState, session_id: Uuid, err_msg:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
   use crate::local_engine::{LocalEngineState, build_local_router, start_loopback_engine};
   use std::sync::OnceLock;
   use yanshi_harness::ApprovalRisk;
   use yanshi_llm::Yanshi;
 
-  fn mock_env_lock() -> &'static tokio::sync::Mutex<()> {
+  pub(crate) fn mock_env_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
   }
 
-  async fn register_mock_model(model: &str) {
+  pub(crate) async fn register_mock_model(model: &str) {
     let _ = ensure_llm_initialized().await;
     let config_path = std::env::temp_dir().join(format!(
       "yanshi-desktop-harness-mock-{}.yml",

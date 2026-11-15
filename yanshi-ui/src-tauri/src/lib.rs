@@ -6,6 +6,8 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 pub mod local_engine;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod local_harness;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod local_notebooks;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

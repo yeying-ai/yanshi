@@ -26,6 +26,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"
 axum = "0.7"
+base64 = "0.21"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 dotenvy = "0.15"
@@ -46,6 +47,7 @@ yanshi-core = { path = "../../yanshi-core" }
 yanshi-harness = { path = "../../yanshi-harness" }
 yanshi-llm = { path = "../../yanshi-llm" }
 yanshi-memory = { path = "../../yanshi-memory" }
+yanshi-rag = { path = "../../yanshi-rag", default-features = false, features = ["html"] }
 yanshi-skills = { path = "../../yanshi-skills" }
 yanshi-tools = { path = "../../yanshi-tools" }
 
