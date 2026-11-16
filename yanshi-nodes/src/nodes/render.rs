@@ -1678,10 +1678,13 @@ impl AsyncNode for RenderVideoNode {
 
     let ffmpeg = media_tool(&self.id, "ffmpeg")?;
     let ffprobe = media_tool(&self.id, "ffprobe")?;
-    let burn = matches!(
-      inputs.get("burn_subtitles"),
-      Some(FlowValue::Json(Value::Bool(true)))
-    );
+    let burn = match inputs.get("burn_subtitles") {
+      Some(FlowValue::Json(Value::Bool(b))) => *b,
+      Some(FlowValue::Json(Value::String(s))) => {
+        matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+      }
+      _ => false,
+    };
     let (root, workdir) = media_workdirs(&self.id, "video").await?;
 
     let produced = async {

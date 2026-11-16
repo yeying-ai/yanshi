@@ -1,72 +1,248 @@
-# Technical Slide Lecture Video Generator (`render_slides` + `tts` + `render_video` + `render_document`).
+# Live-Presenter Keynote Technical Lecture Video Generator (`tech_slides_video`).
 #
-# Turns any engineering topic or source text into a Keynote/PPT-style narrated
-# 1080p technical lecture video with progressive build steps (syntax-colored
-# code snippets, architecture/decision flowcharts, pointer-linked memory
-# layouts, comparison matrices, and mind maps), synchronized SRT subtitles, an
-# interactive HTML slide player, and optional `.pptx` / `.pdf` decks.
+# End-to-end multimodal lecture studio:
+#   1. Multi-source grounding (`web_search`, optional `repo_snapshot` & `pdf_extract`)
+#   2. Structured Keynote SlideDeck + progressive step-by-step presenter script (`spoken` vs `caption`)
+#   3. Parallel D2 vector architecture diagram (`figure`), AI editorial illustrations (`text_to_image`),
+#      and optional presenter studio portrait / Veo keynote clip (`spotlight` | `pip` | `intro_outro`)
+#   4. 1920x1080 vector slide rendering with chapter opener cards, non-overlapping code callouts,
+#      spotlight rings, PiP safe zone, and global progress bar (`render_slides`)
+#   5. Parallel per-step expressive TTS (`map -> tts` with vocal `instructions`)
+#   6. Millisecond-accurate FFmpeg assembly with breathing pauses, smooth slide fades, rounded PiP
+#      presenter overlay, SRT + WebVTT subtitles (`render_video`), plus `.pptx` & `.pdf` (`render_document`)
 #
 #   yanshi workflow run examples/generators/tech_slides_video.yml \
-#     --input topic "Rust Lifetimes & Borrow Checker" \
-#     --output-dir runs/lifetimes-lecture
+#     --input topic "Rust Traits 深度讲解：零成本抽象与虚表内存模型" \
+#     --output-dir runs/traits-lecture
 name: tech_slides_video
-description: "Keynote/PPT-style 1080p technical slide lecture video with diagrams, code spotlighting, subtitles, HTML deck, and PPTX/PDF"
+description: "拟真人 PPT 演播级 1080p 技术精讲视频：支持联网/仓库/PDF 多源输入、毫秒级按步声画卡点、视线引导口播、D2 架构图与 AI 插图、聚光灯/画中画/片头出镜三模式及 PPTX/PDF 导出"
 
 inputs:
   topic:
-    description: "Technical topic to teach"
-    default: "Rust Traits 深度讲解"
+    description: "技术精讲主题"
+    default: "Rust Traits 深度讲解：零成本静态单态化与胖指针动态分发"
+  audience:
+    description: "目标听众群体"
+    default: "后端研发工程师与系统架构师"
+  narration_style:
+    description: "讲师口播风格与现场节奏"
+    default: "资深系统架构师现场 Keynote 讲演：逻辑层层递进、善用真实工程判据，自然引导听众视线聚焦屏幕左右栏代码行号与架构节点"
   source_text:
-    description: "Optional reference notes or documentation to ground the slides"
+    description: "可选补充笔记或参考文本"
     default: ""
+  source_repo:
+    description: "可选 GitHub 仓库链接或本地源码目录（自动扫描代码树与模块依赖）"
+    default: ""
+  source_pdf:
+    description: "可选论文/技术文档 PDF 路径或 arXiv 链接（自动分页提取正文）"
+    default: ""
+  enable_web_search:
+    description: "是否联网搜索最新技术细节与工程实践支撑内容"
+    default: true
   slide_count:
-    description: "Number of chapters / slides (4-10)"
+    description: "正片幻灯片章节页数（4-10）"
     default: 6
   language:
-    description: "Language for slide text and spoken narration"
+    description: "课件文字与口播语言"
     default: "中文"
   slide_theme:
-    description: "Slide visual palette: 'dark' (default developer Keynote) or 'light'"
+    description: "幻灯片配色主题：'dark'（暗色开发者演播风）或 'light'（浅色学术讲义风）"
     default: "dark"
+  presenter_mode:
+    description: "主讲人呈现模式：'spotlight'（默认全屏聚光灯）| 'pip'（右下角主讲人画中画）| 'intro_outro'（片头片尾主讲人镜头 + 正片全屏幻灯片）"
+    default: "spotlight"
+  section_cards:
+    description: "章节切换时自动插入 Keynote 风格大标题过渡卡与导语配音"
+    default: true
+  enable_d2_diagram:
+    description: "为核心机制页自动编译高精度 D2 矢量架构图"
+    default: true
+  enable_illustrations:
+    description: "为开篇引入或总结页调用文生图生成无文字概念插图"
+    default: true
   model:
-    description: "Registry name of the reasoning / chat LLM"
-    default: "gemini-4-hydrogen"
+    description: "主策划与脚本生成模型（推荐 gemini-2.5-flash / gemini-2.5-pro，兼容 qwen-plus / deepseek-v4-flash / glm-5.1 / kimi-k2.6）"
+    default: "gemini-2.5-flash"
   tts_model:
-    description: "Registry name of the TTS model"
+    description: "语音合成模型（推荐 gemini-2.5-flash-preview-tts，兼容 qwen-tts-2025-05-22 / step-tts-mini / gpt-4o-mini-tts）"
     default: "gemini-2.5-flash-preview-tts"
   voice:
-    description: "TTS narrator voice"
+    description: "主讲人音色（如 Kore / Charon / Puck，跨厂商切换时自动归一化兜底）"
     default: "Kore"
+  tts_instructions:
+    description: "TTS 演播语气导演指令（Gemini TTS 与 OpenAI TTS 原生支持，其他厂商自动忽略）"
+    default: "Speak as a seasoned, engaging systems architect delivering a live technical keynote at a brisk, natural conversational pace, with clear emphasis on technical terms and natural breathing cadence."
+  image_model:
+    description: "文生图模型（用于概念插图与主讲人形象，推荐 gemini-3.1-flash-image，兼容 wan2.5-t2i-preview / glm-image）"
+    default: "gemini-3.1-flash-image"
+  image_size:
+    description: "生成插图画面比例或尺寸"
+    default: "16:9"
+  visual_style:
+    description: "AI 插图统一视觉艺术风格（英文描述，严禁出现任何文字或字母）"
+    default: "dark slate systems-engineering architectural illustration, glowing copper-orange and cyan conduits, crisp isometric geometry, studio lighting, strictly no text, no letters, no watermark"
+  video_model:
+    description: "动态主讲人视频模型（仅在 presenter_mode 为 pip 或 intro_outro 时按需触发；置空则自动降级为高清静态演播室讲师卡）"
+    default: "veo-3.1-fast-generate-001"
+  presenter_prompt:
+    description: "主讲人演播室镜头画面提示词（仅在 pip / intro_outro 模式下使用）"
+    default: "A confident software architect speaking naturally on a modern dark developer keynote stage, subtle warm rim light and soft cyan background bokeh, waist-up framing, calm hand gesture, photorealistic 16:9, strictly no text or logos"
+  step_pause_ms:
+    description: "页内动画步之间的自然呼吸停顿时长（毫秒）"
+    default: 260
+  slide_pause_ms:
+    description: "翻页边界的自然留白时长（毫秒）"
+    default: 550
   burn_subtitles:
-    description: "Burn subtitles directly into video frames (requires ffmpeg with libass)"
+    description: "是否将半透明演播底衬字幕直接烧录进视频帧（默认 false 封装可开关软字幕轨 + .srt + .vtt）"
     default: false
   export_pptx:
-    description: "Export an editable PowerPoint (.pptx) deck via pandoc"
+    description: "导出可编辑 PowerPoint (.pptx) 课件（含高清帧与讲师逐字稿备注）"
     default: true
   export_pdf:
-    description: "Export a printable handout (.pdf) via pandoc + typst"
-    default: false
+    description: "导出高清排版讲义 (.pdf)"
+    default: true
 
 nodes:
-  - id: plan_prompt
+  - id: mode_flags
     type: template
     parameters:
+      output_format: json
       template: |
-        你是一位资深系统架构师与技术讲师。请围绕主题「{{ topic }}」设计一套包含 {{ slide_count }} 页幻灯片的硬核技术精讲课件（语言：{{ language }}，主题配色：{{ slide_theme }}）。
+        {
+          "do_search": {{ enable_web_search }},
+          "has_repo": {{ source_repo != "" }},
+          "has_pdf": {{ source_pdf != "" }},
+          "do_d2": {{ enable_d2_diagram }},
+          "is_pip": {{ presenter_mode == "pip" }},
+          "is_intro_outro": {{ presenter_mode == "intro_outro" }},
+          "need_presenter": {{ presenter_mode == "pip" or presenter_mode == "intro_outro" }},
+          "need_presenter_video": {{ (presenter_mode == "pip" or presenter_mode == "intro_outro") and video_model != "" }},
+          "source_repo": {{ source_repo | json_encode() }},
+          "source_pdf": {{ source_pdf | json_encode() }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }},
+          "video_model": {{ video_model | json_encode() }},
+          "presenter_prompt": {{ presenter_prompt | json_encode() }},
+          "burn_subtitles": {{ burn_subtitles }},
+          "pptx": {{ export_pptx }},
+          "pdf": {{ export_pdf }}
+        }
 
-        设计要求：
-        1. 拒绝空洞概念图，每页幻灯片必须使用最契合的工程可视化面板组合（`left` 必填，`right` 可选构成双栏对照）：
-           - `code`：真实可编译的核心代码片段（控制在 8-16 行内），可附带 `callouts` 行级批注；
-           - `flowchart`：编译管线、控制流或判定决策树（`nodes` + `edges`）；
-           - `memory`：栈/堆/虚表/结构体内存布局（`regions` 含字节偏移 `slots` + `pointers` 指针连线）；
-           - `table`：横向技术方案对比矩阵（用 `✓` / `✗` / `⚠` 开头标识优劣，`highlight_col` 标出主角列）；
-           - `mindmap`：全景知识结构树（`root: {"label": "...", "children": [...]}`）；
-           - `bullets`：带 `badge` 标签的结构化要点卡片（可设 `grid: true` 排成四象限）。
-        2. 每页的 `notes` 是讲师口播逐字稿（3-4 句自然流畅的口语化讲解，不要出现舞台提示词），渲染器会自动按句子拆分为分步点亮动画帧并与语音严丝合缝对齐。
-        3. 每页底部提供一句凝练的 `takeaway` 核心工程判据。
+  - id: search_query
+    type: template
+    parameters:
+      template: "{{ topic }} 底层原理 核心机制 内存模型 工程最佳实践"
+
+  - id: research
+    type: web_search
+    dependencies: ["mode_flags", "search_query"]
+    run_if: "{{ nodes.mode_flags.outputs.do_search }}"
+    input_mapping:
+      query: "{{ nodes.search_query.outputs.output }}"
+    parameters:
+      max_results: 6
+
+  - id: repo_scan
+    type: repo_snapshot
+    dependencies: ["mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.has_repo }}"
+    input_mapping:
+      source: "{{ nodes.mode_flags.outputs.source_repo }}"
+    parameters:
+      max_files: 60
+
+  - id: pdf_scan
+    type: pdf_extract
+    dependencies: ["mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.has_pdf }}"
+    input_mapping:
+      source: "{{ nodes.mode_flags.outputs.source_pdf }}"
+    parameters:
+      max_pages: 25
+
+  - id: grounded_context
+    type: template
+    dependencies: ["mode_flags"]
+    input_mapping:
+      web_md: "{{ nodes.research.outputs.markdown }}"
+      repo_md: "{{ nodes.repo_scan.outputs.markdown }}"
+      pdf_md: "{{ nodes.pdf_scan.outputs.markdown }}"
+    parameters:
+      template: |
         {% if source_text != "" %}
-        参考资料：
-        {{ source_text | truncate(length=20000) }}
+        【用户补充参考资料】
+        {{ source_text | truncate(length=10000) }}
+        {% endif %}
+        {% if repo_md is defined and repo_md %}
+        【源码仓库结构与依赖快照】
+        {{ repo_md | truncate(length=12000) }}
+        {% endif %}
+        {% if pdf_md is defined and pdf_md %}
+        【PDF 论文/技术文档摘录】
+        {{ pdf_md | truncate(length=12000) }}
+        {% endif %}
+        {% if web_md is defined and web_md %}
+        【联网检索技术资料】
+        {{ web_md | truncate(length=10000) }}
+        {% endif %}
+
+  - id: presenter_portrait
+    type: text_to_image
+    dependencies: ["mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.need_presenter }}"
+    input_mapping:
+      visual: "{{ nodes.mode_flags.outputs.presenter_prompt }}"
+      model: "{{ nodes.mode_flags.outputs.image_model }}"
+      size: "{{ nodes.mode_flags.outputs.image_size }}"
+    parameters:
+      prompt: "{{visual}}"
+
+  - id: presenter_clip
+    type: text_to_video
+    dependencies: ["mode_flags", "presenter_portrait"]
+    run_if: "{{ nodes.mode_flags.outputs.need_presenter_video }}"
+    input_mapping:
+      model: "{{ nodes.mode_flags.outputs.video_model }}"
+      image: "{{ nodes.presenter_portrait.outputs.presenter_portrait_image }}"
+    parameters:
+      prompt: "Subtle natural head nod, calm speaking lip movement, gentle keynote presenter hand gesture, steady studio camera, soft bokeh"
+      aspect_ratio: "16:9"
+      duration_seconds: 6
+
+  - id: plan_prompt
+    type: template
+    dependencies: ["grounded_context"]
+    input_mapping:
+      ref_pack: "{{ nodes.grounded_context.outputs.output }}"
+    parameters:
+      template: |
+        你是一位享誉业界的资深系统架构师与技术 Keynote 主讲人。请围绕主题「{{ topic }}」，面向「{{ audience }}」，以「{{ narration_style }}」风格，设计一套共 {{ slide_count }} 页幻灯片的演播级技术精讲课件（语言：{{ language }}，配色主题：{{ slide_theme }}）。
+
+        核心设计准则（极其重要，直接决定声画卡点与视觉表现）：
+        1. **工程级双栏可视化面板（拒绝空洞口号）**：
+           - 每页必须提供 `left` 主面板与 `right` 备选结构化面板（当未启用外部插图或处于结构化对比页时直接并排渲染）：
+             * `code`：真实可编译的核心代码（控制在 8-15 行，2 空格缩进），配合 1-3 个精炼 `callouts`（`{"line": 行号, "text": "≤8字批注", "tone": "rust|cyan|green"}`）；
+             * `flowchart`：编译流水线、调用链或决策拓扑（4-6 个 `nodes` 含简短 `sublabel`，配 `edges` 有向边说明）；
+             * `memory`：栈/堆/虚表/结构体真实字节偏移布局（`regions` 含 `slots` + `pointers` 跨区指针连线）；
+             * `table`：多方案横向对比矩阵（单元格以 `✓` / `✗` / `⚠` 开头标识优劣，设 `highlight_col` 突出主角列）；
+             * `bullets`：带 `badge` 标签的高密度架构卡片（可设 `grid: true` 排成 2×2 象限）；
+             * `mindmap`：仅用于最后一页全景知识收敛树（`root: {"label": "...", "children": [...]}`）。
+        2. **混合视觉编排（`visual_mode`）**：
+           - 全套课件挑选恰好 1 页最核心的系统架构或数据流页设为 `visual_mode: "arch_diagram"`，并在顶层 `arch_diagram_spec` 中详细描述该页 D2 架构图的分层容器、核心组件与调用边（8-12 个节点）；
+           - 挑选 1-2 页（如第 1 页破题引入或末页总结升华）设为 `visual_mode: "illustration"`，提供纯英文视觉隐喻提示词 `illustration_prompt`（严禁包含任何文字、字母或水印）与简短中文图注 `illustration_caption`；
+           - 其余硬核机制拆解页全部设为 `visual_mode: "structured_panel"`（左右双栏硬核对照，如左 `code` + 右 `memory` / `flowchart`）。
+        3. **拟真人逐动画步声画卡点脚本（`steps` 数组，每页严格 2-4 步）**：
+           - 每一步对应视频里的一个渐进点亮画面与一段独立合成的语音，必须同时给出：
+             * `caption`：屏幕底栏/字幕展示的凝练短句（≤32 字，可保留精准代码符号如 `&dyn Trait`）；
+             * `spoken`：**真人讲师现场口播稿**（1-2 句自然流畅的口语化讲解，必须包含自然的视线引导词——例如“请大家看屏幕左侧第 2 到 4 行”“注意看右边虚表里的这个函数指针”“对比表格第二列我们可以发现”——并且把生硬符号转化为自然口语读法，如把 `->` 写成“返回”、把 `&dyn` 写成“dyn 动态引用”，严禁出现括号舞台提示词）；
+             * `code_lines`：若本页含 `code` 面板，填写当前步聚光灯高亮的 `[起始行号, 结束行号]`（1-based）；
+             * `focus_ids`：若本页含 `flowchart` 或 `memory` 面板，填写当前步重点点亮的节点/槽位 `id` 列表；
+             * `left_reveal` / `right_reveal`：当前步揭晓的条目/节点数量；最后一步设 `show_takeaway: true`。
+        4. 每页提供完整的 `notes`（汇总整页讲稿供 PowerPoint 备注页使用）与一句一针见血的 `takeaway` 工程判据。
+        {% if ref_pack | trim != "" %}
+        5. 充分吸收并忠实引用以下真实技术背景资料（严禁编造虚假 API）：
+        {{ ref_pack | truncate(length=22000) }}
         {% endif %}
 
   - id: deck
@@ -76,7 +252,7 @@ nodes:
       prompt: "{{ nodes.plan_prompt.outputs.output }}"
     parameters:
       max_tokens: 16384
-      system: "You author structured JSON technical slide decks (`SlideDeck` schema). Output valid JSON only."
+      system: "你是资深系统架构师与 Keynote 演播编导，仅输出符合 SlideDeck JSON Schema 的严格合法 JSON。"
       json_schema:
         type: object
         required: [title, slides]
@@ -85,13 +261,16 @@ nodes:
           subtitle: { type: string }
           author: { type: string }
           theme: { type: string }
+          arch_diagram_spec:
+            type: string
+            description: "核心机制页的 D2 矢量架构图绘制说明（指明分层容器、组件名与有向调用边）"
           slides:
             type: array
             minItems: 1
             maxItems: 12
             items:
               type: object
-              required: [title, left, notes, takeaway]
+              required: [title, left, takeaway, notes]
               properties:
                 section: { type: string }
                 title: { type: string }
@@ -99,27 +278,175 @@ nodes:
                 left: { type: object }
                 right: { type: object }
                 split_ratio: { type: number }
+                visual_mode:
+                  type: string
+                  enum: [structured_panel, arch_diagram, illustration]
+                illustration_prompt: { type: string }
+                illustration_caption: { type: string }
                 takeaway: { type: string }
                 notes: { type: string }
+                steps:
+                  type: array
+                  minItems: 1
+                  maxItems: 5
+                  items:
+                    type: object
+                    required: [caption, spoken]
+                    properties:
+                      caption: { type: string }
+                      spoken: { type: string }
+                      left_reveal: { type: integer }
+                      right_reveal: { type: integer }
+                      code_lines:
+                        type: array
+                        items: { type: integer }
+                      focus_ids:
+                        type: array
+                        items: { type: string }
+                      show_takeaway: { type: boolean }
+
+  - id: arch_figure_desc
+    type: template
+    dependencies: ["deck"]
+    input_mapping:
+      plan: "{{ nodes.deck.outputs.output }}"
+    parameters:
+      template: |
+        为主题「{{ plan.title }}」绘制一张结构清晰、层次分明的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器与简短有向边标签，严格控制在 8-12 个节点以内，避免交叉重叠）：
+        {{ plan.arch_diagram_spec | default(value=plan.title) }}
+
+  - id: arch_figure
+    type: figure
+    dependencies: ["mode_flags", "arch_figure_desc"]
+    run_if: "{{ nodes.mode_flags.outputs.do_d2 }}"
+    input_mapping:
+      description: "{{ nodes.arch_figure_desc.outputs.output }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1600
+      max_attempts: 4
+
+  - id: illustration_jobs
+    type: template
+    dependencies: ["deck"]
+    input_mapping:
+      draft: "{{ nodes.deck.outputs.output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"items": [{% if enable_illustrations %}{% set_global first = true %}{% set_global count = 0 %}{% for s in draft.slides %}{% if s.visual_mode is defined and s.visual_mode == "illustration" and s.illustration_prompt is defined and s.illustration_prompt != "" and count < 3 %}{% if not first %},{% endif %}{% set_global first = false %}{% set_global count = count + 1 %}{% set full_prompt = s.illustration_prompt ~ ". Style: " ~ visual_style %}{"slide_index": {{ loop.index0 }}, "visual": {{ full_prompt | json_encode() }}, "caption": {{ s.illustration_caption | default(value=s.title) | json_encode() }}, "image_model": {{ image_model | json_encode() }}, "image_size": {{ image_size | json_encode() }}}{% endif %}{% endfor %}{% endif %}]}
+
+  - id: illustrations
+    type: map
+    dependencies: ["illustration_jobs"]
+    input_mapping:
+      input_list: "{{ nodes.illustration_jobs.outputs.items }}"
+    parameters:
+      parallel: true
+      max_concurrent: 3
+      template:
+        - id: paint
+          type: text_to_image
+          input_mapping:
+            visual: "{{ item.visual }}"
+            model: "{{ item.image_model }}"
+            size: "{{ item.image_size }}"
+          parameters:
+            prompt: "{{visual}}"
+
+  - id: final_deck_spec
+    type: template
+    dependencies: ["deck", "illustration_jobs", "illustrations"]
+    input_mapping:
+      draft: "{{ nodes.deck.outputs.output }}"
+      arch_png: "{{ nodes.arch_figure.outputs.arch_figure_png }}"
+      jobs: "{{ nodes.illustration_jobs.outputs.items }}"
+      painted: "{{ nodes.illustrations.outputs.results }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deck": {
+          "title": {{ draft.title | json_encode() }},
+          "subtitle": {{ draft.subtitle | default(value="") | json_encode() }},
+          "author": {{ draft.author | default(value="Yanshi Keynote Studio") | json_encode() }},
+          "theme": {{ slide_theme | json_encode() }},
+          "slides": [
+            {% for s in draft.slides %}{% set idx = loop.index0 %}{% set vmode = s.visual_mode | default(value="structured_panel") %}{% set_global img_src = "" %}{% set_global img_title = "" %}{% set_global img_cap = "" %}{% if vmode == "arch_diagram" and arch_png is defined and arch_png %}{% set_global img_src = arch_png %}{% set_global img_title = "核心系统架构图 (D2)" %}{% set_global img_cap = s.title %}{% elif vmode == "illustration" %}{% for j in jobs %}{% if j.slide_index == idx %}{% set r = painted | nth(n=loop.index0) %}{% if r.paint and r.paint.Ok %}{% set_global img_src = r.paint.Ok.paint_image.path %}{% set_global img_title = "技术概念视觉隐喻" %}{% set_global img_cap = j.caption %}{% endif %}{% endif %}{% endfor %}{% endif %}{
+              "section": {{ s.section | default(value="") | json_encode() }},
+              "title": {{ s.title | json_encode() }},
+              "subtitle": {{ s.subtitle | default(value="") | json_encode() }},
+              "left": {{ s.left | json_encode() }},
+              {% if img_src != "" %}"right": {"kind": "image", "title": {{ img_title | json_encode() }}, "src": {{ img_src | json_encode() }}, "caption": {{ img_cap | json_encode() }}},{% elif s.right is defined and s.right %}"right": {{ s.right | json_encode() }},{% endif %}
+              "split_ratio": {{ s.split_ratio | default(value=0.52) | json_encode() }},
+              "takeaway": {{ s.takeaway | default(value="") | json_encode() }},
+              "notes": {{ s.notes | default(value="") | json_encode() }}{% if s.steps is defined and s.steps %},
+              "steps": {{ s.steps | json_encode() }}{% endif %}
+            }{% if not loop.last %},{% endif %}{% endfor %}
+          ]
+        }}
 
   - id: slides
     type: render_slides
-    dependencies: ["deck"]
+    dependencies: ["final_deck_spec", "mode_flags"]
     input_mapping:
-      deck: "{{ nodes.deck.outputs.output }}"
+      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
+      pip_safe_zone: "{{ nodes.mode_flags.outputs.is_pip }}"
+      takeaway_only_bar: "{{ nodes.mode_flags.outputs.burn_subtitles }}"
     parameters:
       width: 1920
       progressive: true
 
   - id: tts_items
     type: template
-    dependencies: ["slides"]
+    dependencies: ["slides", "final_deck_spec", "mode_flags"]
     input_mapping:
-      groups: "{{ nodes.slides.outputs.slides_frames }}"
+      beats: "{{ nodes.slides.outputs.slides_steps }}"
+      plan: "{{ nodes.final_deck_spec.outputs.deck }}"
+      is_intro_outro: "{{ nodes.mode_flags.outputs.is_intro_outro }}"
+      p_img: "{{ nodes.presenter_portrait.outputs.presenter_portrait_image }}"
+      p_vid: "{{ nodes.presenter_clip.outputs.presenter_clip_video }}"
     parameters:
       output_format: json
       template: |
-        {"items": [{% for g in groups %}{"narration": {{ g.notes | json_encode() }}, "tts_model": {{ tts_model | json_encode() }}, "voice": {{ voice | json_encode() }}}{% if not loop.last %},{% endif %}{% endfor %}]}
+        {% set host_vid = p_vid | default(value="") %}{% set host_img = p_img | default(value="") %}{% set has_host = is_intro_outro and (host_vid != "" or host_img != "") %}{% set intro_spoken = "大家好，欢迎来到《" ~ plan.title ~ "》技术精讲。今天我们将从核心设计动机出发，结合底层代码与架构模型，一步步拆解这套关键工程机制。" %}{% set intro_cap = plan.title ~ " · 主讲开场导言" %}{% set outro_spoken = "以上就是《" ~ plan.title ~ "》的核心脉络与工程判据复盘。希望这套底层拆解能直接助力你的日常架构实践，感谢观看，我们下期再见。" %}{"items": [
+          {% if has_host %}{
+            "narration": {{ intro_spoken | json_encode() }},
+            "caption": {{ intro_cap | json_encode() }},
+            "image": {{ host_img | json_encode() }},
+            "video": {{ host_vid | json_encode() }},
+            "is_slide_start": true,
+            "is_slide_end": true,
+            "hide_pip": true,
+            "tts_model": {{ tts_model | json_encode() }},
+            "voice": {{ voice | json_encode() }},
+            "instructions": {{ tts_instructions | json_encode() }}
+          },{% endif %}
+          {% for b in beats %}{% set beat_spoken = b.spoken | default(value=b.caption) %}{
+            "narration": {{ beat_spoken | json_encode() }},
+            "caption": {{ b.caption | json_encode() }},
+            "image": {{ b.image | json_encode() }},
+            "video": "",
+            "is_slide_start": {{ b.is_slide_start | json_encode() }},
+            "is_slide_end": {{ b.is_slide_end | json_encode() }},
+            "hide_pip": false,
+            "tts_model": {{ tts_model | json_encode() }},
+            "voice": {{ voice | json_encode() }},
+            "instructions": {{ tts_instructions | json_encode() }}
+          }{% if not loop.last or has_host %},{% endif %}{% endfor %}
+          {% if has_host %}{
+            "narration": {{ outro_spoken | json_encode() }},
+            "caption": "核心脉络复盘与工程结语",
+            "image": {{ host_img | json_encode() }},
+            "video": {{ host_vid | json_encode() }},
+            "is_slide_start": true,
+            "is_slide_end": true,
+            "hide_pip": true,
+            "tts_model": {{ tts_model | json_encode() }},
+            "voice": {{ voice | json_encode() }},
+            "instructions": {{ tts_instructions | json_encode() }}
+          }{% endif %}
+        ]}
 
   - id: narrate
     type: map
@@ -128,7 +455,7 @@ nodes:
       input_list: "{{ nodes.tts_items.outputs.items }}"
     parameters:
       parallel: true
-      max_concurrent: 3
+      max_concurrent: 4
       template:
         - id: say
           type: tts
@@ -136,37 +463,53 @@ nodes:
             input_template: "{{ item.narration }}"
             model: "{{ item.tts_model }}"
             voice: "{{ item.voice }}"
+            instructions: "{{ item.instructions }}"
+          parameters:
+            response_format: wav
 
   - id: cut
     type: template
-    dependencies: ["slides", "narrate"]
+    dependencies: ["tts_items", "narrate", "mode_flags"]
     input_mapping:
-      groups: "{{ nodes.slides.outputs.slides_frames }}"
+      beats: "{{ nodes.tts_items.outputs.items }}"
       voiced: "{{ nodes.narrate.outputs.results }}"
+      is_pip: "{{ nodes.mode_flags.outputs.is_pip }}"
+      p_img: "{{ nodes.presenter_portrait.outputs.presenter_portrait_image }}"
+      p_vid: "{{ nodes.presenter_clip.outputs.presenter_clip_video }}"
     parameters:
       output_format: json
       template: |
-        {"scenes": [{% for g in groups %}{% set r = voiced | nth(n=loop.index0) %}{"audio": {{ r.say.Ok.say_output.path | json_encode() }}, "caption": {{ g.notes | json_encode() }}, "frames": {{ g.frames | json_encode() }}}{% if not loop.last %},{% endif %}{% endfor %}]}
+        {% set pip_v = p_vid | default(value="") %}{% set pip_i = p_img | default(value="") %}{
+          "pip_video": {% if is_pip and pip_v != "" %}{{ pip_v | json_encode() }}{% else %}""{% endif %},
+          "pip_image": {% if is_pip and pip_i != "" %}{{ pip_i | json_encode() }}{% else %}""{% endif %},
+          "scenes": [
+            {% for b in beats %}{% set r = voiced | nth(n=loop.index0) %}{
+              "audio": {{ r.say.Ok.say_output.path | json_encode() }},
+              "caption": {{ b.caption | json_encode() }},
+              {% if b.video != "" %}"video": {{ b.video | json_encode() }},{% else %}"image": {{ b.image | json_encode() }},{% endif %}
+              "is_slide_start": {{ b.is_slide_start | json_encode() }},
+              "is_slide_end": {{ b.is_slide_end | json_encode() }},
+              "hide_pip": {{ b.hide_pip | json_encode() }}
+            }{% if not loop.last %},{% endif %}{% endfor %}
+          ]
+        }
 
   - id: film
     type: render_video
     dependencies: ["cut"]
     input_mapping:
       scenes: "{{ nodes.cut.outputs.scenes }}"
+      pip_video: "{{ nodes.cut.outputs.pip_video }}"
+      pip_image: "{{ nodes.cut.outputs.pip_image }}"
     parameters:
       width: 1920
       height: 1080
-
-  - id: doc_opts
-    type: template
-    parameters:
-      output_format: json
-      template: '{"pptx": {{ export_pptx }}, "pdf": {{ export_pdf }}}'
+      transition: fade
 
   - id: deck_pptx
     type: render_document
-    dependencies: ["slides", "doc_opts"]
-    run_if: "{{ nodes.doc_opts.outputs.pptx }}"
+    dependencies: ["slides", "mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.pptx }}"
     input_mapping:
       markdown: "{{ nodes.slides.outputs.slides_markdown }}"
     parameters:
@@ -174,8 +517,8 @@ nodes:
 
   - id: deck_pdf
     type: render_document
-    dependencies: ["slides", "doc_opts"]
-    run_if: "{{ nodes.doc_opts.outputs.pdf }}"
+    dependencies: ["slides", "mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.pdf }}"
     input_mapping:
       markdown: "{{ nodes.slides.outputs.slides_markdown }}"
     parameters:
@@ -183,24 +526,36 @@ nodes:
 
   - id: deliverable
     type: template
-    dependencies: ["deck", "film", "slides"]
+    dependencies: ["final_deck_spec", "film", "slides"]
     input_mapping:
-      plan: "{{ nodes.deck.outputs.output }}"
+      plan: "{{ nodes.final_deck_spec.outputs.deck }}"
       mp4: "{{ nodes.film.outputs.film_output }}"
       srt: "{{ nodes.film.outputs.film_subtitles }}"
+      vtt: "{{ nodes.film.outputs.film_vtt }}"
       seconds: "{{ nodes.film.outputs.film_seconds }}"
       html: "{{ nodes.slides.outputs.slides_html }}"
+      arch_svg: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
+      pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_output }}"
+      pdf: "{{ nodes.deck_pdf.outputs.deck_pdf_output }}"
     parameters:
       output_format: json
       template: |
         {"deliverable": {
           "kind": "video_overview",
           "title": {{ plan.title | json_encode() }},
-          "content": {"slides": {{ plan.slides | json_encode() }}, "seconds": {{ seconds | json_encode() }}},
+          "content": {
+            "slides": {{ plan.slides | json_encode() }},
+            "seconds": {{ seconds | json_encode() }},
+            "presenter_mode": {{ presenter_mode | json_encode() }}
+          },
           "citations": [],
           "files": [
             {"node_id": "film", "name": {{ mp4 | split(pat="/") | last | json_encode() }}, "mime_type": "video/mp4", "role": "primary"},
-            {"node_id": "film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"},
-            {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}
+            {"node_id": "film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"}{% if vtt is defined and vtt %},
+            {"node_id": "film", "name": {{ vtt | split(pat="/") | last | json_encode() }}, "mime_type": "text/vtt", "role": "asset"}{% endif %},
+            {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if arch_svg is defined and arch_svg %},
+            {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% if pptx is defined and pptx %},
+            {"node_id": "deck_pptx", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
+            {"node_id": "deck_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}

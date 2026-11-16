@@ -10,8 +10,10 @@ describe('inspectYamlLocally', () => {
     const res = inspectYamlLocally(TECH_SLIDES_VIDEO_YAML);
     expect(res.valid).toBe(true);
     expect(res.name).toBe('tech_slides_video');
-    expect(res.nodes.length).toBe(11);
+    expect(res.nodes.length).toBe(23);
     expect(res.inputs.find((i) => i.name === 'slide_count')?.kind).toBe('number');
+    expect(res.inputs.find((i) => i.name === 'step_pause_ms')?.kind).toBe('number');
+    expect(res.inputs.find((i) => i.name === 'presenter_mode')?.kind).toBe('string');
     expect(res.inputs.find((i) => i.name === 'export_pptx')?.kind).toBe('boolean');
 
     const narrate = res.nodes.find((n) => n.id === 'narrate');
@@ -19,7 +21,8 @@ describe('inspectYamlLocally', () => {
     expect(narrate?.sub_nodes?.[0].type).toBe('tts');
 
     expect(res.edges.some((e) => e.kind === 'condition' && e.to === 'deck_pptx')).toBe(true);
-    expect(res.levels.length).toBeGreaterThanOrEqual(5);
+    expect(res.edges.some((e) => e.kind === 'condition' && e.to === 'presenter_portrait')).toBe(true);
+    expect(res.levels.length).toBeGreaterThanOrEqual(6);
   });
 
   it('extracts conditional edges for instant_step_debug_demo', () => {

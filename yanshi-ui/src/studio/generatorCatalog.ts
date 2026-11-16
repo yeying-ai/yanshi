@@ -98,8 +98,8 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
   },
   {
     id: 'tech_slides_video',
-    title: 'PPT 级技术精讲视频生成',
-    subtitle: '代码高亮/内存布局/对比矩阵幻灯片 → 并行 TTS 配音 → 1080p 视频 + PPTX/PDF',
+    title: '拟真人 PPT 演播级技术精讲视频 (Keynote Presenter Video)',
+    subtitle: '联网/仓库/PDF 多源支撑 → 视线引导口播与 D2/AI 插图幻灯片 → 毫秒级按步配音 + 聚光灯/画中画三模式 1080p 视频 + PPTX/PDF',
     badge: '旗舰工作流',
     category: '课件与视频',
     yaml: techSlidesVideoYaml,

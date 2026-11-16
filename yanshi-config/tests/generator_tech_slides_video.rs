@@ -1,7 +1,9 @@
 //! End-to-end test for `examples/generators/tech_slides_video.yml`:
-//! LLM structured `SlideDeck` → `render_slides` (progressive 1080p PNGs +
-//! Pandoc Markdown + HTML player) → `tts` → `render_video` (multi-frame
-//! progressive scenes) + `render_document` (`.pptx`) → `Deliverable`.
+//! LLM structured `SlideDeck` (with decoupled `spoken` sightline cues + `caption`)
+//! → `render_slides` (section opener cards + progressive 1080p PNGs + PiP safe zone +
+//! Pandoc Markdown + HTML player) → per-step `tts` → `render_video` (step/slide
+//! breathing pauses + smooth slide fades + rounded PiP presenter overlay + SRT/VTT)
+//! + `render_document` (`.pptx`) → `Deliverable`.
 
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -14,7 +16,7 @@ use yanshi_config::executor::{
 use yanshi_core::{FlowExecutionConfig, FlowExt, value::FlowValue};
 
 #[tokio::test]
-async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
+async fn tech_slides_video_generator_produces_1080p_mp4_pip_pptx_and_html_player() {
   for bin in ["ffmpeg", "ffprobe", "pandoc"] {
     if yanshi_nodes::common::sandboxed::find_tool(bin).is_none() {
       eprintln!("skipping: {bin} is not installed");
@@ -27,7 +29,7 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
   let registry = dir.join("models.yml");
   std::fs::write(
     &registry,
-    "models:\n  mock-model:\n    vendor: mock\n    type: text\n    model_id: mock-model\n  mock-tts:\n    vendor: mock\n    type: tts\n    model_id: mock-tts\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
+    "models:\n  mock-model:\n    vendor: mock\n    type: text\n    model_id: mock-model\n  mock-tts:\n    vendor: mock\n    type: tts\n    model_id: mock-tts\n  mock-image:\n    vendor: mock\n    type: text_to_image\n    model_id: mock-image\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
   )
   .expect("registry");
 
@@ -41,7 +43,8 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
         "left": {
           "kind": "code",
           "language": "rust",
-          "code": "pub trait Summary {\n  fn summarize(&self) -> String;\n}"
+          "code": "pub trait Summary {\n  fn summarize(&self) -> String;\n}\n\npub fn notify<T: Summary>(item: &T) {\n  println!(\"{}\", item.summarize());\n}",
+          "callouts": [{"line": 1, "text": "正交能力契约", "tone": "rust"}]
         },
         "right": {
           "kind": "flowchart",
@@ -52,8 +55,44 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
           ],
           "edges": [{"from": "t", "to": "s", "label": "impl"}]
         },
+        "visual_mode": "structured_panel",
         "takeaway": "数据布局与行为契约正交解耦。",
-        "notes": "首先定义 Summary 契约。随后任意类型可独立实现该能力。"
+        "notes": "首先定义 Summary 契约。随后任意类型可独立实现该能力。",
+        "steps": [
+          {
+            "caption": "声明 Summary 共享行为契约",
+            "spoken": "请大家先看屏幕左侧第一到第三行，这里声明了不含任何数据字段的 Summary 契约。",
+            "code_lines": [1, 3],
+            "focus_ids": ["t"]
+          },
+          {
+            "caption": "编译期泛型静态单态化调用",
+            "spoken": "再往下看第五行，泛型函数通过编译期单态化实现零虚表开销调用。",
+            "code_lines": [5, 7],
+            "focus_ids": ["s"],
+            "show_takeaway": true
+          }
+        ]
+      },
+      {
+        "section": "02 判据",
+        "title": "静态分发 vs 动态分发选型",
+        "left": {
+          "kind": "bullets",
+          "items": [
+            {"badge": "Static", "heading": "热路径泛型", "body": "支持跨函数 LLVM 内联优化"}
+          ]
+        },
+        "visual_mode": "structured_panel",
+        "takeaway": "热路径优先泛型单态化，异构容器按需使用胖指针。",
+        "notes": "最后总结两者的核心工程选型边界。",
+        "steps": [
+          {
+            "caption": "热路径优先静态单态化",
+            "spoken": "翻到第二章，我们在热路径循环中优先采用静态单态化以解锁内联优化。",
+            "show_takeaway": true
+          }
+        ]
       }
     ]
   });
@@ -79,6 +118,13 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
   let mut inputs: HashMap<String, FlowValue> = [
     ("model", json!("mock-model")),
     ("tts_model", json!("mock-tts")),
+    ("image_model", json!("mock-image")),
+    ("video_model", json!("")),
+    ("presenter_mode", json!("pip")),
+    ("enable_web_search", json!(false)),
+    ("enable_d2_diagram", json!(false)),
+    ("enable_illustrations", json!(false)),
+    ("section_cards", json!(true)),
     ("export_pptx", json!(true)),
     ("export_pdf", json!(false)),
   ]
@@ -105,6 +151,10 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
   let FlowValue::File { path: mp4_path, .. } = &film["film_output"] else {
     panic!("expected mp4 file");
   };
+  assert!(
+    matches!(film.get("film_vtt"), Some(FlowValue::File { .. })),
+    "expected WebVTT subtitle artifact alongside SRT"
+  );
   let probe = std::process::Command::new("ffprobe")
     .args([
       "-v",
@@ -147,5 +197,10 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pptx_and_html_player() {
   };
   let deliverable = Deliverable::from_value(val.clone()).expect("valid Deliverable");
   assert_eq!(deliverable.kind, DeliverableKind::VideoOverview);
-  assert_eq!(deliverable.files.len(), 3);
+  assert_eq!(val["content"]["presenter_mode"], "pip");
+  assert!(
+    deliverable.files.len() >= 5,
+    "expected mp4 + srt + vtt + html + pptx in deliverable: {:?}",
+    deliverable.files
+  );
 }

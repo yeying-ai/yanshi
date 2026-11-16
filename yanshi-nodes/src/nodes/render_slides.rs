@@ -3066,6 +3066,18 @@ fn input_err(node: &str, msg: impl std::fmt::Display) -> YanshiError {
   }
 }
 
+fn input_bool(inputs: &AsyncNodeInputs, key: &str, default: bool) -> bool {
+  match inputs.get(key) {
+    Some(FlowValue::Json(Value::Bool(b))) => *b,
+    Some(FlowValue::Json(Value::String(s))) => match s.trim().to_ascii_lowercase().as_str() {
+      "true" | "1" | "yes" => true,
+      "false" | "0" | "no" => false,
+      _ => default,
+    },
+    _ => default,
+  }
+}
+
 #[async_trait]
 impl AsyncNode for RenderSlidesNode {
   async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
@@ -3099,22 +3111,10 @@ impl AsyncNode for RenderSlidesNode {
         .unwrap_or(1920),
       _ => 1920,
     };
-    let progressive = match inputs.get("progressive") {
-      Some(FlowValue::Json(Value::Bool(b))) => *b,
-      _ => true,
-    };
-    let section_cards = match inputs.get("section_cards") {
-      Some(FlowValue::Json(Value::Bool(b))) => *b,
-      _ => false,
-    };
-    let pip_safe_zone = match inputs.get("pip_safe_zone") {
-      Some(FlowValue::Json(Value::Bool(b))) => *b,
-      _ => false,
-    };
-    let takeaway_only_bar = match inputs.get("takeaway_only_bar") {
-      Some(FlowValue::Json(Value::Bool(b))) => *b,
-      _ => false,
-    };
+    let progressive = input_bool(inputs, "progressive", true);
+    let section_cards = input_bool(inputs, "section_cards", false);
+    let pip_safe_zone = input_bool(inputs, "pip_safe_zone", false);
+    let takeaway_only_bar = input_bool(inputs, "takeaway_only_bar", false);
 
     let mut sections: Vec<String> = Vec::new();
     for (idx, s) in deck.slides.iter().enumerate() {
