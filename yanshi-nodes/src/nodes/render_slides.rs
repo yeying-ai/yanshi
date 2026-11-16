@@ -303,26 +303,26 @@ pub struct MemPointer {
 }
 
 #[derive(Clone, Copy)]
-struct Palette {
-  bg: &'static str,
-  surface: &'static str,
-  surface_alt: &'static str,
-  code_bg: &'static str,
-  border: &'static str,
-  text: &'static str,
-  text_sub: &'static str,
-  text_muted: &'static str,
-  accent: &'static str,
-  cyan: &'static str,
-  green: &'static str,
-  amber: &'static str,
-  violet: &'static str,
-  rose: &'static str,
-  dark: bool,
+pub(crate) struct Palette {
+  pub(crate) bg: &'static str,
+  pub(crate) surface: &'static str,
+  pub(crate) surface_alt: &'static str,
+  pub(crate) code_bg: &'static str,
+  pub(crate) border: &'static str,
+  pub(crate) text: &'static str,
+  pub(crate) text_sub: &'static str,
+  pub(crate) text_muted: &'static str,
+  pub(crate) accent: &'static str,
+  pub(crate) cyan: &'static str,
+  pub(crate) green: &'static str,
+  pub(crate) amber: &'static str,
+  pub(crate) violet: &'static str,
+  pub(crate) rose: &'static str,
+  pub(crate) dark: bool,
 }
 
 impl Palette {
-  fn from_theme(theme: Option<&str>) -> Self {
+  pub(crate) fn from_theme(theme: Option<&str>) -> Self {
     match theme.unwrap_or("dark") {
       "light" => Self {
         bg: "#F8FAFC",
@@ -361,7 +361,7 @@ impl Palette {
     }
   }
 
-  fn tone_color(&self, tone: Option<&str>, fallback_idx: usize) -> &'static str {
+  pub(crate) fn tone_color(&self, tone: Option<&str>, fallback_idx: usize) -> &'static str {
     match tone.unwrap_or("") {
       "rust" | "orange" | "accent" => self.accent,
       "blue" | "cyan" | "sky" => self.cyan,
@@ -384,7 +384,7 @@ impl Palette {
   }
 }
 
-fn xml_escape(raw: &str) -> String {
+pub(crate) fn xml_escape(raw: &str) -> String {
   let mut out = String::with_capacity(raw.len() + 8);
   for ch in raw.chars() {
     match ch {
@@ -409,7 +409,7 @@ fn is_wide_char(c: char) -> bool {
     || u >= 0x1F300
 }
 
-fn char_px(c: char, font_size: f32, mono: bool) -> f32 {
+pub(crate) fn char_px(c: char, font_size: f32, mono: bool) -> f32 {
   if is_wide_char(c) {
     font_size * 1.03
   } else if mono {
@@ -423,12 +423,12 @@ fn char_px(c: char, font_size: f32, mono: bool) -> f32 {
   }
 }
 
-fn measure_px(text: &str, font_size: f32, mono: bool) -> f32 {
+pub(crate) fn measure_px(text: &str, font_size: f32, mono: bool) -> f32 {
   text.chars().map(|c| char_px(c, font_size, mono)).sum()
 }
 
 /// Wrap CJK and Latin mixed text cleanly within `max_px`, clamping to `max_lines`.
-fn wrap_text(text: &str, max_px: f32, font_size: f32, max_lines: usize) -> Vec<String> {
+pub(crate) fn wrap_text(text: &str, max_px: f32, font_size: f32, max_lines: usize) -> Vec<String> {
   if max_lines == 0 {
     return Vec::new();
   }
@@ -1084,11 +1084,11 @@ pub fn render_slide_svg_with_options(
 }
 
 #[derive(Clone, Copy)]
-struct Rect {
-  x: f32,
-  y: f32,
-  w: f32,
-  h: f32,
+pub(crate) struct Rect {
+  pub(crate) x: f32,
+  pub(crate) y: f32,
+  pub(crate) w: f32,
+  pub(crate) h: f32,
 }
 
 fn render_top_nav(
@@ -1741,7 +1741,7 @@ fn find_line_comment_start(line: &str) -> Option<usize> {
   None
 }
 
-fn highlight_code_spans(line: &str) -> String {
+pub(crate) fn tokenize_code_line(line: &str) -> Vec<(String, &'static str)> {
   const KEYWORDS: &[&str] = &[
     "pub",
     "fn",
@@ -1821,7 +1821,7 @@ fn highlight_code_spans(line: &str) -> String {
     None => (line, None),
   };
 
-  let mut out = String::new();
+  let mut tokens = Vec::new();
   let chars: Vec<char> = code_part.chars().collect();
   let mut i = 0;
   while i < chars.len() {
@@ -1834,8 +1834,7 @@ fn highlight_code_spans(line: &str) -> String {
       if i < chars.len() {
         i += 1;
       }
-      let attr: String = chars[start..i].iter().collect();
-      let _ = write!(out, "<tspan fill=\"#D2A8FF\">{}</tspan>", xml_escape(&attr));
+      tokens.push((chars[start..i].iter().collect(), "#D2A8FF"));
     } else if c == '"' {
       let start = i;
       i += 1;
@@ -1846,8 +1845,7 @@ fn highlight_code_spans(line: &str) -> String {
         }
         i += 1;
       }
-      let lit: String = chars[start..i].iter().collect();
-      let _ = write!(out, "<tspan fill=\"#A5D6FF\">{}</tspan>", xml_escape(&lit));
+      tokens.push((chars[start..i].iter().collect(), "#A5D6FF"));
     } else if c.is_ascii_alphabetic() || c == '_' {
       let start = i;
       while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
@@ -1863,18 +1861,13 @@ fn highlight_code_spans(line: &str) -> String {
       } else {
         "#E2E8F0"
       };
-      let _ = write!(
-        out,
-        "<tspan fill=\"{color}\">{}</tspan>",
-        xml_escape(&ident)
-      );
+      tokens.push((ident, color));
     } else if c.is_ascii_digit() {
       let start = i;
       while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
         i += 1;
       }
-      let num: String = chars[start..i].iter().collect();
-      let _ = write!(out, "<tspan fill=\"#79C0FF\">{}</tspan>", xml_escape(&num));
+      tokens.push((chars[start..i].iter().collect(), "#79C0FF"));
     } else {
       let start = i;
       while i < chars.len()
@@ -1885,31 +1878,33 @@ fn highlight_code_spans(line: &str) -> String {
       {
         i += 1;
       }
-      let sym: String = chars[start..i].iter().collect();
-      let _ = write!(out, "<tspan fill=\"#94A3B8\">{}</tspan>", xml_escape(&sym));
+      tokens.push((chars[start..i].iter().collect(), "#94A3B8"));
     }
   }
   if let Some(cmt) = comment_part {
-    let _ = write!(out, "<tspan fill=\"#6E7681\">{}</tspan>", xml_escape(cmt));
+    tokens.push((cmt.to_string(), "#6E7681"));
+  }
+  tokens
+}
+
+fn highlight_code_spans(line: &str) -> String {
+  let mut out = String::new();
+  for (tok, color) in tokenize_code_line(line) {
+    let _ = write!(out, "<tspan fill=\"{color}\">{}</tspan>", xml_escape(&tok));
   }
   out
 }
 
 // ── Panel 3: Architecture / Flowchart Diagram ───────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn render_flowchart(
-  svg: &mut String,
+pub(crate) fn layout_flowchart_boxes(
   r: Rect,
   direction: &str,
   nodes: &[FlowNode],
   edges: &[FlowEdge],
-  reveal: Option<usize>,
-  focus_ids: &[String],
-  p: &Palette,
-) {
+) -> HashMap<String, Rect> {
   if nodes.is_empty() {
-    return;
+    return HashMap::new();
   }
   let lr = direction.eq_ignore_ascii_case("LR");
   let any_explicit = nodes.iter().any(|n| n.col.is_some() || n.row.is_some());
@@ -1988,7 +1983,7 @@ fn render_flowchart(
   let start_x = r.x + ((r.w - used_w) / 2.0).max(0.0);
   let start_y = r.y + ((r.h - used_h) / 2.0).max(0.0);
 
-  let mut boxes: HashMap<&str, Rect> = HashMap::new();
+  let mut boxes: HashMap<String, Rect> = HashMap::new();
   for (n, &(c, rw)) in nodes.iter().zip(&coords) {
     let cols_in_row = row_counts.get(&rw).copied().unwrap_or(1).max(1);
     let row_used_w = cell_w * cols_in_row as f32 + gap_x * (cols_in_row.saturating_sub(1) as f32);
@@ -1998,7 +1993,7 @@ fn render_flowchart(
       start_x
     };
     boxes.insert(
-      n.id.as_str(),
+      n.id.clone(),
       Rect {
         x: row_start_x + c as f32 * (cell_w + gap_x),
         y: start_y + rw as f32 * (cell_h + gap_y),
@@ -2007,6 +2002,24 @@ fn render_flowchart(
       },
     );
   }
+  boxes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_flowchart(
+  svg: &mut String,
+  r: Rect,
+  direction: &str,
+  nodes: &[FlowNode],
+  edges: &[FlowEdge],
+  reveal: Option<usize>,
+  focus_ids: &[String],
+  p: &Palette,
+) {
+  if nodes.is_empty() {
+    return;
+  }
+  let boxes = layout_flowchart_boxes(r, direction, nodes, edges);
 
   let visible_n = reveal.unwrap_or(nodes.len());
   let visible_ids: std::collections::HashSet<&str> = nodes
@@ -2018,7 +2031,7 @@ fn render_flowchart(
   // Pass 1: draw edge curves beneath boxes so arrowheads land cleanly at box borders.
   let mut pending_labels: Vec<(f32, f32, f32, String)> = Vec::new();
   for edge in edges {
-    let (Some(&a), Some(&b)) = (boxes.get(edge.from.as_str()), boxes.get(edge.to.as_str())) else {
+    let (Some(&a), Some(&b)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
       continue;
     };
     let active = visible_ids.contains(edge.from.as_str()) && visible_ids.contains(edge.to.as_str());
@@ -2049,7 +2062,7 @@ fn render_flowchart(
 
   // Pass 2: draw node boxes.
   for (idx, n) in nodes.iter().enumerate() {
-    let Some(&nb) = boxes.get(n.id.as_str()) else {
+    let Some(&nb) = boxes.get(&n.id) else {
       continue;
     };
     let color = p.tone_color(n.tone.as_deref(), idx);
@@ -2222,7 +2235,7 @@ fn flowchart_edge_geom(a: Rect, b: Rect) -> (String, (f32, f32)) {
   }
 }
 
-fn box_anchor_pair(a: Rect, b: Rect) -> ((f32, f32), (f32, f32)) {
+pub(crate) fn box_anchor_pair(a: Rect, b: Rect) -> ((f32, f32), (f32, f32)) {
   let acx = a.x + a.w / 2.0;
   let acy = a.y + a.h / 2.0;
   let bcx = b.x + b.w / 2.0;
@@ -2568,13 +2581,13 @@ fn render_table(
 
 // ── Panel 6: Presentation Mind Map ──────────────────────────────────────
 
-struct MmPlaced {
-  depth: usize,
-  side: i8, // -1 left, 0 root, +1 right
-  y: f32,
-  label: String,
-  parent: Option<usize>,
-  branch: usize,
+pub(crate) struct MmPlaced {
+  pub(crate) depth: usize,
+  pub(crate) side: i8, // -1 left, 0 root, +1 right
+  pub(crate) y: f32,
+  pub(crate) label: String,
+  pub(crate) parent: Option<usize>,
+  pub(crate) branch: usize,
 }
 
 fn render_mindmap_panel(
@@ -2780,7 +2793,7 @@ fn render_mindmap_panel(
   svg.push_str("</g>\n");
 }
 
-fn place_mm(
+pub(crate) fn place_mm(
   node: &Value,
   depth: usize,
   side: i8,
@@ -3220,6 +3233,8 @@ impl AsyncNode for RenderSlidesNode {
     let section_cards = input_bool(inputs, "section_cards", false);
     let pip_safe_zone = input_bool(inputs, "pip_safe_zone", false);
     let takeaway_only_bar = input_bool(inputs, "takeaway_only_bar", false);
+    let export_pptx = input_bool(inputs, "export_pptx", false);
+    let export_pdf = input_bool(inputs, "export_pdf", false);
 
     let mut sections: Vec<String> = Vec::new();
     for (idx, s) in deck.slides.iter().enumerate() {
@@ -3428,10 +3443,8 @@ impl AsyncNode for RenderSlidesNode {
     let pandoc_md = deck_to_pandoc_markdown(&deck, &png_refs);
     let md_file = write_artifact(&self.id, pandoc_md.as_bytes(), "text/markdown").await?;
 
-    let html = deck_to_interactive_html(&deck, &html_frames, None, None, &[]);
-    let html_file = write_artifact(&self.id, html.as_bytes(), "text/html").await?;
-
-    Ok(HashMap::from([
+    let mut extra_links: Vec<(&str, String)> = Vec::new();
+    let mut outputs = HashMap::from([
       (
         format!("{}_frames", self.id),
         FlowValue::Json(Value::Array(slide_groups)),
@@ -3445,9 +3458,129 @@ impl AsyncNode for RenderSlidesNode {
         FlowValue::Json(Value::Array(full_slides)),
       ),
       (format!("{}_markdown", self.id), md_file),
-      (format!("{}_html", self.id), html_file),
-    ]))
+    ]);
+
+    if export_pptx {
+      let pptx_bytes = crate::nodes::pptx_writer::deck_to_pptx_bytes(
+        &deck,
+        crate::nodes::pptx_writer::PptxExportOptions { section_cards },
+      )
+      .map_err(|e| YanshiError::NodeExecutionFailed {
+        message: format!("{}: native pptx writer failed: {e}", self.id),
+      })?;
+      let pptx_file = write_artifact(
+        &self.id,
+        &pptx_bytes,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      )
+      .await?;
+      if let FlowValue::File { path, .. } = &pptx_file
+        && let Some(fname) = path.file_name().and_then(|n| n.to_str())
+      {
+        extra_links.push(("下载可编辑 PPTX", fname.to_string()));
+      }
+      outputs.insert(format!("{}_pptx", self.id), pptx_file);
+    }
+
+    if export_pdf {
+      let pdf_bytes = compile_widescreen_typst_pdf(&self.id, &deck, &full_png_paths).await?;
+      let pdf_file = write_artifact(&self.id, &pdf_bytes, "application/pdf").await?;
+      if let FlowValue::File { path, .. } = &pdf_file
+        && let Some(fname) = path.file_name().and_then(|n| n.to_str())
+      {
+        extra_links.push(("下载 16:9 PDF 讲义", fname.to_string()));
+      }
+      outputs.insert(format!("{}_pdf", self.id), pdf_file);
+    }
+
+    let link_refs: Vec<(&str, &str)> = extra_links
+      .iter()
+      .map(|(lbl, href)| (*lbl, href.as_str()))
+      .collect();
+    let html = deck_to_interactive_html(&deck, &html_frames, None, None, &link_refs);
+    let html_file = write_artifact(&self.id, html.as_bytes(), "text/html").await?;
+    outputs.insert(format!("{}_html", self.id), html_file);
+
+    Ok(outputs)
   }
+}
+
+/// Compile `deck_to_typst_source` (`presentation-16-9` widescreen layout) into a PDF
+/// via `typst compile` confined inside the platform OS sandbox.
+async fn compile_widescreen_typst_pdf(
+  node_id: &str,
+  deck: &SlideDeck,
+  full_png_paths: &[std::path::PathBuf],
+) -> Result<Vec<u8>, YanshiError> {
+  use crate::common::sandboxed;
+  let typst = sandboxed::find_tool("typst").ok_or_else(|| YanshiError::NodeExecutionFailed {
+    message: format!("{node_id}: typst is not on PATH (`yanshi doctor` lists renderer binaries)"),
+  })?;
+  let workdir = crate::common::artifacts::artifact_dir(node_id);
+  tokio::fs::create_dir_all(&workdir)
+    .await
+    .map_err(|e| input_err(node_id, format!("cannot create {}: {e}", workdir.display())))?;
+
+  let rel_names: Vec<String> = full_png_paths
+    .iter()
+    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+    .collect();
+  let typst_src = deck_to_typst_source(deck, &rel_names);
+
+  let stem = format!(".handout-{}", uuid::Uuid::new_v4());
+  let src_path = workdir.join(format!("{stem}.typ"));
+  let out_path = workdir.join(format!("{stem}.pdf"));
+
+  let res = async {
+    tokio::fs::write(&src_path, typst_src.as_bytes())
+      .await
+      .map_err(|e| input_err(node_id, format!("cannot stage typst handout: {e}")))?;
+
+    let mut read_paths = sandboxed::font_dirs();
+    read_paths.extend(sandboxed::install_prefixes(&typst));
+    read_paths.extend(yanshi_core::run_context::current_artifact_root());
+    read_paths.push(workdir.clone());
+
+    let args: Vec<std::ffi::OsString> = vec![
+      "compile".into(),
+      "--root".into(),
+      workdir.clone().into_os_string(),
+      src_path.clone().into_os_string(),
+      out_path.clone().into_os_string(),
+    ];
+    let output = sandboxed::run(sandboxed::SandboxedRun {
+      node: node_id,
+      program: typst,
+      args,
+      workdir: &workdir,
+      read_paths,
+      write_paths: Vec::new(),
+      env: Vec::new(),
+      timeout: std::time::Duration::from_secs(180),
+    })
+    .await?;
+
+    if !output.status.success() {
+      return Err(YanshiError::NodeExecutionFailed {
+        message: format!(
+          "{node_id}: typst compile exited with {}: {}",
+          output.status,
+          sandboxed::output_tail(&output, 12)
+        ),
+      });
+    }
+
+    tokio::fs::read(&out_path)
+      .await
+      .map_err(|e| YanshiError::NodeExecutionFailed {
+        message: format!("{node_id}: typst wrote no PDF output: {e}"),
+      })
+  }
+  .await;
+
+  let _ = tokio::fs::remove_file(&src_path).await;
+  let _ = tokio::fs::remove_file(&out_path).await;
+  res
 }
 
 #[cfg(test)]
@@ -3704,5 +3837,80 @@ mod tests {
       step1_svg.contains("width=\"1408.0\" height=\"86\""),
       "pip_safe_zone narrows footer bar to leave bottom-right presenter dock clear"
     );
+  }
+
+  #[tokio::test]
+  async fn render_slides_exports_native_editable_pptx_and_widescreen_pdf() {
+    let deck = json!({
+      "title": "Tokio Runtime 架构",
+      "subtitle": "Work-Stealing 调度与 I/O Driver",
+      "theme": "light",
+      "slides": [
+        {
+          "section": "01 调度核心",
+          "title": "多线程任务队列",
+          "left": {
+            "kind": "bullets",
+            "grid": true,
+            "items": [
+              {"badge": "Local", "heading": "本地无锁槽", "body": "单线程快速 push/pop"},
+              {"badge": "Steal", "heading": "跨核窃取半数", "body": "空闲 Worker 从邻居批量转移任务"}
+            ]
+          },
+          "right": {
+            "kind": "table",
+            "columns": ["队列", "竞争度"],
+            "rows": [["LIFO Slot", "✓ 零锁"], ["Global Inject", "⚠ Mutex"]]
+          },
+          "takeaway": "局部性优先减少缓存行乒乓。",
+          "notes": "重点强调 LIFO 槽位如何提升刚唤醒任务的缓存命中率。"
+        }
+      ]
+    });
+
+    let has_typst = crate::common::sandboxed::find_tool("typst").is_some();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let inputs = HashMap::from([
+      ("deck".to_string(), FlowValue::Json(deck)),
+      ("progressive".to_string(), FlowValue::Json(json!(false))),
+      ("export_pptx".to_string(), FlowValue::Json(json!(true))),
+      ("export_pdf".to_string(), FlowValue::Json(json!(has_typst))),
+    ]);
+    let outputs = run_context::with_artifact_root(
+      tmp.path().to_path_buf(),
+      RenderSlidesNode::new("deck").execute(&inputs),
+    )
+    .await
+    .expect("render_slides");
+
+    let FlowValue::File {
+      path: pptx_path,
+      mime_type,
+    } = &outputs["deck_pptx"]
+    else {
+      panic!("expected deck_pptx File output");
+    };
+    assert_eq!(
+      mime_type.as_deref(),
+      Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    );
+    let bytes = std::fs::read(pptx_path).expect("read pptx");
+    assert!(
+      bytes.starts_with(b"PK\x03\x04"),
+      "must be a valid ZIP OOXML"
+    );
+
+    if has_typst {
+      let FlowValue::File {
+        path: pdf_path,
+        mime_type: pdf_mime,
+      } = &outputs["deck_pdf"]
+      else {
+        panic!("expected deck_pdf File output");
+      };
+      assert_eq!(pdf_mime.as_deref(), Some("application/pdf"));
+      let pdf_bytes = std::fs::read(pdf_path).expect("read pdf");
+      assert!(pdf_bytes.starts_with(b"%PDF-"), "must be a valid PDF");
+    }
   }
 }

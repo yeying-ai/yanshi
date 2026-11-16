@@ -105,16 +105,15 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.21"
 mime_guess = "2.0"
 
-# MarkMap and Arxiv node dependencies
+# MarkMap, Arxiv, and native OOXML PPTX archive dependencies
 flate2 = "1.0"
 tar = "0.4"
 regex = "1.0"
 urlencoding = "2.1"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 futures = "0.3"
-# Reads back render_table's xlsx in its round-trip test.
-zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-test = "0.4"
 tempfile = "3.3"
 # P10.2.1: per-node latency benches sit alongside the existing

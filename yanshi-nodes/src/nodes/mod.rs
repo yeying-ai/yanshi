@@ -32,6 +32,8 @@ pub mod arxiv;
 
 pub mod markmap;
 #[cfg(feature = "render")]
+pub mod pptx_writer;
+#[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "render")]
 pub mod render_slides;
