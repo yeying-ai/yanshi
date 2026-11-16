@@ -42,7 +42,7 @@ inputs:
   slide_count:
     description: "正片幻灯片章节页数（4-10）"
     default: 6
-  language:
+  spoken_language:
     description: "课件文字与口播语言"
     default: "中文"
   slide_theme:
@@ -60,7 +60,7 @@ inputs:
   enable_illustrations:
     description: "为开篇引入或总结页调用文生图生成无文字概念插图"
     default: true
-  model:
+  chat_model:
     description: "主策划与脚本生成模型（推荐 gemini-2.5-flash / gemini-2.5-pro，兼容 qwen-plus / deepseek-v4-flash / glm-5.1 / kimi-k2.6）"
     default: "gemini-2.5-flash"
   tts_model:
@@ -120,6 +120,7 @@ nodes:
           "need_presenter_video": {{ (presenter_mode == "pip" or presenter_mode == "intro_outro") and video_model != "" }},
           "source_repo": {{ source_repo | json_encode() }},
           "source_pdf": {{ source_pdf | json_encode() }},
+          "chat_model": {{ chat_model | json_encode() }},
           "image_model": {{ image_model | json_encode() }},
           "image_size": {{ image_size | json_encode() }},
           "video_model": {{ video_model | json_encode() }},
@@ -217,7 +218,7 @@ nodes:
       ref_pack: "{{ nodes.grounded_context.outputs.output }}"
     parameters:
       template: |
-        你是一位享誉业界的资深系统架构师与技术 Keynote 主讲人。请围绕主题「{{ topic }}」，面向「{{ audience }}」，以「{{ narration_style }}」风格，设计一套共 {{ slide_count }} 页幻灯片的演播级技术精讲课件（语言：{{ language }}，配色主题：{{ slide_theme }}）。
+        你是一位享誉业界的资深系统架构师与技术 Keynote 主讲人。请围绕主题「{{ topic }}」，面向「{{ audience }}」，以「{{ narration_style }}」风格，设计一套共 {{ slide_count }} 页幻灯片的演播级技术精讲课件（语言：{{ spoken_language }}，配色主题：{{ slide_theme }}）。
 
         核心设计准则（极其重要，直接决定声画卡点与视觉表现）：
         1. **工程级双栏可视化面板（拒绝空洞口号）**：
@@ -247,9 +248,10 @@ nodes:
 
   - id: deck
     type: llm
-    dependencies: ["plan_prompt"]
+    dependencies: ["plan_prompt", "mode_flags"]
     input_mapping:
       prompt: "{{ nodes.plan_prompt.outputs.output }}"
+      model: "{{ nodes.mode_flags.outputs.chat_model }}"
     parameters:
       max_tokens: 16384
       system: "你是资深系统架构师与 Keynote 演播编导，仅输出符合 SlideDeck JSON Schema 的严格合法 JSON。"
@@ -321,6 +323,7 @@ nodes:
     run_if: "{{ nodes.mode_flags.outputs.do_d2 }}"
     input_mapping:
       description: "{{ nodes.arch_figure_desc.outputs.output }}"
+      model: "{{ nodes.mode_flags.outputs.chat_model }}"
     parameters:
       language: d2
       png: true

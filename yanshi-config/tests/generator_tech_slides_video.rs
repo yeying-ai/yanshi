@@ -116,7 +116,7 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pip_pptx_and_html_player
   .expect("template");
   let definition = parse_workflow_definition(&template).expect("validates");
   let mut inputs: HashMap<String, FlowValue> = [
-    ("model", json!("mock-model")),
+    ("chat_model", json!("mock-model")),
     ("tts_model", json!("mock-tts")),
     ("image_model", json!("mock-image")),
     ("video_model", json!("")),
