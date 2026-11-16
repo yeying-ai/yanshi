@@ -16,6 +16,7 @@ pub use artifacts::ArtifactOutputFormat;
 
 pub use nodes::asr::ASRNode;
 pub use nodes::figure::FigureNode;
+pub use nodes::illustration::IllustrationNode;
 pub use nodes::image_edit::ImageEditNode;
 pub use nodes::image_to_image::ImageToImageNode;
 pub use nodes::image_understand::ImageUnderstandNode;

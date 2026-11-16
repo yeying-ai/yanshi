@@ -6,6 +6,7 @@
 //! `yanshi-llm` / `yanshi-rag` / `yanshi-mcp`.
 
 pub mod figure;
+pub mod illustration;
 pub mod llm;
 
 pub mod image_edit;
