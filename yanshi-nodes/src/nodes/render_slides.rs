@@ -59,24 +59,99 @@ pub struct Slide {
   pub takeaway: Option<String>,
   #[serde(default)]
   pub notes: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_default")]
   pub steps: Vec<SlideStep>,
+}
+
+fn deserialize_code_lines<'de, D>(deserializer: D) -> Result<Option<(usize, usize)>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let val = Option::<Value>::deserialize(deserializer)?;
+  let Some(v) = val else {
+    return Ok(None);
+  };
+  match v {
+    Value::Null => Ok(None),
+    Value::Number(n) => {
+      let line = n.as_u64().unwrap_or(0) as usize;
+      Ok((line > 0).then_some((line, line)))
+    }
+    Value::Array(arr) => {
+      let nums: Vec<usize> = arr
+        .iter()
+        .filter_map(|x| x.as_u64().map(|n| n as usize))
+        .filter(|&n| n > 0)
+        .collect();
+      match nums.as_slice() {
+        [] => Ok(None),
+        [single] => Ok(Some((*single, *single))),
+        [first, rest @ ..] => {
+          let end = rest.last().copied().unwrap_or(*first);
+          Ok(Some((*first.min(&end), *first.max(&end))))
+        }
+      }
+    }
+    Value::Object(map) => {
+      let start = map
+        .get("start")
+        .or_else(|| map.get("from"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+      let end = map
+        .get("end")
+        .or_else(|| map.get("to"))
+        .and_then(Value::as_u64)
+        .unwrap_or(start as u64) as usize;
+      if start > 0 && end > 0 {
+        Ok(Some((start.min(end), start.max(end))))
+      } else {
+        Ok(None)
+      }
+    }
+    _ => Ok(None),
+  }
 }
 
 /// One progressive build step within a slide, synchronized with narration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlideStep {
   pub caption: String,
+  #[serde(default, alias = "narration")]
+  pub spoken: Option<String>,
   #[serde(default)]
   pub left_reveal: Option<usize>,
   #[serde(default)]
   pub right_reveal: Option<usize>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "deserialize_code_lines")]
   pub code_lines: Option<(usize, usize)>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_default")]
   pub focus_ids: Vec<String>,
   #[serde(default)]
   pub show_takeaway: Option<bool>,
+}
+
+impl SlideStep {
+  /// Spoken narration script for TTS (falls back to `caption` when `spoken` is absent).
+  pub fn spoken_text(&self) -> &str {
+    self
+      .spoken
+      .as_deref()
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+      .unwrap_or(self.caption.as_str())
+  }
+}
+
+/// Visual rendering options for Keynote-grade video frames.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SlideRenderOptions {
+  /// Global lecture progress in `0.0..=1.0`, rendered as a bottom edge progress bar.
+  pub progress_ratio: Option<f32>,
+  /// Reserve bottom-right PiP presenter safe zone so diagrams and bottom callouts are unobstructed.
+  pub pip_safe_zone: bool,
+  /// Keep bottom bar focused on persistent `takeaway` (useful when burning external ASS subtitles).
+  pub takeaway_only_bar: bool,
 }
 
 fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -473,10 +548,117 @@ fn panel_item_count(panel: &Panel) -> usize {
   }
 }
 
-/// Derive progressive build steps automatically when `slide.steps` is empty.
+/// Partition `code` into `target_steps` contiguous 1-based `(start, end)` line ranges,
+/// preferring blank-line paragraph boundaries so each progressive step highlights a coherent block.
+fn code_logical_blocks(code: &str, target_steps: usize) -> Vec<(usize, usize)> {
+  let lines: Vec<&str> = code.lines().collect();
+  let total = lines.len();
+  if total == 0 || target_steps == 0 {
+    return Vec::new();
+  }
+  let mut raw_blocks: Vec<(usize, usize)> = Vec::new();
+  let mut block_start: Option<usize> = None;
+  for (idx, line) in lines.iter().enumerate() {
+    let ln = idx + 1;
+    if line.trim().is_empty() {
+      if let Some(st) = block_start.take() {
+        raw_blocks.push((st, ln - 1));
+      }
+    } else if block_start.is_none() {
+      block_start = Some(ln);
+    }
+  }
+  if let Some(st) = block_start {
+    raw_blocks.push((st, total));
+  }
+  if raw_blocks.len() == target_steps {
+    return raw_blocks;
+  }
+  if raw_blocks.len() > target_steps {
+    let mut merged = Vec::with_capacity(target_steps);
+    for k in 0..target_steps {
+      let from_idx = k * raw_blocks.len() / target_steps;
+      let to_idx = ((k + 1) * raw_blocks.len() / target_steps)
+        .saturating_sub(1)
+        .max(from_idx);
+      merged.push((raw_blocks[from_idx].0, raw_blocks[to_idx].1));
+    }
+    return merged;
+  }
+  (0..target_steps)
+    .map(|k| {
+      let start = (k * total / target_steps) + 1;
+      let end = (((k + 1) * total).div_ceil(target_steps))
+        .max(start)
+        .min(total);
+      (start, end)
+    })
+    .collect()
+}
+
+fn find_code_source(slide: &Slide) -> Option<&str> {
+  match &slide.left {
+    Panel::Code { code, .. } if !code.trim().is_empty() => Some(code.as_str()),
+    _ => match &slide.right {
+      Some(Panel::Code { code, .. }) if !code.trim().is_empty() => Some(code.as_str()),
+      _ => None,
+    },
+  }
+}
+
+fn auto_focus_ids_for_step(slide: &Slide, step_idx: usize, total_steps: usize) -> Vec<String> {
+  let mut ids = Vec::new();
+  for panel in [Some(&slide.left), slide.right.as_ref()]
+    .into_iter()
+    .flatten()
+  {
+    match panel {
+      Panel::Flowchart { nodes, .. } if !nodes.is_empty() => {
+        let prev = (nodes.len() * step_idx).div_ceil(total_steps);
+        let curr = ((nodes.len() * (step_idx + 1)).div_ceil(total_steps)).max(1);
+        let range = if curr > prev {
+          prev..curr
+        } else {
+          curr.saturating_sub(1)..curr
+        };
+        for n in &nodes[range] {
+          ids.push(n.id.clone());
+        }
+      }
+      Panel::Memory { regions, .. } if !regions.is_empty() => {
+        let reg_idx = (step_idx * regions.len() / total_steps).min(regions.len() - 1);
+        for slot in &regions[reg_idx].slots {
+          ids.push(slot.id.clone());
+        }
+      }
+      _ => {}
+    }
+  }
+  ids
+}
+
+/// Derive progressive build steps automatically when `slide.steps` is empty,
+/// and backfill missing `code_lines` / `focus_ids` when all authored steps omit them.
 pub fn effective_steps(slide: &Slide) -> Vec<SlideStep> {
   if !slide.steps.is_empty() {
-    return slide.steps.clone();
+    let mut authored = slide.steps.clone();
+    let n = authored.len();
+    if n >= 2 {
+      if authored.iter().all(|s| s.code_lines.is_none())
+        && let Some(code) = find_code_source(slide)
+      {
+        let blocks = code_logical_blocks(code, n);
+        for (k, st) in authored.iter_mut().enumerate() {
+          st.code_lines = blocks.get(k).copied();
+        }
+      }
+      if authored.iter().all(|s| s.focus_ids.is_empty()) {
+        for (k, st) in authored.iter_mut().enumerate() {
+          st.focus_ids = auto_focus_ids_for_step(slide, k, n);
+        }
+      }
+    }
+    return authored;
   }
   let notes = slide
     .notes
@@ -487,6 +669,7 @@ pub fn effective_steps(slide: &Slide) -> Vec<SlideStep> {
   if sentences.len() <= 1 {
     return vec![SlideStep {
       caption: notes.trim().to_string(),
+      spoken: None,
       left_reveal: None,
       right_reveal: None,
       code_lines: None,
@@ -505,6 +688,9 @@ pub fn effective_steps(slide: &Slide) -> Vec<SlideStep> {
   }
   let left_n = panel_item_count(&slide.left);
   let right_n = slide.right.as_ref().map_or(0, panel_item_count);
+  let code_blocks = find_code_source(slide)
+    .map(|c| code_logical_blocks(c, target_steps))
+    .unwrap_or_default();
   grouped
     .into_iter()
     .enumerate()
@@ -519,14 +705,154 @@ pub fn effective_steps(slide: &Slide) -> Vec<SlideStep> {
       };
       SlideStep {
         caption,
+        spoken: None,
         left_reveal: Some(left_rev),
         right_reveal: right_rev,
-        code_lines: None,
-        focus_ids: Vec::new(),
+        code_lines: code_blocks.get(k).copied(),
+        focus_ids: auto_focus_ids_for_step(slide, k, target_steps),
         show_takeaway: Some(is_last),
       }
     })
     .collect()
+}
+
+/// Render a Keynote-style 1920×1080 chapter opener / transition card SVG.
+pub fn render_section_card_svg(
+  deck: &SlideDeck,
+  section_idx: usize,
+  sections: &[String],
+  slide: &Slide,
+  progress_ratio: f32,
+  pip_safe_zone: bool,
+) -> String {
+  let p = Palette::from_theme(deck.theme.as_deref());
+  let sec_label = slide
+    .section
+    .as_deref()
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or(slide.title.as_str());
+  let mut svg = String::with_capacity(6_144);
+  let _ = writeln!(
+    svg,
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{CANVAS_W:.0}\" height=\"{CANVAS_H:.0}\" viewBox=\"0 0 {CANVAS_W:.0} {CANVAS_H:.0}\" font-family=\"{SANS_FONT}\">\n\
+     <defs>\
+       <linearGradient id=\"topBar\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">\
+         <stop offset=\"0%\" stop-color=\"{}\"/>\
+         <stop offset=\"55%\" stop-color=\"{}\"/>\
+         <stop offset=\"100%\" stop-color=\"{}\"/>\
+       </linearGradient>\
+       <radialGradient id=\"heroGlow\" cx=\"24%\" cy=\"42%\" r=\"65%\">\
+         <stop offset=\"0%\" stop-color=\"{}\" stop-opacity=\"0.16\"/>\
+         <stop offset=\"55%\" stop-color=\"{}\" stop-opacity=\"0.06\"/>\
+         <stop offset=\"100%\" stop-color=\"{}\" stop-opacity=\"0\"/>\
+       </radialGradient>\
+     </defs>\n\
+     <rect width=\"{CANVAS_W:.0}\" height=\"{CANVAS_H:.0}\" fill=\"{}\"/>\n\
+     <rect width=\"{CANVAS_W:.0}\" height=\"{CANVAS_H:.0}\" fill=\"url(#heroGlow)\"/>\n\
+     <rect width=\"{CANVAS_W:.0}\" height=\"6\" fill=\"url(#topBar)\"/>",
+    p.accent, p.cyan, p.violet, p.accent, p.cyan, p.bg, p.bg
+  );
+
+  // Subtle architectural watermark number on the right (shifted above PiP safe zone when enabled).
+  let wm_y = if pip_safe_zone { 520.0 } else { 640.0 };
+  let _ = writeln!(
+    svg,
+    "<text x=\"1790\" y=\"{wm_y:.0}\" text-anchor=\"end\" font-family=\"{MONO_FONT}\" font-size=\"280\" font-weight=\"800\" fill=\"{}\" fill-opacity=\"0.08\">{:02}</text>",
+    p.cyan,
+    section_idx + 1
+  );
+
+  // Deck header eyebrow.
+  let _ = writeln!(
+    svg,
+    "<text x=\"136\" y=\"210\" font-size=\"20\" font-weight=\"600\" fill=\"{}\">{}</text>\n\
+     <rect x=\"136\" y=\"248\" width=\"240\" height=\"46\" rx=\"23\" fill=\"{}\" fill-opacity=\"0.18\" stroke=\"{}\" stroke-width=\"1.6\"/>\n\
+     <text x=\"256\" y=\"279\" text-anchor=\"middle\" font-family=\"{MONO_FONT}\" font-size=\"19\" font-weight=\"700\" fill=\"{}\">CHAPTER {:02} / {:02}</text>",
+    p.text_muted,
+    xml_escape(&deck.title),
+    p.accent,
+    p.accent,
+    p.accent,
+    section_idx + 1,
+    sections.len().max(1)
+  );
+
+  // Big section & chapter title.
+  let max_title_w = if pip_safe_zone { 1360.0 } else { 1560.0 };
+  let title_lines = wrap_text(&slide.title, max_title_w, 56.0, 2);
+  for (li, line) in title_lines.iter().enumerate() {
+    let ty = 392.0 + li as f32 * 72.0;
+    let _ = writeln!(
+      svg,
+      "<text x=\"136\" y=\"{ty:.1}\" font-size=\"56\" font-weight=\"800\" fill=\"{}\">{}</text>",
+      p.text,
+      xml_escape(line)
+    );
+  }
+
+  let sub_base_y = 392.0 + title_lines.len().max(1) as f32 * 72.0 + 18.0;
+  let sub_text = slide
+    .subtitle
+    .as_deref()
+    .or(slide.takeaway.as_deref())
+    .unwrap_or(sec_label);
+  let sub_lines = wrap_text(sub_text, max_title_w, 26.0, 2);
+  for (li, line) in sub_lines.iter().enumerate() {
+    let sy = sub_base_y + li as f32 * 38.0;
+    let _ = writeln!(
+      svg,
+      "<text x=\"136\" y=\"{sy:.1}\" font-size=\"26\" fill=\"{}\">{}</text>",
+      p.text_sub,
+      xml_escape(line)
+    );
+  }
+
+  // Chapter roadmap pills along the lower stage.
+  let mut rx = 136.0_f32;
+  let ry = 830.0_f32;
+  let right_cap = if pip_safe_zone { 1460.0 } else { 1780.0 };
+  for (idx, sec) in sections.iter().take(7).enumerate() {
+    let active = idx == section_idx;
+    let passed = idx < section_idx;
+    let pw = (measure_px(sec, 17.0, false) + 38.0).min(240.0);
+    if rx + pw > right_cap {
+      break;
+    }
+    let (fill, stroke, tcol) = if active {
+      (p.accent, p.accent, "#FFFFFF")
+    } else if passed {
+      (p.surface_alt, p.cyan, p.text_sub)
+    } else {
+      (p.surface, p.border, p.text_muted)
+    };
+    let clipped = wrap_text(sec, pw - 24.0, 17.0, 1);
+    let txt = clipped.first().map_or(sec.as_str(), String::as_str);
+    let _ = writeln!(
+      svg,
+      "<rect x=\"{rx:.1}\" y=\"{ry:.1}\" width=\"{pw:.1}\" height=\"42\" rx=\"21\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"1.5\"/>\n\
+       <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"17\" font-weight=\"{}\" fill=\"{tcol}\">{}</text>",
+      rx + pw * 0.5,
+      ry + 27.0,
+      if active { "700" } else { "500" },
+      xml_escape(txt)
+    );
+    rx += pw + 14.0;
+  }
+
+  render_bottom_progress_bar(&mut svg, progress_ratio, &p);
+  svg.push_str("</svg>\n");
+  svg
+}
+
+fn render_bottom_progress_bar(svg: &mut String, ratio: f32, p: &Palette) {
+  let clamped = ratio.clamp(0.02, 1.0);
+  let fill_w = (CANVAS_W * clamped).round();
+  let _ = writeln!(
+    svg,
+    "<rect x=\"0\" y=\"1074\" width=\"{CANVAS_W:.0}\" height=\"6\" fill=\"{}\" fill-opacity=\"0.45\"/>\n\
+     <rect x=\"0\" y=\"1074\" width=\"{fill_w:.1}\" height=\"6\" fill=\"url(#topBar)\"/>",
+    p.surface_alt
+  );
 }
 
 /// Render a single slide (at optional build `step_idx`; `None` renders completed state) to a 1920×1080 SVG.
@@ -534,6 +860,16 @@ pub fn render_slide_svg(
   deck: &SlideDeck,
   slide_idx: usize,
   step_idx: Option<usize>,
+) -> Result<String, String> {
+  render_slide_svg_with_options(deck, slide_idx, step_idx, SlideRenderOptions::default())
+}
+
+/// Render a single slide with explicit broadcast layout options (`progress_ratio`, `pip_safe_zone`, etc.).
+pub fn render_slide_svg_with_options(
+  deck: &SlideDeck,
+  slide_idx: usize,
+  step_idx: Option<usize>,
+  opts: SlideRenderOptions,
 ) -> Result<String, String> {
   let slide = deck
     .slides
@@ -571,7 +907,7 @@ pub fn render_slide_svg(
     p.accent, p.cyan, p.violet, p.cyan, p.accent, p.green
   );
 
-  // Canvas background + subtle grid lines.
+  // Canvas background + top gradient accent bar.
   let _ = writeln!(
     svg,
     "<rect width=\"{CANVAS_W:.0}\" height=\"{CANVAS_H:.0}\" fill=\"{}\"/>\n\
@@ -610,10 +946,11 @@ pub fn render_slide_svg(
     p.border
   );
 
-  // Main stage (y = 188..948, h = 760).
+  // Main stage (y = 188..942). When `pip_safe_zone` is active, reserve bottom-right `[1496..1872, 812..1054]`
+  // so the presenter PiP window never covers right-column diagrams or the bottom takeaway/caption bar.
   let stage_y = 188.0_f32;
   let has_footer = slide.takeaway.is_some() || active_step.is_some();
-  let stage_h = if has_footer { 754.0 } else { 836.0 };
+  let stage_h: f32 = if has_footer { 754.0 } else { 836.0 };
 
   if let Some(right_panel) = &slide.right {
     let ratio = slide.split_ratio.unwrap_or(0.50).clamp(0.32, 0.68);
@@ -621,6 +958,11 @@ pub fn render_slide_svg(
     let total_w = 1776.0_f32;
     let left_w = ((total_w - gap) * ratio).round();
     let right_w = total_w - gap - left_w;
+    let right_h = if opts.pip_safe_zone {
+      (stage_h - 134.0).max(480.0)
+    } else {
+      stage_h
+    };
     render_panel(
       &mut svg,
       &slide.left,
@@ -641,20 +983,21 @@ pub fn render_slide_svg(
         x: 72.0 + left_w + gap,
         y: stage_y,
         w: right_w,
-        h: stage_h,
+        h: right_h,
       },
       active_step.and_then(|s| s.right_reveal),
       active_step,
       &p,
     );
   } else {
+    let single_w = if opts.pip_safe_zone { 1408.0 } else { 1776.0 };
     render_panel(
       &mut svg,
       &slide.left,
       Rect {
         x: 72.0,
         y: stage_y,
-        w: 1776.0,
+        w: single_w,
         h: stage_h,
       },
       active_step.and_then(|s| s.left_reveal),
@@ -663,9 +1006,10 @@ pub fn render_slide_svg(
     );
   }
 
-  // Bottom callout / narration spotlight bar (y = 960..1048).
+  // Bottom callout / narration spotlight bar (y = 960..1046).
   if has_footer {
-    let show_takeaway = active_step.and_then(|s| s.show_takeaway).unwrap_or(true);
+    let show_takeaway =
+      opts.takeaway_only_bar || active_step.and_then(|s| s.show_takeaway).unwrap_or(true);
     let (badge, banner_text, banner_color) = if show_takeaway && slide.takeaway.is_some() {
       (
         "核心要点",
@@ -681,9 +1025,11 @@ pub fn render_slide_svg(
         p.accent,
       )
     };
+    let footer_w: f32 = if opts.pip_safe_zone { 1408.0 } else { 1776.0 };
+    let text_max_w = (footer_w - 186.0).max(400.0);
     let _ = writeln!(
       svg,
-      "<rect x=\"72\" y=\"960\" width=\"1776\" height=\"86\" rx=\"14\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n\
+      "<rect x=\"72\" y=\"960\" width=\"{footer_w:.1}\" height=\"86\" rx=\"14\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1.5\"/>\n\
        <rect x=\"90\" y=\"981\" width=\"108\" height=\"44\" rx=\"9\" fill=\"{}\" fill-opacity=\"0.18\" stroke=\"{}\" stroke-width=\"1.2\"/>\n\
        <text x=\"144\" y=\"1010\" text-anchor=\"middle\" font-size=\"18\" font-weight=\"700\" fill=\"{}\">{}</text>",
       p.surface,
@@ -693,7 +1039,7 @@ pub fn render_slide_svg(
       banner_color,
       xml_escape(badge)
     );
-    let lines = wrap_text(banner_text, 1590.0, 20.0, 2);
+    let lines = wrap_text(banner_text, text_max_w, 20.0, 2);
     if lines.len() == 1 {
       let _ = writeln!(
         svg,
@@ -713,6 +1059,14 @@ pub fn render_slide_svg(
       );
     }
   }
+
+  let default_ratio = match step_idx {
+    Some(st) => ((slide_idx as f32 + (st + 1) as f32 / steps.len().max(1) as f32)
+      / deck.slides.len().max(1) as f32)
+      .clamp(0.02, 1.0),
+    None => ((slide_idx + 1) as f32 / deck.slides.len().max(1) as f32).clamp(0.02, 1.0),
+  };
+  render_bottom_progress_bar(&mut svg, opts.progress_ratio.unwrap_or(default_ratio), &p);
 
   svg.push_str("</svg>\n");
   Ok(svg)
@@ -1093,18 +1447,28 @@ fn draw_bullet_card(
 ) {
   let color = p.tone_color(item.tone.as_deref(), idx);
   let opacity = if !revealed {
-    0.16
+    0.28
   } else if spotlight {
     1.0
   } else {
-    0.90
+    0.88
   };
   let border_col = if spotlight { color } else { p.border };
-  let border_w = if spotlight { 2.4 } else { 1.2 };
+  let border_w = if spotlight { 2.6 } else { 1.2 };
+  let _ = writeln!(svg, "<g opacity=\"{opacity:.2}\">");
+  if spotlight {
+    let _ = writeln!(
+      svg,
+      "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"15\" fill=\"none\" stroke=\"{color}\" stroke-opacity=\"0.35\" stroke-width=\"4.5\"/>",
+      r.x - 3.0,
+      r.y - 3.0,
+      r.w + 6.0,
+      r.h + 6.0
+    );
+  }
   let _ = writeln!(
     svg,
-    "<g opacity=\"{opacity:.2}\">\n\
-     <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{border_col}\" stroke-width=\"{border_w}\"/>\n\
+    "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{border_col}\" stroke-width=\"{border_w}\"/>\n\
      <rect x=\"{:.1}\" y=\"{:.1}\" width=\"5\" height=\"{:.1}\" rx=\"2.5\" fill=\"{color}\"/>",
     r.x,
     r.y,
@@ -1241,13 +1605,14 @@ fn render_code(
     let top_y = r.y + 56.0 + idx as f32 * line_h;
     let baseline_y = top_y + line_h * 0.74;
     let in_focus = active_lines.is_none_or(|(a, b)| line_no >= a && line_no <= b);
-    let row_opacity = if in_focus { 1.0 } else { 0.40 };
+    let spotlight_line = active_lines.is_some_and(|(a, b)| line_no >= a && line_no <= b);
+    let row_opacity = if in_focus { 1.0 } else { 0.48 };
 
-    if active_lines.is_some_and(|(a, b)| line_no >= a && line_no <= b) {
+    if spotlight_line {
       let _ = writeln!(
         svg,
-        "<rect x=\"{:.1}\" y=\"{top_y:.1}\" width=\"{:.1}\" height=\"{line_h:.1}\" fill=\"{}\" fill-opacity=\"0.15\"/>\n\
-         <rect x=\"{:.1}\" y=\"{top_y:.1}\" width=\"4\" height=\"{line_h:.1}\" fill=\"{}\"/>",
+        "<rect x=\"{:.1}\" y=\"{top_y:.1}\" width=\"{:.1}\" height=\"{line_h:.1}\" fill=\"{}\" fill-opacity=\"0.17\"/>\n\
+         <rect x=\"{:.1}\" y=\"{top_y:.1}\" width=\"5\" height=\"{line_h:.1}\" fill=\"{}\"/>",
         r.x + 4.0,
         r.w - 8.0,
         p.accent,
@@ -1256,40 +1621,64 @@ fn render_code(
       );
     }
 
-    // Truncate long code line to prevent right border bleed.
+    let active_callout = callouts
+      .iter()
+      .find(|c| c.line == line_no)
+      .filter(|_| in_focus);
+    let callout_layout = active_callout.map(|callout| {
+      let badge_col = p.tone_color(callout.tone.as_deref(), 1);
+      let max_badge_w = (r.w * 0.34).clamp(140.0, 280.0);
+      let cw = (measure_px(&callout.text, 13.5, false) + 22.0).min(max_badge_w);
+      let bx = r.x + r.w - cw - 16.0;
+      (callout, badge_col, cw, bx)
+    });
+
+    // Reserve right gutter when an inline callout badge sits on this line so badge never overlaps code.
+    let line_max_w = match &callout_layout {
+      Some((_, _, cw, _)) => (max_chars_w - cw - 22.0).max(140.0),
+      None => max_chars_w,
+    };
+
     let mut clipped = String::new();
     let mut w_acc = 0.0_f32;
     for ch in raw.chars() {
       let cw = char_px(ch, font_sz, true);
-      if w_acc + cw > max_chars_w {
+      if w_acc + cw > line_max_w {
         clipped.push('…');
+        w_acc += char_px('…', font_sz, true);
         break;
       }
       clipped.push(ch);
       w_acc += cw;
     }
 
+    let line_num_col = if spotlight_line { p.accent } else { "#64748B" };
+    let line_num_weight = if spotlight_line { "700" } else { "400" };
     let _ = writeln!(
       svg,
       "<g opacity=\"{row_opacity:.2}\">\n\
-       <text x=\"{gutter_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" font-family=\"{MONO_FONT}\" font-size=\"{:.1}\" fill=\"#475569\">{line_no}</text>\n\
+       <text x=\"{gutter_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" font-family=\"{MONO_FONT}\" font-size=\"{:.1}\" font-weight=\"{line_num_weight}\" fill=\"{line_num_col}\">{line_no}</text>\n\
        <text x=\"{code_x:.1}\" y=\"{baseline_y:.1}\" xml:space=\"preserve\" font-family=\"{MONO_FONT}\" font-size=\"{font_sz:.1}\">{}</text>",
       (font_sz - 2.0).max(12.0),
       highlight_code_spans(&clipped)
     );
 
-    if let Some(callout) = callouts.iter().find(|c| c.line == line_no)
-      && in_focus
-    {
-      let badge_col = p.tone_color(callout.tone.as_deref(), 1);
-      let cw = (measure_px(&callout.text, 14.0, false) + 22.0).min(320.0);
-      let bx = r.x + r.w - cw - 16.0;
-      let label = wrap_text(&callout.text, cw - 16.0, 14.0, 1);
+    if let Some((callout, badge_col, cw, bx)) = callout_layout {
+      let label = wrap_text(&callout.text, cw - 16.0, 13.5, 1);
       if let Some(txt) = label.first() {
+        let leader_x1 = code_x + w_acc + 8.0;
+        let leader_x2 = bx - 6.0;
+        let mid_y = top_y + line_h * 0.52;
+        if leader_x2 - leader_x1 >= 14.0 {
+          let _ = writeln!(
+            svg,
+            "<line x1=\"{leader_x1:.1}\" y1=\"{mid_y:.1}\" x2=\"{leader_x2:.1}\" y2=\"{mid_y:.1}\" stroke=\"{badge_col}\" stroke-opacity=\"0.55\" stroke-width=\"1.2\" stroke-dasharray=\"4 3\"/>"
+          );
+        }
         let _ = writeln!(
           svg,
-          "<rect x=\"{bx:.1}\" y=\"{:.1}\" width=\"{cw:.1}\" height=\"{:.1}\" rx=\"6\" fill=\"#0F172A\" stroke=\"{badge_col}\" stroke-width=\"1.2\"/>\n\
-           <text x=\"{:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"middle\" font-family=\"{SANS_FONT}\" font-size=\"14\" font-weight=\"600\" fill=\"{badge_col}\">{}</text>",
+          "<rect x=\"{bx:.1}\" y=\"{:.1}\" width=\"{cw:.1}\" height=\"{:.1}\" rx=\"6\" fill=\"#0F172A\" stroke=\"{badge_col}\" stroke-width=\"1.3\"/>\n\
+           <text x=\"{:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"middle\" font-family=\"{SANS_FONT}\" font-size=\"13.5\" font-weight=\"600\" fill=\"{badge_col}\">{}</text>",
           top_y + 2.0,
           (line_h - 4.0).max(18.0),
           bx + cw / 2.0,
@@ -1299,6 +1688,36 @@ fn render_code(
     }
     svg.push_str("</g>\n");
   }
+}
+
+fn find_line_comment_start(line: &str) -> Option<usize> {
+  let bytes = line.as_bytes();
+  let mut in_str = false;
+  let mut i = 0;
+  while i < bytes.len() {
+    let b = bytes[i];
+    if b == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+      in_str = !in_str;
+      i += 1;
+      continue;
+    }
+    if !in_str {
+      if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+        return Some(i);
+      }
+      if b == b'#' && bytes.get(i + 1) != Some(&b'[') && bytes.get(i + 1) != Some(&b'!') {
+        return Some(i);
+      }
+      if b == b'-'
+        && bytes.get(i + 1) == Some(&b'-')
+        && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+      {
+        return Some(i);
+      }
+    }
+    i += 1;
+  }
+  None
 }
 
 fn highlight_code_spans(line: &str) -> String {
@@ -1342,8 +1761,41 @@ fn highlight_code_spans(line: &str) -> String {
     "int",
     "char",
     "size_t",
+    "def",
+    "from",
+    "import",
+    "as",
+    "with",
+    "yield",
+    "lambda",
+    "func",
+    "package",
+    "go",
+    "defer",
+    "chan",
+    "select",
+    "var",
+    "export",
+    "function",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "new",
+    "try",
+    "catch",
+    "throw",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "JOIN",
+    "INSERT",
+    "UPDATE",
+    "CREATE",
+    "TABLE",
+    "INDEX",
   ];
-  let (code_part, comment_part) = match line.find("//") {
+  let (code_part, comment_part) = match find_line_comment_start(line) {
     Some(idx) => (&line[..idx], Some(&line[idx..])),
     None => (line, None),
   };
@@ -1499,11 +1951,11 @@ fn render_flowchart(
     let focused =
       focus_ids.is_empty() || focus_ids.iter().any(|f| f == &edge.from || f == &edge.to);
     let opacity = if !active {
-      0.14
+      0.26
     } else if focused {
-      0.95
+      0.96
     } else {
-      0.42
+      0.58
     };
     let (path_d, label_pt) = flowchart_edge_geom(a, b);
     let dash = if edge.dashed {
@@ -1531,17 +1983,27 @@ fn render_flowchart(
     let is_focus = (!focus_ids.is_empty() && focus_ids.iter().any(|f| f == &n.id))
       || (focus_ids.is_empty() && reveal.is_some() && idx + 1 == visible_n);
     let opacity = if !revealed {
-      0.16
+      0.32
     } else if !focus_ids.is_empty() && !is_focus {
-      0.52
+      0.74
     } else {
       1.0
     };
     let stroke_w = if is_focus { 2.8 } else { 1.6 };
+    let _ = writeln!(svg, "<g opacity=\"{opacity:.2}\">");
+    if is_focus && revealed {
+      let _ = writeln!(
+        svg,
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"15\" fill=\"none\" stroke=\"{color}\" stroke-opacity=\"0.38\" stroke-width=\"5\"/>",
+        nb.x - 3.5,
+        nb.y - 3.5,
+        nb.w + 7.0,
+        nb.h + 7.0
+      );
+    }
     let _ = writeln!(
       svg,
-      "<g opacity=\"{opacity:.2}\">\n\
-       <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{color}\" stroke-width=\"{stroke_w}\"/>\n\
+      "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{color}\" stroke-width=\"{stroke_w}\"/>\n\
        <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"5\" rx=\"2.5\" fill=\"{color}\"/>",
       nb.x,
       nb.y,
@@ -1585,9 +2047,33 @@ fn render_flowchart(
     svg.push_str("</g>\n");
   }
 
-  // Pass 3: draw edge label pills above boxes so labels are never clipped by borders.
-  for (lx, ly, opacity, lbl) in pending_labels {
+  // Pass 3: de-overlap edge label pills and clamp inside panel bounds so labels never collide.
+  let mut placed_pills: Vec<(f32, f32, f32)> = Vec::with_capacity(pending_labels.len());
+  for (raw_lx, raw_ly, opacity, lbl) in pending_labels {
     let lw = (measure_px(&lbl, 13.5, false) + 16.0).min(180.0);
+    let mut lx = raw_lx.clamp(
+      r.x + lw * 0.5 + 4.0,
+      (r.x + r.w - lw * 0.5 - 4.0).max(r.x + lw * 0.5 + 4.0),
+    );
+    let mut ly = raw_ly.clamp(r.y + 13.0, (r.y + r.h - 13.0).max(r.y + 13.0));
+    for _ in 0..4 {
+      let mut collided = false;
+      for &(px, py, pw) in &placed_pills {
+        if (lx - px).abs() < (lw + pw) * 0.52 && (ly - py).abs() < 25.0 {
+          if ly + 26.0 <= r.y + r.h - 13.0 {
+            ly += 26.0;
+          } else {
+            ly = (ly - 26.0).max(r.y + 13.0);
+            lx = (lx + 18.0).min((r.x + r.w - lw * 0.5 - 4.0).max(lx));
+          }
+          collided = true;
+        }
+      }
+      if !collided {
+        break;
+      }
+    }
+    placed_pills.push((lx, ly, lw));
     let clipped = wrap_text(&lbl, lw - 10.0, 13.5, 1);
     if let Some(txt) = clipped.first() {
       let _ = writeln!(
@@ -1707,7 +2193,7 @@ fn render_memory(
     let rx = r.x + ri as f32 * (rw + gap);
     let color = p.tone_color(reg.tone.as_deref(), ri);
     let reg_visible = ri < visible_regions;
-    let reg_opacity = if reg_visible { 1.0 } else { 0.16 };
+    let reg_opacity = if reg_visible { 1.0 } else { 0.28 };
 
     let _ = writeln!(
       svg,
@@ -1904,7 +2390,7 @@ fn render_table(
     }
     let revealed = ri < visible_rows;
     let spotlight = reveal.is_some() && ri + 1 == visible_rows;
-    let opacity = if !revealed { 0.16 } else { 1.0 };
+    let opacity = if !revealed { 0.28 } else { 1.0 };
 
     let _ = writeln!(svg, "<g opacity=\"{opacity:.2}\">");
     if spotlight {
@@ -2139,7 +2625,7 @@ fn render_mindmap_panel(
       let (nx, _, nw, _) = rects[ni];
       let branch_col = p.tone_color(None, n.branch);
       let vis = n.depth == 0 || n.branch < visible_branches;
-      let op = if vis { 0.85 } else { 0.14 };
+      let op = if vis { 0.85 } else { 0.24 };
       let (x1, x2) = if n.side >= 0 {
         (px + pw, nx)
       } else {
@@ -2163,7 +2649,7 @@ fn render_mindmap_panel(
       p.tone_color(None, n.branch)
     };
     let vis = n.depth == 0 || n.branch < visible_branches;
-    let op = if vis { 1.0 } else { 0.16 };
+    let op = if vis { 1.0 } else { 0.28 };
     let (fill, tfill) = if n.depth == 0 {
       (p.accent, "#FFFFFF")
     } else if p.dark {
@@ -2617,12 +3103,38 @@ impl AsyncNode for RenderSlidesNode {
       Some(FlowValue::Json(Value::Bool(b))) => *b,
       _ => true,
     };
+    let section_cards = match inputs.get("section_cards") {
+      Some(FlowValue::Json(Value::Bool(b))) => *b,
+      _ => false,
+    };
+    let pip_safe_zone = match inputs.get("pip_safe_zone") {
+      Some(FlowValue::Json(Value::Bool(b))) => *b,
+      _ => false,
+    };
+    let takeaway_only_bar = match inputs.get("takeaway_only_bar") {
+      Some(FlowValue::Json(Value::Bool(b))) => *b,
+      _ => false,
+    };
+
+    let mut sections: Vec<String> = Vec::new();
+    for (idx, s) in deck.slides.iter().enumerate() {
+      let label = s
+        .section
+        .clone()
+        .filter(|sec| !sec.trim().is_empty())
+        .unwrap_or_else(|| format!("{:02}", idx + 1));
+      if !sections.contains(&label) {
+        sections.push(label);
+      }
+    }
 
     let mut slide_groups = Vec::with_capacity(deck.slides.len());
     let mut full_slides = Vec::with_capacity(deck.slides.len());
     let mut full_png_paths = Vec::with_capacity(deck.slides.len());
+    let mut flat_steps = Vec::new();
     let mut html_frames = Vec::new();
     let mut est_time = 0.0_f64;
+    let mut prev_section: Option<String> = None;
 
     for (si, slide) in deck.slides.iter().enumerate() {
       let steps = if progressive {
@@ -2634,13 +3146,101 @@ impl AsyncNode for RenderSlidesNode {
         }]
       };
 
-      let mut step_entries = Vec::with_capacity(steps.len());
+      let mut step_entries = Vec::with_capacity(steps.len() + 1);
       let mut last_png_path = None;
       let mut last_svg_path = None;
 
+      let cur_section = slide
+        .section
+        .clone()
+        .filter(|sec| !sec.trim().is_empty())
+        .unwrap_or_else(|| format!("{:02}", si + 1));
+      let emit_section_card = section_cards
+        && deck.slides.len() >= 2
+        && prev_section.as_deref() != Some(cur_section.as_str());
+      prev_section = Some(cur_section.clone());
+
+      if emit_section_card {
+        let sec_idx = sections.iter().position(|s| s == &cur_section).unwrap_or(0);
+        let ratio = ((si as f32 + 0.15) / deck.slides.len().max(1) as f32).clamp(0.02, 1.0);
+        let card_svg =
+          render_section_card_svg(&deck, sec_idx, &sections, slide, ratio, pip_safe_zone);
+        let width_copy = out_width;
+        let svg_for_png = card_svg.clone();
+        let card_png =
+          tokio::task::spawn_blocking(move || svg_to_png(&svg_for_png, Some(width_copy)))
+            .await
+            .map_err(|e| YanshiError::NodeExecutionFailed {
+              message: format!("{}: section card raster task failed: {e}", self.id),
+            })?
+            .map_err(|e| input_err(&self.id, e))?;
+
+        let svg_file = write_artifact(&self.id, card_svg.as_bytes(), "image/svg+xml").await?;
+        let png_file = write_artifact(&self.id, &card_png, "image/png").await?;
+        let FlowValue::File { path: png_path, .. } = &png_file else {
+          unreachable!("write_artifact always returns FlowValue::File");
+        };
+        let FlowValue::File { path: svg_path, .. } = &svg_file else {
+          unreachable!("write_artifact always returns FlowValue::File");
+        };
+
+        let card_caption = format!("{cur_section} · {}", slide.title);
+        let card_spoken = if si == 0 {
+          format!(
+            "欢迎来到《{}》技术精讲。首先进入{}：{}。",
+            deck.title, cur_section, slide.title
+          )
+        } else {
+          format!("接下来进入{}：{}。", cur_section, slide.title)
+        };
+
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        html_frames.push(SlideFrameMeta {
+          slide_idx: si,
+          step_idx: 0,
+          title: format!("章节导览 · {}", slide.title),
+          caption: card_caption.clone(),
+          image_src: format!("data:image/png;base64,{}", B64.encode(&card_png)),
+          start_secs: est_time,
+        });
+        est_time += (card_spoken.chars().count() as f64 * 0.18).max(3.0);
+
+        step_entries.push(json!({
+          "image": png_path,
+          "svg": svg_path,
+          "caption": card_caption,
+          "spoken": card_spoken,
+          "is_section_card": true,
+        }));
+        flat_steps.push(json!({
+          "beat_index": flat_steps.len(),
+          "slide": si,
+          "step": 0,
+          "kind": "section_card",
+          "is_section_card": true,
+          "is_slide_start": true,
+          "is_slide_end": false,
+          "section": cur_section,
+          "title": slide.title,
+          "image": png_path,
+          "svg": svg_path,
+          "caption": card_caption,
+          "spoken": card_spoken,
+        }));
+      }
+
       for (sti, step) in steps.iter().enumerate() {
         let step_sel = if progressive { Some(sti) } else { None };
-        let svg = render_slide_svg(&deck, si, step_sel).map_err(|e| input_err(&self.id, e))?;
+        let ratio = ((si as f32 + (sti + 1) as f32 / steps.len().max(1) as f32)
+          / deck.slides.len().max(1) as f32)
+          .clamp(0.02, 1.0);
+        let opts = SlideRenderOptions {
+          progress_ratio: Some(ratio),
+          pip_safe_zone,
+          takeaway_only_bar,
+        };
+        let svg = render_slide_svg_with_options(&deck, si, step_sel, opts)
+          .map_err(|e| input_err(&self.id, e))?;
         let width_copy = out_width;
         let svg_for_png = svg.clone();
         let png_bytes =
@@ -2660,17 +3260,19 @@ impl AsyncNode for RenderSlidesNode {
           unreachable!("write_artifact always returns FlowValue::File");
         };
 
+        let spoken_str = step.spoken_text().to_string();
+
         // Embed data URI in standalone artifact HTML so it opens cleanly from anywhere.
         use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
         html_frames.push(SlideFrameMeta {
           slide_idx: si,
-          step_idx: sti,
+          step_idx: sti + usize::from(emit_section_card),
           title: slide.title.clone(),
           caption: step.caption.clone(),
           image_src: format!("data:image/png;base64,{}", B64.encode(&png_bytes)),
           start_secs: est_time,
         });
-        est_time += (step.caption.chars().count() as f64 * 0.18).max(4.0);
+        est_time += (spoken_str.chars().count() as f64 * 0.18).max(4.0);
 
         last_png_path = Some(png_path.clone());
         last_svg_path = Some(svg_path.clone());
@@ -2678,6 +3280,23 @@ impl AsyncNode for RenderSlidesNode {
           "image": png_path,
           "svg": svg_path,
           "caption": step.caption,
+          "spoken": spoken_str,
+          "is_section_card": false,
+        }));
+        flat_steps.push(json!({
+          "beat_index": flat_steps.len(),
+          "slide": si,
+          "step": sti,
+          "kind": "slide_step",
+          "is_section_card": false,
+          "is_slide_start": sti == 0 && !emit_section_card,
+          "is_slide_end": sti + 1 == steps.len(),
+          "section": cur_section,
+          "title": slide.title,
+          "image": png_path,
+          "svg": svg_path,
+          "caption": step.caption,
+          "spoken": spoken_str,
         }));
       }
 
@@ -2711,6 +3330,10 @@ impl AsyncNode for RenderSlidesNode {
       (
         format!("{}_frames", self.id),
         FlowValue::Json(Value::Array(slide_groups)),
+      ),
+      (
+        format!("{}_steps", self.id),
+        FlowValue::Json(Value::Array(flat_steps)),
       ),
       (
         format!("{}_slides", self.id),
@@ -2878,6 +3501,103 @@ mod tests {
     assert!(
       svg_text.contains("插图资源已就绪"),
       "outside path must not be read"
+    );
+  }
+
+  #[tokio::test]
+  async fn renders_section_cards_spoken_steps_and_non_overlapping_code_callouts() {
+    let deck = json!({
+      "title": "Tokio 调度器精讲",
+      "subtitle": "Work-Stealing 核心机制",
+      "slides": [
+        {
+          "section": "01 核心数据结构",
+          "title": "Local Queue 与全局注入队列",
+          "left": {
+            "kind": "code",
+            "language": "rust",
+            "code": "impl<T: std::fmt::Display + Send + Sync + 'static> WorkerQueue<T> { /* very long generic impl line that used to collide with badge */ }\n\npub fn steal_half(&mut self) -> Option<Task> {\n  self.ring.pop_front()\n}",
+            "callouts": [
+              {"line": 1, "text": "全生态覆盖实现", "tone": "green"},
+              {"line": 3, "text": "无锁窃取一半", "tone": "rust"}
+            ]
+          },
+          "right": {
+            "kind": "flowchart",
+            "direction": "LR",
+            "nodes": [
+              {"id": "w1", "label": "Worker 1"},
+              {"id": "w2", "label": "Worker 2"}
+            ],
+            "edges": [
+              {"from": "w1", "to": "w2", "label": "steal"},
+              {"from": "w2", "to": "w1", "label": "rebalance"}
+            ]
+          },
+          "takeaway": "本地环形队列零锁竞争，空闲线程按半数批量窃取。",
+          "steps": [
+            {
+              "caption": "泛型队列定义与约束",
+              "spoken": "请大家先看屏幕左侧第一行，这里定义了工作线程队列的泛型边界。",
+              "code_lines": [1]
+            },
+            {
+              "caption": "无锁批量窃取逻辑",
+              "spoken": "接着往下看第三行，当线程空闲时会从邻居环形缓冲区窃取一半任务。",
+              "code_lines": [3, 5]
+            }
+          ]
+        },
+        {
+          "section": "02 性能判据",
+          "title": "尾延迟优化",
+          "left": {
+            "kind": "bullets",
+            "items": [
+              {"badge": "LIFO", "heading": "热缓存槽位", "body": "刚唤醒的子任务直接进入 LIFO slot 命中 L1 Cache"}
+            ]
+          },
+          "notes": "LIFO 槽显著降低消息传递型负载的尾延迟。"
+        }
+      ]
+    });
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let inputs = HashMap::from([
+      ("deck".to_string(), FlowValue::Json(deck)),
+      ("section_cards".to_string(), FlowValue::Json(json!(true))),
+      ("pip_safe_zone".to_string(), FlowValue::Json(json!(true))),
+    ]);
+    let outputs = run_context::with_artifact_root(
+      tmp.path().to_path_buf(),
+      RenderSlidesNode::new("talk").execute(&inputs),
+    )
+    .await
+    .expect("slides render");
+
+    let FlowValue::Json(Value::Array(steps)) = &outputs["talk_steps"] else {
+      panic!("expected talk_steps array");
+    };
+    // 2 section cards + 2 steps on slide 0 + 1 step on slide 1 = 5 progressive beats.
+    assert_eq!(steps.len(), 5);
+    assert_eq!(steps[0]["kind"], "section_card");
+    assert!(
+      steps[1]["spoken"]
+        .as_str()
+        .expect("spoken")
+        .contains("屏幕左侧第一行"),
+      "spoken script preserved separately from short caption"
+    );
+    assert_eq!(steps[1]["caption"], "泛型队列定义与约束");
+    // Auto-inferred focus_ids on step 1 even when omitted in JSON.
+    let step1_svg = std::fs::read_to_string(steps[1]["svg"].as_str().expect("svg")).expect("read");
+    assert!(
+      step1_svg.contains("…"),
+      "long code line clipped cleanly before callout badge"
+    );
+    assert!(
+      step1_svg.contains("width=\"1408.0\" height=\"86\""),
+      "pip_safe_zone narrows footer bar to leave bottom-right presenter dock clear"
     );
   }
 }

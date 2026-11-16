@@ -774,6 +774,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: Some("欢迎来到 Rust Traits 深度精讲。".to_string()),
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "欢迎来到 Rust Traits 深度精讲。要真正读懂 Rust，首先要忘掉面向对象里的基类继承。".to_string(),
             left_reveal: Some(1),
             right_reveal: Some(1),
@@ -782,6 +783,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "Trait 的思想源于 Haskell 的 Typeclass：它不是数据的父节点，而是一份正交的共享行为契约。".to_string(),
             left_reveal: Some(2),
             right_reveal: Some(4),
@@ -790,6 +792,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "结构体负责规定字节在内存里怎么摆放，而 Trait 负责声明这个类型向外界承诺哪些能力。".to_string(),
             left_reveal: Some(3),
             right_reveal: Some(4),
@@ -798,6 +801,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "正因为数据与行为彻底解耦，任何独立演化的类型都能在不改动内存布局的前提下，安全地接入标准库与生态系统的通用算法。".to_string(),
             left_reveal: None,
             right_reveal: Some(5),
@@ -882,6 +886,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第二章我们看如何精确描述一个 Trait。除了普通的方法签名，Rust 提供了四项关键表达工具。第一，通过借用、可变借用或按值获取所有权的接收者，直接在签名上钉死所有权流转；".to_string(),
             left_reveal: Some(4),
             right_reveal: Some(1),
@@ -890,6 +895,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "第二，用少量核心方法驱动大量默认实现，就像标准库迭代器只要求你写一个 next，就白送几十个组合子；".to_string(),
             left_reveal: Some(4),
             right_reveal: None,
@@ -1007,6 +1013,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第三，区分关联类型与泛型参数：输入多态用泛型，输出唯一用关联类型；".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1015,6 +1022,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "第四，用 Supertrait 声明前置契约。".to_string(),
             left_reveal: None,
             right_reveal: Some(4),
@@ -1131,6 +1139,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第三章进入 Trait 的核心引擎室：静态分发与动态分发。".to_string(),
             left_reveal: None,
             right_reveal: Some(1),
@@ -1139,6 +1148,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "当你写泛型约束或 impl Trait 时，Rust 编译器在编译期执行单态化，为每个具体类型生成专属机器码，函数可以直接内联，实现真正的零成本抽象。".to_string(),
             left_reveal: None,
             right_reveal: Some(4),
@@ -1275,6 +1285,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "而当你需要在一个集合里混装多种运行时才确定的类型时，借用 dyn Trait 会构造一个十六字节的胖指针：前八字节指向真实数据，后八字节指向只读虚表。".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1283,6 +1294,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "数据本身依然没有对象头负担，鱼与熊掌各归其位。".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1347,6 +1359,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第四章我们把视野拉开，横向对比面向对象类继承与 C 语言函数指针。传统面向对象把数据继承与接口多态绑死在脆弱的基类树上，不仅容易陷入菱形继承泥潭，还迫使每个对象实例都背负隐藏的对象头或虚表指针。".to_string(),
             left_reveal: Some(2),
             right_reveal: None,
@@ -1355,6 +1368,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "而在 C 语言里，像 Linux 内核的文件操作表虽然用函数指针结构体加 void 星号实现了零开销解耦，但 void 星号彻底擦除了类型与生命周期，一次错误的强制转换就是内存破坏。".to_string(),
             left_reveal: Some(4),
             right_reveal: None,
@@ -1363,6 +1377,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "Rust Trait 恰好融合了两者的精华：既有组合优于继承的正交弹性，又有超越手写虚表的编译期绝对安全。".to_string(),
             left_reveal: Some(5),
             right_reveal: None,
@@ -1474,6 +1489,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第五章聚焦生产实战中最容易踩坑的四个问题。第一是孤儿规则：为了防止链接期实现冲突，Trait 和目标类型至少要有一个定义在当前包内，需要跨包桥接时请使用零开销的 Newtype 包装。".to_string(),
             left_reveal: None,
             right_reveal: Some(1),
@@ -1482,6 +1498,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "第二是 dyn 兼容性：含有泛型方法或按值返回 Self 的 Trait 无法直接生成单张静态虚表。".to_string(),
             left_reveal: None,
             right_reveal: Some(4),
@@ -1559,6 +1576,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "第三是单态化膨胀：对外暴露泛型便利接口时，应当把核心重逻辑下沉到非泛型的内部函数里减少二进制体积。".to_string(),
             left_reveal: None,
             right_reveal: Some(1),
@@ -1567,6 +1585,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "第四条最重要：在第二个真实实现出现之前，绝不要为了显得高级而提前抽空壳 Trait。".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1664,6 +1683,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         notes: None,
         steps: vec![
           SlideStep {
+            spoken: None,
             caption: "最后一章，让我们跳出语法细节，思考 Rust Trait 背后的工程哲学。传统分类学总在追问一个事物是什么，一旦业务演化跨越树状层级，重构就举步维艰；而 Trait 只追问它在当前上下文里能履行什么契约。".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1672,6 +1692,7 @@ fn build_rust_traits_deck() -> SlideDeck {
             show_takeaway: Some(false),
           },
           SlideStep {
+            spoken: None,
             caption: "更令人着迷的是像 Send 和 Sync 这样的标记 Trait：它们连一行运行期指令都没有，却把并发数据竞争从凌晨三点的线上崩溃，前移成了编译期的一条清晰报错。".to_string(),
             left_reveal: None,
             right_reveal: Some(3),
@@ -1747,6 +1768,7 @@ fn build_rust_traits_deck() -> SlideDeck {
         ),
         notes: None,
         steps: vec![SlideStep {
+          spoken: None,
           caption: "用最薄、最正交的契约切开复杂系统的变化边界，这就是 Rust 献给现代系统工程的最高智慧。".to_string(),
           left_reveal: Some(6),
           right_reveal: None,
