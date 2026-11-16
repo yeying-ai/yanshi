@@ -78,9 +78,15 @@ inputs:
   image_size:
     description: "生成插图画面比例或尺寸"
     default: "16:9"
+  style_preset:
+    description: "插图艺术指导预设：'editorial_tech' | 'isometric_3d' | 'flat_vector' | 'blueprint_schematic' | 'scientific_diagram' | 'cinematic_keynote'"
+    default: "editorial_tech"
   visual_style:
-    description: "AI 插图统一视觉艺术风格（英文描述，严禁出现任何文字或字母）"
-    default: "dark slate systems-engineering architectural illustration, glowing copper-orange and cyan conduits, crisp isometric geometry, studio lighting, strictly no text, no letters, no watermark"
+    description: "AI 插图补充视觉艺术风格（与 style_preset 叠加生效）"
+    default: "glowing copper-orange and cyan conduits, crisp architectural geometry, studio rim lighting"
+  refine_prompt:
+    description: "是否先经艺术总监模型精炼视觉隐喻提示词"
+    default: true
   video_model:
     description: "可选动态主讲人视频模型（留空默认使用高清演播室讲师形象卡，兼容所有厂商 Key；如有视频权限可填 veo-3.1-fast-generate-001 / kling-4.0-flash / hailuo-02）"
     default: ""
@@ -121,7 +127,10 @@ nodes:
           "source_repo": {{ source_repo | json_encode() }},
           "source_pdf": {{ source_pdf | json_encode() }},
           "chat_model": {{ chat_model | json_encode() }},
+          "slide_theme": {{ slide_theme | json_encode() }},
           "d2_theme": {% if slide_theme == "dark" %}"200"{% else %}"0"{% endif %},
+          "enable_illustrations": {{ enable_illustrations }},
+          "visual_style": {{ visual_style | json_encode() }},
           "image_model": {{ image_model | json_encode() }},
           "image_size": {{ image_size | json_encode() }},
           "video_model": {{ video_model | json_encode() }},
@@ -508,70 +517,29 @@ nodes:
       png_width: 1600
       max_attempts: 4
 
-  - id: illustration_jobs
-    type: template
-    dependencies: ["deck"]
+  - id: illustrate
+    type: illustration
+    dependencies: ["deck", "mode_flags"]
     input_mapping:
-      draft: "{{ nodes.deck.outputs.output }}"
+      deck: "{{ nodes.deck.outputs.output }}"
+      arch_image: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
+      model: "{{ nodes.mode_flags.outputs.image_model }}"
+      prompt_model: "{{ nodes.mode_flags.outputs.chat_model }}"
+      size: "{{ nodes.mode_flags.outputs.image_size }}"
+      style: "{{ nodes.mode_flags.outputs.visual_style }}"
+      theme: "{{ nodes.mode_flags.outputs.slide_theme }}"
+      enabled: "{{ nodes.mode_flags.outputs.enable_illustrations }}"
     parameters:
-      output_format: json
-      template: |
-        {"items": [{% if enable_illustrations %}{% set_global first = true %}{% set_global count = 0 %}{% for s in draft.slides %}{% if s.visual_mode is defined and s.visual_mode == "illustration" and s.illustration_prompt is defined and s.illustration_prompt != "" and count < 3 %}{% if not first %},{% endif %}{% set_global first = false %}{% set_global count = count + 1 %}{% set full_prompt = s.illustration_prompt ~ ". Style: " ~ visual_style %}{"slide_index": {{ loop.index0 }}, "visual": {{ full_prompt | json_encode() }}, "caption": {{ s.illustration_caption | default(value=s.title) | json_encode() }}, "image_model": {{ image_model | json_encode() }}, "image_size": {{ image_size | json_encode() }}}{% endif %}{% endfor %}{% endif %}]}
-
-  - id: illustrations
-    type: map
-    dependencies: ["illustration_jobs"]
-    input_mapping:
-      input_list: "{{ nodes.illustration_jobs.outputs.items }}"
-    parameters:
-      parallel: true
+      arch_title: "核心系统架构图 (D2)"
+      max_images: 3
       max_concurrent: 3
-      template:
-        - id: paint
-          type: text_to_image
-          input_mapping:
-            visual: "{{ item.visual }}"
-            model: "{{ item.image_model }}"
-            size: "{{ item.image_size }}"
-          parameters:
-            prompt: "{{visual}}"
-
-  - id: final_deck_spec
-    type: template
-    dependencies: ["deck", "illustration_jobs", "illustrations"]
-    input_mapping:
-      draft: "{{ nodes.deck.outputs.output }}"
-      arch_png: "{{ nodes.arch_figure.outputs.arch_figure_png }}"
-      jobs: "{{ nodes.illustration_jobs.outputs.items }}"
-      painted: "{{ nodes.illustrations.outputs.results }}"
-    parameters:
-      output_format: json
-      template: |
-        {"deck": {
-          "title": {{ draft.title | json_encode() }},
-          "subtitle": {{ draft.subtitle | default(value="") | json_encode() }},
-          "author": {{ draft.author | default(value="Yanshi Keynote Studio") | json_encode() }},
-          "theme": {{ slide_theme | json_encode() }},
-          "slides": [
-            {% for s in draft.slides %}{% set idx = loop.index0 %}{% set vmode = s.visual_mode | default(value="structured_panel") %}{% set_global img_src = "" %}{% set_global img_title = "" %}{% set_global img_cap = "" %}{% if vmode == "arch_diagram" and arch_png is defined and arch_png %}{% set_global img_src = arch_png %}{% set_global img_title = "核心系统架构图 (D2)" %}{% set_global img_cap = s.title %}{% elif vmode == "illustration" %}{% for j in jobs %}{% if j.slide_index == idx %}{% set r = painted | nth(n=loop.index0) %}{% if r.paint and r.paint.Ok %}{% set_global img_src = r.paint.Ok.paint_image.path %}{% set_global img_title = "技术概念视觉隐喻" %}{% set_global img_cap = j.caption %}{% endif %}{% endif %}{% endfor %}{% endif %}{
-              "section": {{ s.section | default(value="") | json_encode() }},
-              "title": {{ s.title | json_encode() }},
-              "subtitle": {{ s.subtitle | default(value="") | json_encode() }},
-              "left": {{ s.left | json_encode() }},
-              {% if img_src != "" %}"right": {"kind": "image", "title": {{ img_title | json_encode() }}, "src": {{ img_src | json_encode() }}, "caption": {{ img_cap | json_encode() }}},{% elif s.right is defined and s.right %}"right": {{ s.right | json_encode() }},{% endif %}
-              "split_ratio": {{ s.split_ratio | default(value=0.52) | json_encode() }},
-              "takeaway": {{ s.takeaway | default(value="") | json_encode() }},
-              "notes": {{ s.notes | default(value="") | json_encode() }}{% if s.steps is defined and s.steps %},
-              "steps": {{ s.steps | json_encode() }}{% endif %}
-            }{% if not loop.last %},{% endif %}{% endfor %}
-          ]
-        }}
+      graceful_fallback: true
 
   - id: slides
     type: render_slides
-    dependencies: ["final_deck_spec", "mode_flags"]
+    dependencies: ["illustrate", "mode_flags"]
     input_mapping:
-      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
+      deck: "{{ nodes.illustrate.outputs.illustrate_deck }}"
       pip_safe_zone: "{{ nodes.mode_flags.outputs.is_pip }}"
       takeaway_only_bar: "{{ nodes.mode_flags.outputs.burn_subtitles }}"
     parameters:
@@ -580,10 +548,10 @@ nodes:
 
   - id: tts_items
     type: template
-    dependencies: ["slides", "final_deck_spec", "mode_flags"]
+    dependencies: ["slides", "illustrate", "mode_flags"]
     input_mapping:
       beats: "{{ nodes.slides.outputs.slides_steps }}"
-      plan: "{{ nodes.final_deck_spec.outputs.deck }}"
+      plan: "{{ nodes.illustrate.outputs.illustrate_deck }}"
       is_intro_outro: "{{ nodes.mode_flags.outputs.is_intro_outro }}"
       p_img: "{{ nodes.presenter_portrait.outputs.presenter_portrait_image }}"
       p_vid: "{{ nodes.presenter_clip.outputs.presenter_clip_video }}"
@@ -687,37 +655,20 @@ nodes:
       height: 1080
       transition: fade
 
-  - id: deck_pptx
-    type: render_document
-    dependencies: ["slides", "mode_flags"]
-    run_if: "{{ nodes.mode_flags.outputs.pptx }}"
-    input_mapping:
-      markdown: "{{ nodes.slides.outputs.slides_markdown }}"
-    parameters:
-      format: pptx
-
-  - id: deck_pdf
-    type: render_document
-    dependencies: ["slides", "mode_flags"]
-    run_if: "{{ nodes.mode_flags.outputs.pdf }}"
-    input_mapping:
-      markdown: "{{ nodes.slides.outputs.slides_markdown }}"
-    parameters:
-      format: pdf
-
   - id: deliverable
     type: template
-    dependencies: ["final_deck_spec", "film", "slides"]
+    dependencies: ["illustrate", "film", "slides"]
     input_mapping:
-      plan: "{{ nodes.final_deck_spec.outputs.deck }}"
+      plan: "{{ nodes.illustrate.outputs.illustrate_deck }}"
+      painted: "{{ nodes.illustrate.outputs.illustrate_images }}"
       mp4: "{{ nodes.film.outputs.film_output }}"
       srt: "{{ nodes.film.outputs.film_subtitles }}"
       vtt: "{{ nodes.film.outputs.film_vtt }}"
       seconds: "{{ nodes.film.outputs.film_seconds }}"
       html: "{{ nodes.slides.outputs.slides_html }}"
       arch_svg: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
-      pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_output }}"
-      pdf: "{{ nodes.deck_pdf.outputs.deck_pdf_output }}"
+      pptx: "{{ nodes.slides.outputs.slides_pptx }}"
+      pdf: "{{ nodes.slides.outputs.slides_pdf }}"
     parameters:
       output_format: json
       template: |
@@ -735,8 +686,9 @@ nodes:
             {"node_id": "film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"}{% if vtt is defined and vtt %},
             {"node_id": "film", "name": {{ vtt | split(pat="/") | last | json_encode() }}, "mime_type": "text/vtt", "role": "asset"}{% endif %},
             {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if arch_svg is defined and arch_svg %},
-            {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% if pptx is defined and pptx %},
-            {"node_id": "deck_pptx", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
-            {"node_id": "deck_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+            {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% for img in painted %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
+            {"node_id": "slides", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
+            {"node_id": "slides", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}

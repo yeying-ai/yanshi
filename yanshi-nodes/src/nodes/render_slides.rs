@@ -1340,6 +1340,12 @@ fn resolve_artifact_image_data_uri(src: &str) -> Option<String> {
   };
   let mime = crate::common::artifacts::sniff_image_mime(&bytes).unwrap_or(ext_mime);
   use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+  if mime == "image/svg+xml"
+    && let Ok(svg_str) = std::str::from_utf8(&bytes)
+    && let Ok(png_bytes) = svg_to_png(svg_str, Some(1600))
+  {
+    return Some(format!("data:image/png;base64,{}", B64.encode(&png_bytes)));
+  }
   Some(format!("data:{mime};base64,{}", B64.encode(&bytes)))
 }
 
@@ -3480,6 +3486,11 @@ impl AsyncNode for RenderSlidesNode {
         extra_links.push(("下载可编辑 PPTX", fname.to_string()));
       }
       outputs.insert(format!("{}_pptx", self.id), pptx_file);
+    } else {
+      outputs.insert(
+        format!("{}_pptx", self.id),
+        FlowValue::Json(Value::String(String::new())),
+      );
     }
 
     if export_pdf {
@@ -3491,6 +3502,11 @@ impl AsyncNode for RenderSlidesNode {
         extra_links.push(("下载 16:9 PDF 讲义", fname.to_string()));
       }
       outputs.insert(format!("{}_pdf", self.id), pdf_file);
+    } else {
+      outputs.insert(
+        format!("{}_pdf", self.id),
+        FlowValue::Json(Value::String(String::new())),
+      );
     }
 
     let link_refs: Vec<(&str, &str)> = extra_links

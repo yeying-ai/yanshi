@@ -17,7 +17,7 @@ use yanshi_core::{FlowExecutionConfig, FlowExt, value::FlowValue};
 
 #[tokio::test]
 async fn tech_slides_video_generator_produces_1080p_mp4_pip_pptx_and_html_player() {
-  for bin in ["ffmpeg", "ffprobe", "pandoc"] {
+  for bin in ["ffmpeg", "ffprobe"] {
     if yanshi_nodes::common::sandboxed::find_tool(bin).is_none() {
       eprintln!("skipping: {bin} is not installed");
       return;
@@ -173,19 +173,26 @@ async fn tech_slides_video_generator_produces_1080p_mp4_pip_pptx_and_html_player
 
   let FlowValue::File {
     path: pptx_path, ..
-  } = &state["deck_pptx"].as_ref().expect("pptx")["deck_pptx_output"]
+  } = &state["slides"].as_ref().expect("slides")["slides_pptx"]
   else {
-    panic!("expected pptx file");
+    panic!("expected native pptx file");
   };
   let mut zip = zip::ZipArchive::new(std::fs::File::open(pptx_path).expect("pptx")).expect("zip");
+  let mut slides_xml = String::new();
   let mut notes_xml = String::new();
   for i in 0..zip.len() {
     let mut entry = zip.by_index(i).expect("entry");
     let name = entry.name().expect("utf-8 zip entry").into_owned();
-    if name.starts_with("ppt/notesSlides/") && name.ends_with(".xml") {
+    if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+      entry.read_to_string(&mut slides_xml).expect("utf-8");
+    } else if name.starts_with("ppt/notesSlides/") && name.ends_with(".xml") {
       entry.read_to_string(&mut notes_xml).expect("utf-8");
     }
   }
+  assert!(
+    slides_xml.contains("正交能力契约") && slides_xml.contains("Summary"),
+    "native editable code and callout shapes present in slide XML"
+  );
   assert!(
     notes_xml.contains("Summary"),
     "speaker notes preserved in pptx"

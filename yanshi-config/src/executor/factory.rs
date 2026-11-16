@@ -313,6 +313,11 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
     "figure" => Ok(NodeType::Standard(Arc::new(
       yanshi_nodes_ai::nodes::figure::FigureNode::new(&node_def.id),
     ))),
+    "illustration" => {
+      let node = yanshi_nodes_ai::nodes::illustration::IllustrationNode::new(&node_def.id)
+        .with_output_format(get_output_format(&node_def.parameters)?);
+      Ok(NodeType::Standard(Arc::new(node)))
+    }
     // Y3.3: external, pandoc (+ typst for PDF) under the OS sandbox.
     "render_document" => Ok(NodeType::Standard(Arc::new(
       yanshi_nodes::nodes::render::RenderDocumentNode::new(&node_def.id),

@@ -151,6 +151,11 @@ pub fn apply_model_override(
       "model".to_string(),
       FlowValue::Json(Value::String(model.to_string())),
     );
+  } else if node_def.node_type == "illustration" {
+    graph_node
+      .initial_inputs
+      .entry("prompt_model".to_string())
+      .or_insert_with(|| FlowValue::Json(Value::String(model.to_string())));
   }
   let body_key = match node_def.node_type.as_str() {
     "map" => "template",

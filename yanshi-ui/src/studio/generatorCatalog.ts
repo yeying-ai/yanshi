@@ -59,7 +59,7 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
   {
     id: 'illustrated_slides',
     title: '主题调研与精美配图 PPT (Illustrated Slides)',
-    subtitle: '联网检索 → 规划大纲 → 按讲解风格填充 → AI 定制插图 + D2 架构图 → HTML / PPTX / PDF',
+    subtitle: '联网检索 → 规划大纲 → 艺术总监精炼配图 + D2 架构图 → 原生 OOXML 可编辑 PPTX + 16:9 PDF + HTML',
     badge: '日常生产力',
     category: '课件与视频',
     yaml: illustratedSlidesYaml,
@@ -99,7 +99,7 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
   {
     id: 'tech_slides_video',
     title: '拟真人 PPT 演播级技术精讲视频 (Keynote Presenter Video)',
-    subtitle: '联网/仓库/PDF 多源支撑 → 视线引导口播与 D2/AI 插图幻灯片 → 毫秒级按步配音 + 聚光灯/画中画三模式 1080p 视频 + PPTX/PDF',
+    subtitle: '多源支撑 → 视线引导口播 + 精美插图/D2 架构图 → 按步配音三模式 1080p 视频 + 原生可编辑 PPTX / 16:9 PDF',
     badge: '旗舰工作流',
     category: '课件与视频',
     yaml: techSlidesVideoYaml,
@@ -107,7 +107,7 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
   {
     id: 'slides',
     title: '通用主题演示课件 (Slides)',
-    subtitle: '来源资料自动提炼大纲与章节要点，渲染可播放 HTML 幻灯片与 PPTX/PDF 讲义',
+    subtitle: '来源资料自动提炼大纲、结构化卡片与矢量图表，直出原生可编辑 OOXML PPTX 与 HTML 放映页',
     badge: '官方生成器',
     category: '课件与视频',
     yaml: slidesYaml,

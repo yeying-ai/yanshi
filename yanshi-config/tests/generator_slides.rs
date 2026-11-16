@@ -18,10 +18,6 @@ const FIGURE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" hei
 
 #[tokio::test]
 async fn slides_template_builds_a_pptx_with_an_svg_figure_and_notes() {
-  if yanshi_nodes::common::sandboxed::find_tool("pandoc").is_none() {
-    eprintln!("skipping: pandoc is not installed");
-    return;
-  }
   let dir = std::env::temp_dir().join(format!("yanshi-gen-slides-{}", std::process::id()));
   std::fs::create_dir_all(&dir).expect("dir");
   let registry = dir.join("models.yml");
@@ -67,8 +63,12 @@ async fn slides_template_builds_a_pptx_with_an_svg_figure_and_notes() {
     .await
     .expect("runs");
 
-  let FlowValue::File { path, .. } =
-    &state["deck_pptx"].as_ref().expect("pptx")["deck_pptx_output"]
+  let deck_pptx_res = state
+    .get("deck_pptx")
+    .unwrap_or_else(|| panic!("missing deck_pptx in state: {state:?}"));
+  let FlowValue::File { path, .. } = &deck_pptx_res
+    .as_ref()
+    .unwrap_or_else(|e| panic!("deck_pptx failed: {e} (state: {state:?})"))["deck_pptx_pptx"]
   else {
     panic!("pptx file");
   };
@@ -87,6 +87,17 @@ async fn slides_template_builds_a_pptx_with_an_svg_figure_and_notes() {
       .iter()
       .any(|n| n.starts_with("ppt/media/") && n.ends_with(".svg")),
     "the figure is an embedded SVG: {names:?}"
+  );
+  let mut slide2_xml = String::new();
+  zip
+    .by_name("ppt/slides/slide2.xml")
+    .expect("slide2.xml")
+    .read_to_string(&mut slide2_xml)
+    .expect("utf-8");
+  assert!(
+    slide2_xml.contains("The moon&#39;s gravity pulls the ocean")
+      || slide2_xml.contains("The moon's gravity pulls the ocean"),
+    "native editable bullet text present in slide2.xml"
   );
   let mut notes = String::new();
   for name in names

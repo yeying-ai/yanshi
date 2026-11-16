@@ -33,15 +33,32 @@ inputs:
     description: "Figure languages the deck may use (svg is always available; tikz / typst / d2 / python need their renderers; d2 suits boxes-and-arrows diagrams)"
     default: "svg"
   theme:
-    description: "Name of a reference .pptx in YANSHI_THEMES_DIR; empty for pandoc's default look"
+    description: "Built-in palette ('dark' or 'light'), empty for default 'dark', or a reference .pptx name in YANSHI_THEMES_DIR"
     default: ""
+  enable_illustrations:
+    description: "Generate art-directed AI illustrations for slides without an explicit figure"
+    default: false
+  image_model:
+    description: "Text-to-image model used when enable_illustrations is true"
+    default: "gemini-3.1-flash-image"
+  style_preset:
+    description: "Art-direction preset ('editorial_tech' | 'isometric_3d' | 'flat_vector' | 'scientific_diagram' | 'cinematic_keynote')"
+    default: "editorial_tech"
 
 nodes:
   - id: options
     type: template
     parameters:
       output_format: json
-      template: '{"has_url": {{ url != "" }}}'
+      template: |
+        {
+          "has_url": {{ url != "" }},
+          "use_native": {{ theme == "" or theme == "dark" or theme == "light" }},
+          "use_ref_doc": {{ theme != "" and theme != "dark" and theme != "light" }},
+          "palette": {% if theme == "light" %}"light"{% else %}"dark"{% endif %},
+          "enable_illustrations": {{ enable_illustrations }},
+          "image_model": {{ image_model | json_encode() }}
+        }
 
   # `url` (the workflow input) reaches the node directly.
   - id: fetch
@@ -134,11 +151,66 @@ nodes:
             png: true
             png_width: 1600
 
-  # Markdown slides: `##` per slide, bullets, the figure (an SVG of this
-  # run), and speaker notes.
+  - id: deck_spec
+    type: template
+    dependencies: ["figures", "deck", "figure_items", "options"]
+    input_mapping:
+      plan: "{{ nodes.deck.outputs.output }}"
+      wanted: "{{ nodes.figure_items.outputs.items }}"
+      drawn: "{{ nodes.figures.outputs.results }}"
+      palette: "{{ nodes.options.outputs.palette }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deck": {
+          "title": {{ plan.title | json_encode() }},
+          "subtitle": {{ plan.subtitle | default(value="") | json_encode() }},
+          "theme": {{ palette | json_encode() }},
+          "slides": [
+            {% for s in plan.slides %}{% set slide = loop.index0 %}{% set_global fig_src = "" %}{% set_global fig_desc = "" %}{% for w in wanted %}{% if w.slide == slide %}{% set r = drawn | nth(n=loop.index0) %}{% if r.fig and r.fig.Ok %}{% set_global fig_src = r.fig.Ok.fig_svg.path %}{% set_global fig_desc = w.description %}{% endif %}{% endif %}{% endfor %}{
+              "title": {{ s.title | json_encode() }},
+              "left": {
+                "kind": "bullets",
+                "items": [{% for b in s.bullets %}{"heading": {{ b | json_encode() }}, "body": ""}{% if not loop.last %},{% endif %}{% endfor %}]
+              },
+              {% if fig_src != "" %}"right": {"kind": "image", "title": "Figure", "src": {{ fig_src | json_encode() }}, "caption": {{ fig_desc | json_encode() }}},
+              "visual_mode": "structured_panel",{% else %}{% set joined_b = s.bullets | join(sep="; ") %}{% set ill_p = s.title ~ ": " ~ joined_b %}"visual_mode": "illustration",
+              "illustration_prompt": {{ ill_p | json_encode() }},{% endif %}
+              "notes": {{ s.notes | json_encode() }}
+            }{% if not loop.last %},{% endif %}{% endfor %}
+          ]
+        }}
+
+  - id: illustrate
+    type: illustration
+    dependencies: ["deck_spec", "options"]
+    input_mapping:
+      deck: "{{ nodes.deck_spec.outputs.deck }}"
+      model: "{{ nodes.options.outputs.image_model }}"
+      theme: "{{ nodes.options.outputs.palette }}"
+      enabled: "{{ nodes.options.outputs.enable_illustrations }}"
+    parameters:
+      max_images: 3
+      max_concurrent: 3
+      graceful_fallback: true
+
+  - id: deck_pptx
+    type: render_slides
+    dependencies: ["illustrate", "options"]
+    run_if: "{{ nodes.options.outputs.use_native }}"
+    input_mapping:
+      deck: "{{ nodes.illustrate.outputs.illustrate_deck }}"
+    parameters:
+      width: 1920
+      progressive: false
+      section_cards: false
+      export_pptx: true
+
+  # Optional custom Pandoc `--reference-doc` path when `theme` names a file in YANSHI_THEMES_DIR.
   - id: assemble
     type: template
-    dependencies: ["figures", "deck", "figure_items"]
+    dependencies: ["figures", "deck", "figure_items", "options"]
+    run_if: "{{ nodes.options.outputs.use_ref_doc }}"
     input_mapping:
       plan: "{{ nodes.deck.outputs.output }}"
       wanted: "{{ nodes.figure_items.outputs.items }}"
@@ -161,9 +233,10 @@ nodes:
         :::
         {% endfor %}
 
-  - id: deck_pptx
+  - id: ref_pptx
     type: render_document
-    dependencies: ["assemble"]
+    dependencies: ["assemble", "options"]
+    run_if: "{{ nodes.options.outputs.use_ref_doc }}"
     input_mapping:
       markdown: "{{ nodes.assemble.outputs.output }}"
     parameters:
@@ -171,21 +244,24 @@ nodes:
 
   - id: deliverable
     type: template
-    dependencies: ["deck_pptx"]
+    dependencies: ["illustrate"]
     input_mapping:
       plan: "{{ nodes.deck.outputs.output }}"
       drawn: "{{ nodes.figures.outputs.results }}"
-      pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_output }}"
+      painted: "{{ nodes.illustrate.outputs.illustrate_images }}"
+      native_pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_pptx }}"
+      themed_pptx: "{{ nodes.ref_pptx.outputs.ref_pptx_output }}"
     parameters:
       output_format: json
       template: |
-        {"deliverable": {
+        {% if native_pptx is defined and native_pptx %}{% set use_native = true %}{% set out_pptx = native_pptx %}{% elif themed_pptx is defined and themed_pptx %}{% set use_native = false %}{% set out_pptx = themed_pptx %}{% else %}{% set use_native = true %}{% set out_pptx = "" %}{% endif %}{"deliverable": {
           "kind": "slides",
           "title": {{ plan.title | json_encode() }},
           "content": {"slides": {{ plan.slides | json_encode() }}},
           "citations": [],
           "files": [
-            {"node_id": "deck_pptx", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% for r in drawn %}{% if r.fig.Ok %},
-            {"node_id": "fig", "name": {{ r.fig.Ok.fig_svg.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% endfor %}
+            {"node_id": {% if use_native %}"deck_pptx"{% else %}"ref_pptx"{% endif %}, "name": {{ out_pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% for r in drawn %}{% if r.fig.Ok %},
+            {"node_id": "fig", "name": {{ r.fig.Ok.fig_svg.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% endfor %}{% for img in painted %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}
           ]
         }}

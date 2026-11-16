@@ -10,7 +10,8 @@ describe('inspectYamlLocally', () => {
     const res = inspectYamlLocally(TECH_SLIDES_VIDEO_YAML);
     expect(res.valid).toBe(true);
     expect(res.name).toBe('tech_slides_video');
-    expect(res.nodes.length).toBe(23);
+    expect(res.nodes.length).toBe(19);
+    expect(res.nodes.some((n) => n.id === 'illustrate' && n.type === 'illustration')).toBe(true);
     expect(res.inputs.find((i) => i.name === 'slide_count')?.kind).toBe('number');
     expect(res.inputs.find((i) => i.name === 'step_pause_ms')?.kind).toBe('number');
     expect(res.inputs.find((i) => i.name === 'presenter_mode')?.kind).toBe('string');
@@ -20,7 +21,7 @@ describe('inspectYamlLocally', () => {
     expect(narrate?.sub_nodes?.length).toBe(1);
     expect(narrate?.sub_nodes?.[0].type).toBe('tts');
 
-    expect(res.edges.some((e) => e.kind === 'condition' && e.to === 'deck_pptx')).toBe(true);
+    expect(res.edges.some((e) => e.kind === 'condition' && e.to === 'arch_figure')).toBe(true);
     expect(res.edges.some((e) => e.kind === 'condition' && e.to === 'presenter_portrait')).toBe(true);
     expect(res.levels.length).toBeGreaterThanOrEqual(6);
   });

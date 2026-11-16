@@ -18,29 +18,53 @@ inputs:
   slide_count:
     description: "幻灯片章节页数（4-10）"
     default: 6
+  enable_web_search:
+    description: "是否联网检索最新权威技术资料支撑论点"
+    default: true
   slide_theme:
     description: "幻灯片视觉配色主题：'dark' 或 'light'"
     default: "dark"
+  style_preset:
+    description: "插图艺术指导预设：'editorial_tech' | 'isometric_3d' | 'flat_vector' | 'blueprint_schematic' | 'scientific_diagram' | 'cinematic_keynote'"
+    default: "editorial_tech"
   visual_style:
-    description: "AI 插图统一艺术风格提示词（英文描述效果最佳，禁含文字）"
-    default: "modern clean flat editorial technology illustration, subtle isometric depth, harmonious sapphire and warm amber palette, crisp studio lighting, no text, no letters, no watermark"
+    description: "补充视觉风格细节（与 style_preset 叠加生效）"
+    default: "subtle isometric depth, harmonious sapphire and warm amber accents, crisp studio lighting"
+  refine_prompt:
+    description: "是否先经艺术总监模型精炼视觉隐喻提示词"
+    default: true
   enable_illustrations:
-    description: "是否调用文生图模型生成定制精美插图（设为 false 时仅使用 D2 矢量架构图与结构化面板）"
+    description: "是否调用精美插图节点生成定制配图（设为 false 时仅使用 D2 矢量架构图与结构化面板）"
     default: true
   image_model:
     description: "文生图模型名称（需在 models.yml 配置对应厂商密钥）"
     default: "gemini-3.1-flash-image"
   image_size:
-    description: "生成插图尺寸"
-    default: "1536x1024"
+    description: "生成插图尺寸或画幅比例（自动跨厂商归一化）"
+    default: "16:9"
   export_pptx:
-    description: "导出可编辑 PowerPoint (.pptx)"
+    description: "导出原生 Office OpenXML 可编辑 PowerPoint (.pptx)"
     default: true
   export_pdf:
-    description: "导出高清排版讲义 (.pdf)"
+    description: "导出 16:9 宽屏高清排版讲义 (.pdf)"
     default: true
 
 nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: |
+        {
+          "do_search": {{ enable_web_search }},
+          "slide_theme": {{ slide_theme | json_encode() }},
+          "d2_theme": {% if slide_theme == "dark" %}"200"{% else %}"0"{% endif %},
+          "visual_style": {{ visual_style | json_encode() }},
+          "enable_illustrations": {{ enable_illustrations }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }}
+        }
+
   - id: search_query
     type: template
     parameters:
@@ -48,7 +72,8 @@ nodes:
 
   - id: research
     type: web_search
-    dependencies: ["search_query"]
+    dependencies: ["options", "search_query"]
+    run_if: "{{ nodes.options.outputs.do_search }}"
     input_mapping:
       query: "{{ nodes.search_query.outputs.output }}"
     parameters:
@@ -56,7 +81,7 @@ nodes:
 
   - id: outline_prompt
     type: template
-    dependencies: ["research"]
+    dependencies: ["options"]
     input_mapping:
       search_notes: "{{ nodes.research.outputs.markdown }}"
     parameters:
@@ -71,7 +96,7 @@ nodes:
            - `"structured_panel"`：其余硬核拆解页使用双栏工程可视化对照（代码批注、对比矩阵表格、内存布局或思维导图）。
         3. 充分利用以下联网检索到的背景资料与真实技术细节支撑论点：
 
-        {{ search_notes | truncate(length=14000) }}
+        {{ search_notes | default(value="（已启用离线领域知识模式）") | truncate(length=14000) }}
 
   - id: plan_outline
     type: llm
@@ -121,9 +146,10 @@ nodes:
 
   - id: arch_figure
     type: figure
-    dependencies: ["arch_figure_desc"]
+    dependencies: ["arch_figure_desc", "options"]
     input_mapping:
       description: "{{ nodes.arch_figure_desc.outputs.output }}"
+      d2_theme: "{{ nodes.options.outputs.d2_theme }}"
     parameters:
       language: d2
       png: true
@@ -132,7 +158,7 @@ nodes:
 
   - id: expand_prompt
     type: template
-    dependencies: ["plan_outline", "research"]
+    dependencies: ["plan_outline"]
     input_mapping:
       outline: "{{ nodes.plan_outline.outputs.output }}"
       search_notes: "{{ nodes.research.outputs.markdown }}"
@@ -158,7 +184,7 @@ nodes:
         {{ outline | json_encode() }}
 
         参考检索资料：
-        {{ search_notes | truncate(length=10000) }}
+        {{ search_notes | default(value="（已启用离线领域知识模式）") | truncate(length=10000) }}
 
   - id: expand_slides
     type: llm
@@ -314,118 +340,54 @@ nodes:
                 takeaway: { type: string }
                 notes: { type: string }
 
-  - id: illustration_jobs
-    type: template
-    dependencies: ["expand_slides"]
+  - id: illustrate
+    type: illustration
+    dependencies: ["expand_slides", "arch_figure", "options"]
     input_mapping:
-      draft: "{{ nodes.expand_slides.outputs.output }}"
+      deck: "{{ nodes.expand_slides.outputs.output }}"
+      arch_image: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
+      model: "{{ nodes.options.outputs.image_model }}"
+      size: "{{ nodes.options.outputs.image_size }}"
+      style: "{{ nodes.options.outputs.visual_style }}"
+      theme: "{{ nodes.options.outputs.slide_theme }}"
+      enabled: "{{ nodes.options.outputs.enable_illustrations }}"
     parameters:
-      output_format: json
-      template: |
-        {"items": [{% if enable_illustrations %}{% set_global first = true %}{% set_global count = 0 %}{% for s in draft.slides %}{% if s.visual_mode == "illustration" and s.illustration_prompt and count < 4 %}{% if not first %},{% endif %}{% set_global first = false %}{% set_global count = count + 1 %}{% set full_prompt = s.illustration_prompt ~ ". Visual style: " ~ visual_style %}{"slide_index": {{ loop.index0 }}, "visual": {{ full_prompt | json_encode() }}, "caption": {{ s.illustration_caption | default(value=s.title) | json_encode() }}, "image_model": {{ image_model | json_encode() }}, "image_size": {{ image_size | json_encode() }}}{% endif %}{% endfor %}{% endif %}]}
-
-  - id: illustrations
-    type: map
-    dependencies: ["illustration_jobs"]
-    input_mapping:
-      input_list: "{{ nodes.illustration_jobs.outputs.items }}"
-    parameters:
-      parallel: true
+      max_images: 4
       max_concurrent: 3
-      template:
-        - id: paint
-          type: text_to_image
-          input_mapping:
-            visual: "{{ item.visual }}"
-            model: "{{ item.image_model }}"
-            size: "{{ item.image_size }}"
-          parameters:
-            prompt: "{{visual}}"
-
-  - id: final_deck_spec
-    type: template
-    dependencies: ["expand_slides", "arch_figure", "illustration_jobs", "illustrations"]
-    input_mapping:
-      draft: "{{ nodes.expand_slides.outputs.output }}"
-      arch_png: "{{ nodes.arch_figure.outputs.arch_figure_png }}"
-      jobs: "{{ nodes.illustration_jobs.outputs.items }}"
-      painted: "{{ nodes.illustrations.outputs.results }}"
-    parameters:
-      output_format: json
-      template: |
-        {"deck": {
-          "title": {{ draft.title | json_encode() }},
-          "subtitle": {{ draft.subtitle | default(value="") | json_encode() }},
-          "author": {{ draft.author | default(value="Yanshi Studio") | json_encode() }},
-          "theme": {{ slide_theme | json_encode() }},
-          "slides": [
-            {% for s in draft.slides %}{% set idx = loop.index0 %}{% set_global img_src = "" %}{% set_global img_title = "" %}{% set_global img_cap = "" %}{% if s.visual_mode == "arch_diagram" and arch_png %}{% set_global img_src = arch_png %}{% set_global img_title = "系统核心架构图 (D2)" %}{% set_global img_cap = s.title %}{% else %}{% for j in jobs %}{% if j.slide_index == idx %}{% set r = painted | nth(n=loop.index0) %}{% if r.paint and r.paint.Ok %}{% set_global img_src = r.paint.Ok.paint_image.path %}{% set_global img_title = "主题概念插图" %}{% set_global img_cap = j.caption %}{% endif %}{% endif %}{% endfor %}{% endif %}{
-              "section": {{ s.section | default(value="") | json_encode() }},
-              "title": {{ s.title | json_encode() }},
-              "subtitle": {{ s.subtitle | default(value="") | json_encode() }},
-              "left": {{ s.left | json_encode() }},
-              "right": {% if img_src != "" %}{"kind": "image", "title": {{ img_title | json_encode() }}, "src": {{ img_src | json_encode() }}, "caption": {{ img_cap | json_encode() }}}{% else %}{{ s.fallback_right | json_encode() }}{% endif %},
-              "split_ratio": 0.52,
-              "takeaway": {{ s.takeaway | json_encode() }},
-              "notes": {{ s.notes | json_encode() }}
-            }{% if not loop.last %},{% endif %}{% endfor %}
-          ]
-        }}
+      graceful_fallback: true
 
   - id: slides_render
     type: render_slides
-    dependencies: ["final_deck_spec"]
+    dependencies: ["illustrate"]
     input_mapping:
-      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
+      deck: "{{ nodes.illustrate.outputs.illustrate_deck }}"
     parameters:
       width: 1920
       progressive: false
 
-  - id: export_flags
-    type: template
-    parameters:
-      output_format: json
-      template: '{"pptx": {{ export_pptx }}, "pdf": {{ export_pdf }}}'
-
-  - id: deck_pptx
-    type: render_document
-    dependencies: ["slides_render", "export_flags"]
-    run_if: "{{ nodes.export_flags.outputs.pptx }}"
-    input_mapping:
-      markdown: "{{ nodes.slides_render.outputs.slides_render_markdown }}"
-    parameters:
-      format: pptx
-
-  - id: deck_pdf
-    type: render_document
-    dependencies: ["slides_render", "export_flags"]
-    run_if: "{{ nodes.export_flags.outputs.pdf }}"
-    input_mapping:
-      markdown: "{{ nodes.slides_render.outputs.slides_render_markdown }}"
-    parameters:
-      format: pdf
-
   - id: deliverable
     type: template
-    dependencies: ["final_deck_spec", "slides_render", "arch_figure", "deck_pptx", "deck_pdf"]
+    dependencies: ["illustrate", "slides_render", "arch_figure"]
     input_mapping:
-      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
+      deck: "{{ nodes.illustrate.outputs.illustrate_deck }}"
+      painted: "{{ nodes.illustrate.outputs.illustrate_images }}"
       html: "{{ nodes.slides_render.outputs.slides_render_html }}"
       arch_svg: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
-      pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_output }}"
-      pdf: "{{ nodes.deck_pdf.outputs.deck_pdf_output }}"
+      pptx: "{{ nodes.slides_render.outputs.slides_render_pptx }}"
+      pdf: "{{ nodes.slides_render.outputs.slides_render_pdf }}"
     parameters:
       output_format: json
       template: |
         {"deliverable": {
-          "kind": "illustrated_slides",
+          "kind": "slides",
           "title": {{ deck.title | json_encode() }},
           "content": {"slides": {{ deck.slides | json_encode() }}},
           "citations": [],
           "files": [
             {"node_id": "slides_render", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
-            {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% if pptx %},
-            {"node_id": "deck_pptx", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf %},
-            {"node_id": "deck_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+            {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% for img in painted %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
+            {"node_id": "slides_render", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
+            {"node_id": "slides_render", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}
