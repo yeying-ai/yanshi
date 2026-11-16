@@ -95,6 +95,37 @@ pub(crate) fn parse_image_response(body: &str) -> Result<ImageGenerationResponse
   })
 }
 
+pub(crate) fn normalize_glm_image_size(model: &str, size: &str) -> String {
+  let trimmed = size.trim().replace('*', "x");
+  if model.eq_ignore_ascii_case("glm-image") {
+    match trimmed.as_str() {
+      "16:9" | "1920x1080" | "1280x720" | "1344x768" | "1536x1024" | "1792x1024" => {
+        "1728x960".to_string()
+      }
+      "9:16" | "1080x1920" | "720x1280" | "768x1344" | "1024x1536" | "1024x1792" => {
+        "960x1728".to_string()
+      }
+      "4:3" | "1024x768" | "1152x864" => "1472x1088".to_string(),
+      "3:4" | "768x1024" | "864x1152" => "1088x1472".to_string(),
+      "1:1" | "1024x1024" | "512x512" => "1280x1280".to_string(),
+      _ => trimmed,
+    }
+  } else {
+    match trimmed.as_str() {
+      "16:9" | "1920x1080" | "1280x720" | "1536x1024" | "1792x1024" | "1728x960" => {
+        "1344x768".to_string()
+      }
+      "9:16" | "1080x1920" | "720x1280" | "1024x1536" | "1024x1792" | "960x1728" => {
+        "768x1344".to_string()
+      }
+      "4:3" | "1024x768" | "1472x1088" => "1152x864".to_string(),
+      "3:4" | "768x1024" | "1088x1472" => "864x1152".to_string(),
+      "1:1" | "1280x1280" => "1024x1024".to_string(),
+      _ => trimmed,
+    }
+  }
+}
+
 #[async_trait]
 impl Text2ImageProvider for GlmImageProvider {
   fn name(&self) -> &str {
@@ -107,8 +138,13 @@ impl Text2ImageProvider for GlmImageProvider {
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
     body.insert("prompt".to_string(), Value::String(request.prompt.clone()));
-    if let Some(ref size) = request.size {
-      body.insert("size".to_string(), Value::String(size.clone()));
+    if let Some(ref size) = request.size
+      && !size.trim().is_empty()
+    {
+      body.insert(
+        "size".to_string(),
+        Value::String(normalize_glm_image_size(&request.model, size)),
+      );
     }
 
     let response = self
@@ -171,5 +207,27 @@ mod tests {
   fn parse_image_response_with_invalid_json_returns_typed_error() {
     let err = parse_image_response("{not json").unwrap_err();
     assert!(err.to_string().contains("JSON parse failed"));
+  }
+
+  #[test]
+  fn cross_vendor_image_sizes_normalize_aspect_ratios_and_delimiters() {
+    assert_eq!(normalize_glm_image_size("glm-image", "16:9"), "1728x960");
+    assert_eq!(normalize_glm_image_size("cogview-4", "16:9"), "1344x768");
+    assert_eq!(
+      crate::providers::dashscope_media::normalize_dashscope_image_size("16:9"),
+      "1280*720"
+    );
+    assert_eq!(
+      crate::providers::dashscope_media::normalize_dashscope_image_size("1024x1024"),
+      "1024*1024"
+    );
+    assert_eq!(
+      crate::providers::openai_images::normalize_openai_image_size("gpt-image-1", "16:9"),
+      "1536x1024"
+    );
+    assert_eq!(
+      crate::providers::openai_images::normalize_openai_image_size("dall-e-3", "16:9"),
+      "1792x1024"
+    );
   }
 }

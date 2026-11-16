@@ -69,8 +69,13 @@ impl OpenAIImageProvider {
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
     body.insert("prompt".to_string(), Value::String(request.prompt.clone()));
-    if let Some(ref size) = request.size {
-      body.insert("size".to_string(), Value::String(size.clone()));
+    if let Some(ref size) = request.size
+      && !size.trim().is_empty()
+    {
+      body.insert(
+        "size".to_string(),
+        Value::String(normalize_openai_image_size(&request.model, size)),
+      );
     }
     if let Some(n) = request.n {
       body.insert("n".to_string(), Value::Number(n.into()));
@@ -120,6 +125,33 @@ impl OpenAIImageProvider {
 /// nothing.
 fn accepts_response_format(model: &str) -> bool {
   model.starts_with("dall-e")
+}
+
+pub(crate) fn normalize_openai_image_size(model: &str, size: &str) -> String {
+  let trimmed = size.trim().replace('*', "x");
+  if model.starts_with("dall-e-3") {
+    match trimmed.as_str() {
+      "16:9" | "4:3" | "1920x1080" | "1280x720" | "1344x768" | "1536x1024" | "1728x960" => {
+        "1792x1024".to_string()
+      }
+      "9:16" | "3:4" | "1080x1920" | "720x1280" | "768x1344" | "1024x1536" | "960x1728" => {
+        "1024x1792".to_string()
+      }
+      "1:1" | "1280x1280" => "1024x1024".to_string(),
+      _ => trimmed,
+    }
+  } else {
+    match trimmed.as_str() {
+      "16:9" | "4:3" | "1920x1080" | "1280x720" | "1344x768" | "1792x1024" | "1728x960" => {
+        "1536x1024".to_string()
+      }
+      "9:16" | "3:4" | "1080x1920" | "720x1280" | "768x1344" | "1024x1792" | "960x1728" => {
+        "1024x1536".to_string()
+      }
+      "1:1" | "1280x1280" => "1024x1024".to_string(),
+      _ => trimmed,
+    }
+  }
 }
 
 /// Map a filename's extension to an image MIME type. Falls back to

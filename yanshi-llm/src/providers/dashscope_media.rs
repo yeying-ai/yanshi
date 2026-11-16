@@ -364,6 +364,21 @@ fn mime_for_audio_url(url: &str) -> &'static str {
   }
 }
 
+pub(crate) fn normalize_dashscope_image_size(size: &str) -> String {
+  match size.trim() {
+    "16:9" | "1920x1080" | "1920*1080" | "1344x768" | "1536x1024" | "1792x1024" | "1728x960" => {
+      "1280*720".to_string()
+    }
+    "9:16" | "1080x1920" | "1080*1920" | "768x1344" | "1024x1536" | "1024x1792" | "960x1728" => {
+      "720*1280".to_string()
+    }
+    "4:3" | "1152x864" | "1472x1088" => "1024*768".to_string(),
+    "3:4" | "864x1152" | "1088x1472" => "768*1024".to_string(),
+    "1:1" | "1280x1280" => "1024*1024".to_string(),
+    other => other.replace(['x', 'X'], "*"),
+  }
+}
+
 #[async_trait]
 impl Text2ImageProvider for DashScopeMediaProvider {
   fn name(&self) -> &str {
@@ -377,8 +392,13 @@ impl Text2ImageProvider for DashScopeMediaProvider {
     );
 
     let mut parameters = serde_json::Map::new();
-    if let Some(ref size) = request.size {
-      parameters.insert("size".to_string(), Value::String(size.clone()));
+    if let Some(ref size) = request.size
+      && !size.trim().is_empty()
+    {
+      parameters.insert(
+        "size".to_string(),
+        Value::String(normalize_dashscope_image_size(size)),
+      );
     }
     if let Some(n) = request.n {
       parameters.insert("n".to_string(), Value::Number(n.into()));
@@ -448,8 +468,13 @@ fn images_from_results(results: Vec<TaskResult>) -> Result<ImageGenerationRespon
 pub(crate) fn image2image_request_body(request: &Image2ImageRequest) -> Value {
   let mut parameters = serde_json::Map::new();
   parameters.insert("n".to_string(), json!(request.n.unwrap_or(1)));
-  if let Some(size) = &request.size {
-    parameters.insert("size".to_string(), json!(size.replace('x', "*")));
+  if let Some(size) = &request.size
+    && !size.trim().is_empty()
+  {
+    parameters.insert(
+      "size".to_string(),
+      json!(normalize_dashscope_image_size(size)),
+    );
   }
   if let Some(seed) = request.seed {
     parameters.insert("seed".to_string(), json!(seed));
