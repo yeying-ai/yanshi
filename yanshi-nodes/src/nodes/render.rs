@@ -1154,14 +1154,38 @@ impl RenderVideoNode {
 struct SceneFrame {
   picture: std::path::PathBuf,
   caption: String,
+  audio: Option<std::path::PathBuf>,
 }
 
 struct Scene {
   picture: std::path::PathBuf,
   moving: bool,
   frames: Vec<SceneFrame>,
+  audio: Option<std::path::PathBuf>,
+  caption: String,
+  pause_after_ms: Option<u64>,
+  is_slide_start: bool,
+  is_slide_end: bool,
+  hide_pip: bool,
+}
+
+struct VideoBeat {
+  picture: std::path::PathBuf,
+  moving: bool,
+  frames: Vec<SceneFrame>,
   audio: std::path::PathBuf,
   caption: String,
+  pause_secs: f64,
+  fade_in: bool,
+  fade_out: bool,
+  hide_pip: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TimedCue {
+  start: f64,
+  end: f64,
+  text: String,
 }
 
 const VIDEO_FPS: u32 = 25;
@@ -1176,6 +1200,56 @@ fn srt_time(seconds: f64) -> String {
     ms / 1000 % 60,
     ms % 1000
   )
+}
+
+/// `HH:MM:SS.mmm` for WebVTT.
+fn vtt_time(seconds: f64) -> String {
+  let ms = (seconds.max(0.0) * 1000.0).round() as u64;
+  format!(
+    "{:02}:{:02}:{:02}.{:03}",
+    ms / 3_600_000,
+    ms / 60_000 % 60,
+    ms / 1000 % 60,
+    ms % 1000
+  )
+}
+
+fn subtitle_visual_units(s: &str) -> usize {
+  s.chars()
+    .map(|c| if (c as u32) >= 0x2E80 { 2 } else { 1 })
+    .sum()
+}
+
+/// Wrap long single-line subtitle text at a balanced clause boundary so burned/player captions stay <= 2 lines.
+fn wrap_subtitle_line(sentence: &str, max_halfwidth_units: usize) -> String {
+  let trimmed = sentence.trim();
+  let total_units = subtitle_visual_units(trimmed);
+  if total_units <= max_halfwidth_units || trimmed.contains('\n') {
+    return trimmed.to_string();
+  }
+  let chars: Vec<char> = trimmed.chars().collect();
+  let count = chars.len();
+  let mid = count / 2;
+  let mut best_split: Option<usize> = None;
+  let mut best_dist = usize::MAX;
+  for (idx, &ch) in chars.iter().enumerate() {
+    let is_break = matches!(ch, '，' | '、' | '：' | '；' | ',' | ':' | ';')
+      || (ch == ' ' && idx > 6 && idx + 6 < count);
+    if is_break && idx >= 5 && idx + 5 < count {
+      let dist = idx.abs_diff(mid);
+      if dist < best_dist {
+        best_dist = dist;
+        best_split = Some(idx + 1);
+      }
+    }
+  }
+  if let Some(split_at) = best_split {
+    let left: String = chars[..split_at].iter().collect();
+    let right: String = chars[split_at..].iter().collect();
+    format!("{}\n{}", left.trim(), right.trim())
+  } else {
+    trimmed.to_string()
+  }
 }
 
 /// Split a caption into sentences (Latin and CJK end marks), so one
@@ -1215,27 +1289,105 @@ fn caption_sentences(caption: &str) -> Vec<String> {
 
 /// SRT for scenes of the given durations: each caption's sentences
 /// share its scene's time in proportion to their length.
+#[cfg(test)]
 fn build_srt(captions: &[&str], durations: &[f64]) -> String {
-  let mut srt = String::new();
-  let mut cue = 1;
-  let mut start = 0.0;
-  for (caption, duration) in captions.iter().zip(durations) {
-    let sentences = caption_sentences(caption);
-    let total: usize = sentences.iter().map(|s| s.chars().count()).sum();
+  let mut windows = Vec::with_capacity(captions.len());
+  let mut cursor = 0.0;
+  for (&cap, &dur) in captions.iter().zip(durations) {
+    windows.push((cap, cursor, cursor + dur));
+    cursor += dur;
+  }
+  cues_to_srt(&build_timed_cues(&windows))
+}
+
+/// Build subtitle cues anchored strictly to `[speech_start, speech_end]` windows
+/// so silent breathing pauses between steps/slides do not hold stale captions.
+fn build_timed_cues(windows: &[(&str, f64, f64)]) -> Vec<TimedCue> {
+  let mut cues = Vec::new();
+  for &(caption, start, end) in windows {
+    let trimmed = caption.trim();
+    if trimmed.is_empty() || end <= start {
+      continue;
+    }
+    let duration = (end - start).max(0.05);
+    let sentences = caption_sentences(trimmed);
+    let total: usize = sentences.iter().map(|s| s.chars().count().max(1)).sum();
     let mut t = start;
-    for sentence in &sentences {
-      let share = duration * sentence.chars().count() as f64 / total.max(1) as f64;
-      srt.push_str(&format!(
-        "{cue}\n{} --> {}\n{sentence}\n\n",
-        srt_time(t),
-        srt_time(t + share)
-      ));
-      cue += 1;
+    for (idx, sentence) in sentences.iter().enumerate() {
+      let share = if idx + 1 == sentences.len() {
+        (end - t).max(0.05)
+      } else {
+        duration * sentence.chars().count().max(1) as f64 / total.max(1) as f64
+      };
+      cues.push(TimedCue {
+        start: t,
+        end: t + share,
+        text: wrap_subtitle_line(sentence, 54),
+      });
       t += share;
     }
-    start += duration;
+  }
+  cues
+}
+
+fn cues_to_srt(cues: &[TimedCue]) -> String {
+  let mut srt = String::new();
+  for (idx, cue) in cues.iter().enumerate() {
+    srt.push_str(&format!(
+      "{}\n{} --> {}\n{}\n\n",
+      idx + 1,
+      srt_time(cue.start),
+      srt_time(cue.end),
+      cue.text
+    ));
   }
   srt
+}
+
+fn cues_to_vtt(cues: &[TimedCue]) -> String {
+  let mut vtt = String::from("WEBVTT\n\n");
+  for (idx, cue) in cues.iter().enumerate() {
+    vtt.push_str(&format!(
+      "{}\n{} --> {}\n{}\n\n",
+      idx + 1,
+      vtt_time(cue.start),
+      vtt_time(cue.end),
+      cue.text
+    ));
+  }
+  vtt
+}
+
+/// Render crisp vector grayscale alpha mask + studio accent border ring PNGs for PiP presenter overlay.
+fn render_pip_overlay_chrome(pip_w: u32, pip_h: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
+  let rx = (pip_h as f32 * 0.09).clamp(10.0, 22.0);
+  let mask_svg = format!(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pip_w}\" height=\"{pip_h}\" viewBox=\"0 0 {pip_w} {pip_h}\">\
+       <rect width=\"{pip_w}\" height=\"{pip_h}\" fill=\"#000000\"/>\
+       <rect x=\"0\" y=\"0\" width=\"{pip_w}\" height=\"{pip_h}\" rx=\"{rx:.1}\" fill=\"#FFFFFF\"/>\
+     </svg>"
+  );
+  let mask_png = svg_to_png(&mask_svg, Some(pip_w))?;
+
+  let bw = pip_w + 8;
+  let bh = pip_h + 8;
+  let brx = rx + 3.0;
+  let border_svg = format!(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{bw}\" height=\"{bh}\" viewBox=\"0 0 {bw} {bh}\">\
+       <defs>\
+         <linearGradient id=\"pipRing\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\
+           <stop offset=\"0%\" stop-color=\"#F97316\"/>\
+           <stop offset=\"55%\" stop-color=\"#38BDF8\"/>\
+           <stop offset=\"100%\" stop-color=\"#A78BFA\"/>\
+         </linearGradient>\
+       </defs>\
+       <rect x=\"2.5\" y=\"2.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"{brx:.1}\" fill=\"none\" stroke=\"url(#pipRing)\" stroke-width=\"3\"/>\
+     </svg>",
+    bw as f32 - 5.0,
+    bh as f32 - 5.0
+  );
+  let border_png = svg_to_png(&border_svg, Some(bw))?;
+  Ok((mask_png, border_png))
 }
 
 /// Whether `ffmpeg -filters` output lists the libass `subtitles` filter
@@ -1247,6 +1399,46 @@ fn has_subtitles_filter(listing: &str) -> bool {
 }
 
 impl RenderVideoNode {
+  fn optional_artifact_file(
+    &self,
+    inputs: &AsyncNodeInputs,
+    key: &str,
+  ) -> Result<Option<std::path::PathBuf>, YanshiError> {
+    let Some(val) = inputs.get(key) else {
+      return Ok(None);
+    };
+    match val {
+      FlowValue::Json(Value::Null) => Ok(None),
+      FlowValue::Json(Value::String(s)) if s.trim().is_empty() => Ok(None),
+      FlowValue::File { path, .. } => {
+        if path.as_os_str().is_empty() {
+          Ok(None)
+        } else {
+          Ok(Some(inside_artifact_root(&self.id, path)?))
+        }
+      }
+      FlowValue::Json(v) => {
+        let p = json_path(&self.id, v, key)?;
+        if p.as_os_str().is_empty() {
+          Ok(None)
+        } else {
+          Ok(Some(inside_artifact_root(&self.id, &p)?))
+        }
+      }
+      _ => Ok(None),
+    }
+  }
+
+  fn optional_ms(&self, inputs: &AsyncNodeInputs, key: &str, default_ms: u64) -> u64 {
+    match inputs.get(key) {
+      Some(FlowValue::Json(Value::Number(n))) => n.as_u64().unwrap_or(default_ms).min(10_000),
+      Some(FlowValue::Json(Value::String(s))) => {
+        s.trim().parse::<u64>().unwrap_or(default_ms).min(10_000)
+      }
+      _ => default_ms,
+    }
+  }
+
   fn scenes(&self, inputs: &AsyncNodeInputs) -> Result<Vec<Scene>, YanshiError> {
     let items = match inputs.get("scenes") {
       Some(FlowValue::Json(Value::Array(items))) if !items.is_empty() => items,
@@ -1257,6 +1449,7 @@ impl RenderVideoNode {
         ));
       }
     };
+    let n_items = items.len();
     items
       .iter()
       .enumerate()
@@ -1274,9 +1467,17 @@ impl RenderVideoNode {
               .unwrap_or_default()
               .trim()
               .to_string();
+            let frame_audio = match frame_item.get("audio") {
+              Some(a) if !a.is_null() => Some(inside_artifact_root(
+                &self.id,
+                &json_path(&self.id, a, "audio")?,
+              )?),
+              _ => None,
+            };
             frames.push(SceneFrame {
               picture: pic,
               caption: cap,
+              audio: frame_audio,
             });
           }
         }
@@ -1285,8 +1486,12 @@ impl RenderVideoNode {
           (first.picture.clone(), false)
         } else {
           let (raw_pic, mv) = match (item.get("image"), item.get("video")) {
-            (_, Some(video)) if !video.is_null() => (video, true),
-            (Some(image), _) => (image, false),
+            (_, Some(video))
+              if !video.is_null() && video.as_str().is_none_or(|s| !s.trim().is_empty()) =>
+            {
+              (video, true)
+            }
+            (Some(image), _) if !image.is_null() => (image, false),
             _ => {
               return Err(input_error(
                 &self.id,
@@ -1300,23 +1505,122 @@ impl RenderVideoNode {
           )
         };
 
-        let audio = item
-          .get("audio")
-          .ok_or_else(|| input_error(&self.id, format!("scene {i} needs audio")))?;
+        let all_frames_have_audio = !frames.is_empty() && frames.iter().all(|f| f.audio.is_some());
+        let scene_audio = match item.get("audio") {
+          Some(a) if !a.is_null() => Some(inside_artifact_root(
+            &self.id,
+            &json_path(&self.id, a, "audio")?,
+          )?),
+          _ if all_frames_have_audio => None,
+          _ => return Err(input_error(&self.id, format!("scene {i} needs audio"))),
+        };
+
+        let pause_after_ms = item
+          .get("pause_after_ms")
+          .and_then(Value::as_u64)
+          .map(|v| v.min(10_000));
+        let is_slide_start = item
+          .get("is_slide_start")
+          .and_then(Value::as_bool)
+          .unwrap_or(true);
+        let is_slide_end = item
+          .get("is_slide_end")
+          .or_else(|| item.get("transition_after"))
+          .and_then(Value::as_bool)
+          .unwrap_or(i + 1 < n_items || pause_after_ms.is_some());
+        let hide_pip = item
+          .get("hide_pip")
+          .and_then(Value::as_bool)
+          .unwrap_or(false);
+
         Ok(Scene {
           picture,
           moving,
           frames,
-          audio: inside_artifact_root(&self.id, &json_path(&self.id, audio, "audio")?)?,
+          audio: scene_audio,
           caption: item
             .get("caption")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
             .to_string(),
+          pause_after_ms,
+          is_slide_start,
+          is_slide_end,
+          hide_pip,
         })
       })
       .collect()
+  }
+
+  fn expand_beats(
+    &self,
+    scenes: Vec<Scene>,
+    step_pause_ms: u64,
+    slide_pause_ms: u64,
+    fade_transitions: bool,
+  ) -> Vec<VideoBeat> {
+    let mut beats = Vec::new();
+    for scene in scenes {
+      if !scene.frames.is_empty() && scene.frames.iter().all(|f| f.audio.is_some()) {
+        let nf = scene.frames.len();
+        for (fi, frame) in scene.frames.into_iter().enumerate() {
+          let Some(audio) = frame.audio else {
+            continue;
+          };
+          let is_first = fi == 0;
+          let is_last = fi + 1 == nf;
+          let pause_ms = if is_last {
+            scene.pause_after_ms.unwrap_or(slide_pause_ms)
+          } else {
+            step_pause_ms
+          };
+          let caption = if frame.caption.is_empty() {
+            scene.caption.clone()
+          } else {
+            frame.caption
+          };
+          beats.push(VideoBeat {
+            picture: frame.picture,
+            moving: false,
+            frames: Vec::new(),
+            audio,
+            caption,
+            pause_secs: pause_ms as f64 / 1000.0,
+            fade_in: fade_transitions && is_first,
+            fade_out: fade_transitions && is_last,
+            hide_pip: scene.hide_pip,
+          });
+        }
+      } else if let Some(audio) = scene.audio {
+        let pause_ms = scene.pause_after_ms.unwrap_or(if scene.is_slide_end {
+          slide_pause_ms
+        } else {
+          step_pause_ms
+        });
+        beats.push(VideoBeat {
+          picture: scene.picture,
+          moving: scene.moving,
+          frames: scene.frames,
+          audio,
+          caption: scene.caption,
+          pause_secs: pause_ms as f64 / 1000.0,
+          fade_in: fade_transitions && scene.is_slide_start,
+          fade_out: fade_transitions && scene.is_slide_end,
+          hide_pip: scene.hide_pip,
+        });
+      }
+    }
+    let total = beats.len();
+    for (idx, b) in beats.iter_mut().enumerate() {
+      if idx == 0 {
+        b.fade_in = false;
+      }
+      if idx + 1 == total {
+        b.fade_out = false;
+      }
+    }
+    beats
   }
 
   fn dimension(
@@ -1348,6 +1652,30 @@ impl AsyncNode for RenderVideoNode {
     let scenes = self.scenes(inputs)?;
     let width = self.dimension(inputs, "width", 1280)?;
     let height = self.dimension(inputs, "height", 720)?;
+    let step_pause_ms = self.optional_ms(inputs, "step_pause_ms", 0);
+    let slide_pause_ms = self.optional_ms(inputs, "slide_pause_ms", 0);
+    let fade_transitions = matches!(
+      optional_str(inputs, "transition"),
+      Some("fade" | "crossfade" | "smooth")
+    );
+    let pip_video = self.optional_artifact_file(inputs, "pip_video")?;
+    let pip_image = self.optional_artifact_file(inputs, "pip_image")?;
+    let pip_source: Option<(std::path::PathBuf, bool)> = match (pip_video, pip_image) {
+      (Some(v), _) => Some((v, true)),
+      (None, Some(img)) => Some((img, false)),
+      (None, None) => None,
+    };
+    let pip_position = optional_str(inputs, "pip_position").unwrap_or("bottom_right");
+    let pip_scale = match inputs.get("pip_scale") {
+      Some(FlowValue::Json(Value::Number(n))) => n.as_f64().unwrap_or(0.185).clamp(0.12, 0.35),
+      _ => 0.185,
+    };
+
+    let beats = self.expand_beats(scenes, step_pause_ms, slide_pause_ms, fade_transitions);
+    if beats.is_empty() {
+      return Err(input_error(&self.id, "scenes produced no playable beats"));
+    }
+
     let ffmpeg = media_tool(&self.id, "ffmpeg")?;
     let ffprobe = media_tool(&self.id, "ffprobe")?;
     let burn = matches!(
@@ -1375,9 +1703,9 @@ impl AsyncNode for RenderVideoNode {
         }
       }
 
-      // 1. Each scene's length is its narration's.
-      let mut durations = Vec::with_capacity(scenes.len());
-      for scene in &scenes {
+      // 1. Probe exact speech duration of every beat's audio.
+      let mut speech_durations = Vec::with_capacity(beats.len());
+      for beat in &beats {
         let probe = run_media_tool(
           &self.id,
           &ffprobe,
@@ -1390,7 +1718,7 @@ impl AsyncNode for RenderVideoNode {
             "format=duration".into(),
             "-of".into(),
             "csv=p=0".into(),
-            scene.audio.clone().into(),
+            beat.audio.clone().into(),
           ],
         )
         .await?;
@@ -1402,44 +1730,53 @@ impl AsyncNode for RenderVideoNode {
           .ok_or_else(|| {
             input_error(
               &self.id,
-              format!("{} has no measurable duration", scene.audio.display()),
+              format!("{} has no measurable duration", beat.audio.display()),
             )
           })?;
-        durations.push(seconds);
+        speech_durations.push(seconds);
       }
 
-      // 2. One uniformly encoded segment per scene, so step 3 can join
-      // them without re-encoding. Multi-frame progressive scenes split
-      // the audio duration across their build frames in proportion to
-      // each frame's caption length.
-      let fit = format!(
-        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={VIDEO_FPS},format=yuv420p"
+      // 2. Encode one normalized segment per beat (exact speech duration + optional breathing pause,
+      // plus optional slide-boundary dip-to-slate fade with zero audio/subtitle drift).
+      let base_fit = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x0B1120,setsar=1,fps={VIDEO_FPS}"
       );
       let mut list = String::new();
-      let mut cue_captions: Vec<&str> = Vec::new();
-      let mut cue_durations: Vec<f64> = Vec::new();
-      for (i, (scene, seconds)) in scenes.iter().zip(&durations).enumerate() {
+      let mut cue_windows: Vec<(&str, f64, f64)> = Vec::new();
+      let mut pip_visible_ranges: Vec<(f64, f64)> = Vec::new();
+      let mut timeline_cursor = 0.0_f64;
+
+      for (i, (beat, &speech_secs)) in beats.iter().zip(&speech_durations).enumerate() {
+        let total_seg_secs = speech_secs + beat.pause_secs;
         let segment = workdir.join(format!("scene-{i}.mp4"));
-        let mut args: Vec<std::ffi::OsString> = if scene.frames.len() >= 2 {
-          let total_weight: usize = scene
+
+        let mut args: Vec<std::ffi::OsString> = if beat.frames.len() >= 2 {
+          let total_weight: usize = beat
             .frames
             .iter()
             .map(|f| f.caption.chars().count().max(8))
             .sum();
           let mut frame_list = String::new();
-          for frame in &scene.frames {
-            let share =
-              seconds * frame.caption.chars().count().max(8) as f64 / total_weight.max(1) as f64;
+          let mut sub_cursor = timeline_cursor;
+          for (fi, frame) in beat.frames.iter().enumerate() {
+            let speech_share =
+              speech_secs * frame.caption.chars().count().max(8) as f64 / total_weight.max(1) as f64;
+            let hold_share = if fi + 1 == beat.frames.len() {
+              speech_share + beat.pause_secs
+            } else {
+              speech_share
+            };
             let escaped = frame.picture.to_string_lossy().replace('\'', "'\\''");
-            frame_list.push_str(&format!("file '{escaped}'\nduration {share:.3}\n"));
-            cue_captions.push(if frame.caption.is_empty() {
-              scene.caption.as_str()
+            frame_list.push_str(&format!("file '{escaped}'\nduration {hold_share:.3}\n"));
+            let cap = if frame.caption.is_empty() {
+              beat.caption.as_str()
             } else {
               frame.caption.as_str()
-            });
-            cue_durations.push(share);
+            };
+            cue_windows.push((cap, sub_cursor, sub_cursor + speech_share));
+            sub_cursor += hold_share;
           }
-          if let Some(last) = scene.frames.last() {
+          if let Some(last) = beat.frames.last() {
             let escaped = last.picture.to_string_lossy().replace('\'', "'\\''");
             frame_list.push_str(&format!("file '{escaped}'\n"));
           }
@@ -1456,31 +1793,61 @@ impl AsyncNode for RenderVideoNode {
             frames_file.into(),
           ]
         } else {
-          let single_cap = scene
+          let single_cap = beat
             .frames
             .first()
             .filter(|f| !f.caption.is_empty())
-            .map_or(scene.caption.as_str(), |f| f.caption.as_str());
-          cue_captions.push(single_cap);
-          cue_durations.push(*seconds);
-          let mut prefix: Vec<std::ffi::OsString> = if scene.moving {
+            .map_or(beat.caption.as_str(), |f| f.caption.as_str());
+          cue_windows.push((single_cap, timeline_cursor, timeline_cursor + speech_secs));
+          let mut prefix: Vec<std::ffi::OsString> = if beat.moving {
             vec!["-stream_loop".into(), "-1".into()]
           } else {
             vec!["-loop".into(), "1".into()]
           };
           prefix.push("-i".into());
-          prefix.push(scene.picture.clone().into());
+          prefix.push(beat.picture.clone().into());
           prefix
         };
+
+        if !beat.hide_pip {
+          if let Some(last_range) = pip_visible_ranges.last_mut()
+            && (last_range.1 - timeline_cursor).abs() < 0.01
+          {
+            last_range.1 = timeline_cursor + total_seg_secs;
+          } else {
+            pip_visible_ranges.push((timeline_cursor, timeline_cursor + total_seg_secs));
+          }
+        }
+        timeline_cursor += total_seg_secs;
+
+        let fade_d = 0.18_f64.min(total_seg_secs * 0.25);
+        let mut vf = base_fit.clone();
+        if beat.fade_in && fade_d >= 0.06 {
+          vf.push_str(&format!(",fade=t=in:st=0:d={fade_d:.3}:c=#0B1120"));
+        }
+        if beat.fade_out && fade_d >= 0.06 {
+          let st = (total_seg_secs - fade_d).max(0.0);
+          vf.push_str(&format!(",fade=t=out:st={st:.3}:d={fade_d:.3}:c=#0B1120"));
+        }
+        vf.push_str(",format=yuv420p");
+
         args.extend([
           "-i".into(),
-          scene.audio.clone().into(),
+          beat.audio.clone().into(),
           "-map".into(),
           "0:v:0".into(),
           "-map".into(),
           "1:a:0".into(),
           "-vf".into(),
-          fit.clone().into(),
+          vf.into(),
+        ]);
+        if beat.pause_secs > 0.005 {
+          args.extend([
+            "-af".into(),
+            format!("apad=pad_dur={:.3}", beat.pause_secs).into(),
+          ]);
+        }
+        args.extend([
           "-c:v".into(),
           "libx264".into(),
           "-preset".into(),
@@ -1494,23 +1861,26 @@ impl AsyncNode for RenderVideoNode {
           "-ac".into(),
           "2".into(),
           "-t".into(),
-          format!("{seconds:.3}").into(),
+          format!("{total_seg_secs:.3}").into(),
           segment.clone().into(),
         ]);
         run_media_tool(&self.id, &ffmpeg, &workdir, &root, ffmpeg_args(args)).await?;
         list.push_str(&format!("file 'scene-{i}.mp4'\n"));
       }
+
       let list_path = workdir.join("scenes.txt");
       tokio::fs::write(&list_path, list)
         .await
         .map_err(|e| input_error(&self.id, format!("cannot write the scene list: {e}")))?;
 
-      // 3. Join; 4. add the subtitle track when there are captions.
-      let srt = if cue_captions.iter().any(|c| !c.is_empty()) {
-        Some(build_srt(&cue_captions, &cue_durations))
+      // 3. Build SRT + WebVTT cues; 4. Final join (+ continuous PiP presenter overlay and/or burned captions).
+      let cues = build_timed_cues(&cue_windows);
+      let (srt, vtt) = if !cues.is_empty() {
+        (Some(cues_to_srt(&cues)), Some(cues_to_vtt(&cues)))
       } else {
-        None
+        (None, None)
       };
+
       let out = workdir.join("out.mp4");
       let mut join: Vec<std::ffi::OsString> = vec![
         "-f".into(),
@@ -1521,20 +1891,145 @@ impl AsyncNode for RenderVideoNode {
         list_path.into(),
       ];
       let burning = burn && srt.is_some();
-      if let Some(srt) = &srt {
+      let active_pip = pip_source.as_ref().filter(|_| !pip_visible_ranges.is_empty());
+
+      if let Some(srt_text) = &srt {
         let srt_path = workdir.join("captions.srt");
-        tokio::fs::write(&srt_path, srt)
+        tokio::fs::write(&srt_path, srt_text)
           .await
           .map_err(|e| input_error(&self.id, format!("cannot write the captions: {e}")))?;
       }
-      if burning {
-        // Drawing changes every frame, so the picture is re-encoded; the
-        // file name is relative to the work directory (ffmpeg's cwd), which
-        // keeps the filter argument free of path escaping.
+
+      if let Some((pip_path, pip_moving)) = active_pip {
+        let pip_w = (((width as f64 * pip_scale).round() as u32) / 2 * 2).max(64);
+        let pip_h = (((pip_w as f64 * 9.0 / 16.0).round() as u32) / 2 * 2).max(48);
+        let (mask_png, border_png) = render_pip_overlay_chrome(pip_w, pip_h)
+          .map_err(|e| input_error(&self.id, format!("pip chrome render failed: {e}")))?;
+        let mask_path = workdir.join("pip_mask.png");
+        let border_path = workdir.join("pip_border.png");
+        tokio::fs::write(&mask_path, &mask_png)
+          .await
+          .map_err(|e| input_error(&self.id, format!("cannot write pip mask: {e}")))?;
+        tokio::fs::write(&border_path, &border_png)
+          .await
+          .map_err(|e| input_error(&self.id, format!("cannot write pip border: {e}")))?;
+
+        let margin_x = ((width as f64 * 0.025).round() as u32).max(8);
+        let margin_y = ((height as f64 * 0.028).round() as u32).max(8);
+        let (pip_x, pip_y) = match pip_position {
+          "bottom_left" => (margin_x, height.saturating_sub(pip_h + margin_y)),
+          "top_right" => (width.saturating_sub(pip_w + margin_x), margin_y * 2),
+          _ => (
+            width.saturating_sub(pip_w + margin_x),
+            height.saturating_sub(pip_h + margin_y),
+          ),
+        };
+        let border_x = pip_x.saturating_sub(4);
+        let border_y = pip_y.saturating_sub(4);
+
+        if *pip_moving {
+          join.extend(["-stream_loop".into(), "-1".into(), "-i".into(), pip_path.clone().into()]);
+        } else {
+          join.extend([
+            "-loop".into(),
+            "1".into(),
+            "-framerate".into(),
+            VIDEO_FPS.to_string().into(),
+            "-i".into(),
+            pip_path.clone().into(),
+          ]);
+        }
+        join.extend([
+          "-loop".into(),
+          "1".into(),
+          "-framerate".into(),
+          VIDEO_FPS.to_string().into(),
+          "-i".into(),
+          mask_path.into(),
+          "-loop".into(),
+          "1".into(),
+          "-framerate".into(),
+          VIDEO_FPS.to_string().into(),
+          "-i".into(),
+          border_path.into(),
+        ]);
+
+        let enable_clause = if pip_visible_ranges.len() == 1
+          && pip_visible_ranges[0].0 <= 0.01
+          && (pip_visible_ranges[0].1 - timeline_cursor).abs() <= 0.05
+        {
+          String::new()
+        } else {
+          let expr = pip_visible_ranges
+            .iter()
+            .map(|(a, b)| format!("between(t,{a:.2},{b:.2})"))
+            .collect::<Vec<_>>()
+            .join("+");
+          format!(":enable='{expr}'")
+        };
+
+        let sub_tail = if burning {
+          let font_sz = ((height as f64 * 0.017).round() as u32).clamp(11, 22);
+          format!(
+            ";[v_pip]subtitles=captions.srt:force_style='FontSize={font_sz},PrimaryColour=&H00F8FAFC,OutlineColour=&HAA0B1120,BackColour=&H990B1120,BorderStyle=3,Outline=1.2,Shadow=0,MarginV=16'[vout]"
+          )
+        } else {
+          String::new()
+        };
+        let final_v = if burning { "[vout]" } else { "[v_pip]" };
+
+        let fc = format!(
+          "[1:v]scale={pip_w}:{pip_h}:force_original_aspect_ratio=increase,crop={pip_w}:{pip_h},setsar=1,fps={VIDEO_FPS},format=rgba[pip_raw];\
+           [2:v]scale={pip_w}:{pip_h},format=gray[pip_mask];\
+           [pip_raw][pip_mask]alphamerge[pip_masked];\
+           [0:v][pip_masked]overlay={pip_x}:{pip_y}:shortest=1{enable_clause}[v_pip0];\
+           [v_pip0][3:v]overlay={border_x}:{border_y}:shortest=1{enable_clause}[v_pip]{sub_tail}"
+        );
+
+        let mut srt_input_idx = None;
+        if !burning && srt.is_some() {
+          join.extend(["-i".into(), workdir.join("captions.srt").into()]);
+          srt_input_idx = Some(4_usize);
+        }
+
+        join.extend([
+          "-filter_complex".into(),
+          fc.into(),
+          "-map".into(),
+          final_v.into(),
+          "-map".into(),
+          "0:a".into(),
+        ]);
+        if let Some(si) = srt_input_idx {
+          join.extend([
+            "-map".into(),
+            format!("{si}:0").into(),
+            "-c:s".into(),
+            "mov_text".into(),
+          ]);
+        }
+        join.extend(
+          [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+          ]
+          .map(Into::into),
+        );
+        join.push(format!("{timeline_cursor:.3}").into());
+      } else if burning {
+        let font_sz = ((height as f64 * 0.017).round() as u32).clamp(11, 22);
+        let vf_sub = format!(
+          "subtitles=captions.srt:force_style='FontSize={font_sz},PrimaryColour=&H00F8FAFC,OutlineColour=&HAA0B1120,BackColour=&H990B1120,BorderStyle=3,Outline=1.2,Shadow=0,MarginV=16'"
+        );
         join.extend(
           [
             "-vf",
-            "subtitles=captions.srt",
+            vf_sub.as_str(),
             "-c:v",
             "libx264",
             "-preset",
@@ -1544,23 +2039,24 @@ impl AsyncNode for RenderVideoNode {
           ]
           .map(Into::into),
         );
-      } else if srt.is_some() {
-        join.extend([
-          "-i".into(),
-          workdir.join("captions.srt").into(),
-          "-map".into(),
-          "0:v".into(),
-          "-map".into(),
-          "0:a".into(),
-          "-map".into(),
-          "1:0".into(),
-          "-c:s".into(),
-          "mov_text".into(),
-        ]);
-      }
-      if !burning {
+      } else {
+        if srt.is_some() {
+          join.extend([
+            "-i".into(),
+            workdir.join("captions.srt").into(),
+            "-map".into(),
+            "0:v".into(),
+            "-map".into(),
+            "0:a".into(),
+            "-map".into(),
+            "1:0".into(),
+            "-c:s".into(),
+            "mov_text".into(),
+          ]);
+        }
         join.extend(["-c:v", "copy"].map(Into::into));
       }
+
       join.extend(["-c:a", "copy", "-movflags", "+faststart"].map(Into::into));
       join.push(out.clone().into());
       run_media_tool(&self.id, &ffmpeg, &workdir, &root, ffmpeg_args(join)).await?;
@@ -1569,11 +2065,11 @@ impl AsyncNode for RenderVideoNode {
         .map_err(|e| YanshiError::NodeExecutionFailed {
           message: format!("{}: ffmpeg wrote no output: {e}", self.id),
         })?;
-      Ok::<_, YanshiError>((bytes, srt, durations.iter().sum::<f64>()))
+      Ok::<_, YanshiError>((bytes, srt, vtt, timeline_cursor))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&workdir).await;
-    let (bytes, srt, seconds) = produced?;
+    let (bytes, srt, vtt, seconds) = produced?;
     let mut outputs = output(
       &self.id,
       write_artifact(&self.id, &bytes, "video/mp4").await?,
@@ -1582,6 +2078,12 @@ impl AsyncNode for RenderVideoNode {
       outputs.insert(
         format!("{}_subtitles", self.id),
         write_artifact(&self.id, srt.as_bytes(), "application/x-subrip").await?,
+      );
+    }
+    if let Some(vtt) = vtt {
+      outputs.insert(
+        format!("{}_vtt", self.id),
+        write_artifact(&self.id, vtt.as_bytes(), "text/vtt").await?,
       );
     }
     outputs.insert(
@@ -2567,6 +3069,149 @@ mod tests {
     assert_eq!(
       staged,
       "![slide](../slides_render/1.png)\n![raw](../../cover.png)\n"
+    );
+  }
+
+  #[test]
+  fn timed_cues_exclude_breathing_pauses_and_wrap_long_clauses_to_vtt() {
+    let windows = [
+      (
+        "第一句先看左侧结构体定义，它只描述字段在栈和堆上的真实字节布局而不绑定虚表指针。",
+        0.0,
+        2.4,
+      ),
+      ("第二句切到右侧流程图。", 2.7, 4.2),
+    ];
+    let cues = build_timed_cues(&windows);
+    assert_eq!(cues.len(), 2);
+    assert!(
+      (cues[0].end - 2.4).abs() < 1e-6,
+      "cue ends before 0.3s pause"
+    );
+    assert!(
+      (cues[1].start - 2.7).abs() < 1e-6,
+      "next cue starts after pause"
+    );
+    assert!(
+      cues[0].text.contains('\n'),
+      "long clause wrapped into two balanced lines: {:?}",
+      cues[0].text
+    );
+    let vtt = cues_to_vtt(&cues);
+    assert!(vtt.starts_with("WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.400\n"));
+  }
+
+  #[tokio::test]
+  #[ignore = "needs ffmpeg"]
+  async fn render_video_supports_step_pauses_fade_transitions_and_pip_overlay() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let dir = root.join("artifacts").join("scene");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let make = |args: &[&str], out: &str| {
+      let status = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(args)
+        .arg(dir.join(out))
+        .status()
+        .expect("ffmpeg");
+      assert!(status.success(), "{out}");
+    };
+    make(
+      &[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=navy:s=640x360:d=1",
+        "-frames:v",
+        "1",
+      ],
+      "step1.png",
+    );
+    make(
+      &[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=teal:s=640x360:d=1",
+        "-frames:v",
+        "1",
+      ],
+      "step2.png",
+    );
+    make(
+      &[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=orange:s=320x180:d=1",
+        "-frames:v",
+        "1",
+      ],
+      "avatar.png",
+    );
+    make(
+      &["-f", "lavfi", "-i", "sine=frequency=440:duration=1.0"],
+      "s1.wav",
+    );
+    make(
+      &["-f", "lavfi", "-i", "sine=frequency=550:duration=1.0"],
+      "s2.wav",
+    );
+
+    let scenes = json!([
+      {
+        "image": dir.join("step1.png"),
+        "audio": dir.join("s1.wav"),
+        "caption": "Step one spotlight.",
+        "is_slide_start": true,
+        "is_slide_end": false
+      },
+      {
+        "image": dir.join("step2.png"),
+        "audio": dir.join("s2.wav"),
+        "caption": "Slide end transition.",
+        "is_slide_start": false,
+        "is_slide_end": true
+      }
+    ]);
+
+    let outputs = run_context::with_artifact_root(
+      root.clone(),
+      RenderVideoNode::new("talk").execute(&inputs(&[
+        ("scenes", scenes),
+        ("width", json!(640)),
+        ("height", json!(360)),
+        ("step_pause_ms", json!(250)),
+        ("slide_pause_ms", json!(500)),
+        ("transition", json!("fade")),
+        ("pip_image", json!(dir.join("avatar.png"))),
+        ("pip_scale", json!(0.22)),
+      ])),
+    )
+    .await
+    .expect("renders with pauses, fade, and PiP");
+
+    let FlowValue::Json(seconds) = &outputs["talk_seconds"] else {
+      panic!("seconds");
+    };
+    // 1.0 + 0.25 + 1.0 + 0.50 = 2.75s
+    assert!(
+      (seconds.as_f64().expect("f64") - 2.75).abs() < 0.08,
+      "expected ~2.75s with breathing pauses, got {seconds}"
+    );
+    assert!(matches!(outputs["talk_vtt"], FlowValue::File { .. }));
+    let FlowValue::File { path: srt_path, .. } = &outputs["talk_subtitles"] else {
+      panic!("srt");
+    };
+    let srt_text = std::fs::read_to_string(srt_path).expect("read srt");
+    assert!(
+      srt_text.contains("00:00:00,000 --> 00:00:01,000"),
+      "first cue ends before 250ms pause: {srt_text}"
+    );
+    assert!(
+      srt_text.contains("00:00:01,250 --> 00:00:02,250"),
+      "second cue starts at 1.25s and ends before 500ms slide pause: {srt_text}"
     );
   }
 }
