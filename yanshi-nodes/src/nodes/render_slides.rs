@@ -277,6 +277,7 @@ pub struct MemRegion {
   pub subtitle: Option<String>,
   #[serde(default)]
   pub tone: Option<String>,
+  #[serde(default, deserialize_with = "null_default")]
   pub slots: Vec<MemSlot>,
 }
 
@@ -285,7 +286,9 @@ pub struct MemSlot {
   pub id: String,
   #[serde(default)]
   pub offset: Option<String>,
+  #[serde(default, deserialize_with = "null_default")]
   pub label: String,
+  #[serde(default, deserialize_with = "null_default")]
   pub value: String,
 }
 
@@ -949,8 +952,16 @@ pub fn render_slide_svg_with_options(
   // Main stage (y = 188..942). When `pip_safe_zone` is active, reserve bottom-right `[1496..1872, 812..1054]`
   // so the presenter PiP window never covers right-column diagrams or the bottom takeaway/caption bar.
   let stage_y = 188.0_f32;
-  let has_footer = slide.takeaway.is_some() || active_step.is_some();
-  let stage_h: f32 = if has_footer { 754.0 } else { 836.0 };
+  let suppress_footer_for_burned_subs = opts.takeaway_only_bar && step_idx.is_some();
+  let has_footer =
+    !suppress_footer_for_burned_subs && (slide.takeaway.is_some() || active_step.is_some());
+  let stage_h: f32 = if has_footer {
+    754.0
+  } else if suppress_footer_for_burned_subs {
+    792.0
+  } else {
+    836.0
+  };
 
   if let Some(right_panel) = &slide.right {
     let ratio = slide.split_ratio.unwrap_or(0.50).clamp(0.32, 0.68);
@@ -1093,6 +1104,7 @@ fn render_top_nav(
     let label = s
       .section
       .clone()
+      .filter(|sec| !sec.trim().is_empty())
       .unwrap_or_else(|| format!("{:02}", idx + 1));
     if !sections.contains(&label) {
       sections.push(label);
@@ -1101,6 +1113,7 @@ fn render_top_nav(
   let active_section = deck.slides[slide_idx]
     .section
     .clone()
+    .filter(|sec| !sec.trim().is_empty())
     .unwrap_or_else(|| format!("{:02}", slide_idx + 1));
 
   let mut cursor_x = 72.0_f32;
@@ -1120,23 +1133,31 @@ fn render_top_nav(
     cursor_x += bw + 16.0;
   }
 
-  for sec in sections.iter().take(8) {
+  for (sec_idx, sec) in sections.iter().take(8).enumerate() {
     let is_active = *sec == active_section;
-    let pw = (measure_px(sec, 15.0, false) + 26.0).min(210.0);
+    let display_raw = if is_active {
+      sec.clone()
+    } else {
+      format!("{:02}", sec_idx + 1)
+    };
+    let max_pw = if is_active { 320.0 } else { 64.0 };
+    let label_short = wrap_text(&display_raw, max_pw - 24.0, 14.5, 1);
+    let label_str = label_short
+      .first()
+      .map_or(display_raw.as_str(), String::as_str);
+    let pw = (measure_px(label_str, 14.5, false) + 26.0).clamp(44.0, max_pw);
     if cursor_x + pw > 1580.0 {
       break;
     }
-    let (fill, stroke, text_col, weight) = if is_active {
-      (p.accent, p.accent, "#FFFFFF", "700")
+    let (fill, stroke, text_col, weight, rx) = if is_active {
+      (p.accent, p.accent, "#FFFFFF", "700", 9)
     } else {
-      (p.surface, p.border, p.text_muted, "500")
+      (p.surface, p.border, p.text_muted, "600", 16)
     };
-    let label_short = wrap_text(sec, pw - 20.0, 15.0, 1);
-    let label_str = label_short.first().map_or(sec.as_str(), String::as_str);
     let _ = writeln!(
       svg,
-      "<rect x=\"{cursor_x:.1}\" y=\"21\" width=\"{pw:.1}\" height=\"32\" rx=\"16\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"1.2\"/>\n\
-       <text x=\"{:.1}\" y=\"42\" text-anchor=\"middle\" font-size=\"15\" font-weight=\"{weight}\" fill=\"{text_col}\">{}</text>",
+      "<rect x=\"{cursor_x:.1}\" y=\"21\" width=\"{pw:.1}\" height=\"32\" rx=\"{rx}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"1.2\"/>\n\
+       <text x=\"{:.1}\" y=\"42\" text-anchor=\"middle\" font-size=\"14.5\" font-weight=\"{weight}\" fill=\"{text_col}\">{}</text>",
       cursor_x + pw / 2.0,
       xml_escape(label_str)
     );
@@ -1894,28 +1915,74 @@ fn render_flowchart(
   let any_explicit = nodes.iter().any(|n| n.col.is_some() || n.row.is_some());
 
   let mut coords: Vec<(usize, usize)> = Vec::with_capacity(nodes.len());
+  let mut row_counts: HashMap<usize, usize> = HashMap::new();
   if any_explicit {
     for (i, n) in nodes.iter().enumerate() {
-      coords.push((n.col.unwrap_or(0), n.row.unwrap_or(i)));
+      let c = n.col.unwrap_or(0);
+      let rw = n.row.unwrap_or(i);
+      coords.push((c, rw));
+      *row_counts.entry(rw).or_insert(0) += 1;
     }
   } else if lr {
     let per_row = nodes.len().clamp(1, 4);
     for i in 0..nodes.len() {
-      coords.push((i % per_row, i / per_row));
+      let c = i % per_row;
+      let rw = i / per_row;
+      coords.push((c, rw));
+      *row_counts.entry(rw).or_insert(0) += 1;
     }
   } else {
-    let cols = if nodes.len() > 5 { 2 } else { 1 };
-    for i in 0..nodes.len() {
-      coords.push((i % cols, i / cols));
+    // Topological longest-path layering so fan-out siblings (e.g. compiler -> copy A / copy B)
+    // sit side-by-side on the same row instead of stacking vertically on top of their own edge.
+    let id_to_idx: HashMap<&str, usize> = nodes
+      .iter()
+      .enumerate()
+      .map(|(i, n)| (n.id.as_str(), i))
+      .collect();
+    let mut depth = vec![0usize; nodes.len()];
+    for _ in 0..nodes.len() {
+      let mut changed = false;
+      for e in edges {
+        if let (Some(&u), Some(&v)) = (id_to_idx.get(e.from.as_str()), id_to_idx.get(e.to.as_str()))
+          && u < v
+          && depth[v] < depth[u] + 1
+        {
+          depth[v] = depth[u] + 1;
+          changed = true;
+        }
+      }
+      if !changed {
+        break;
+      }
+    }
+    let has_graph_layers = depth.iter().any(|&d| d > 0);
+    if has_graph_layers {
+      let mut per_layer_col: HashMap<usize, usize> = HashMap::new();
+      for &d in &depth {
+        let col_slot = *per_layer_col.get(&d).unwrap_or(&0);
+        let rw = d + col_slot / 3;
+        let c = col_slot % 3;
+        coords.push((c, rw));
+        *per_layer_col.entry(d).or_insert(0) += 1;
+        *row_counts.entry(rw).or_insert(0) += 1;
+      }
+    } else {
+      let cols = if nodes.len() > 5 { 2 } else { 1 };
+      for i in 0..nodes.len() {
+        let c = i % cols;
+        let rw = i / cols;
+        coords.push((c, rw));
+        *row_counts.entry(rw).or_insert(0) += 1;
+      }
     }
   }
 
   let max_col = coords.iter().map(|(c, _)| *c).max().unwrap_or(0) + 1;
   let max_row = coords.iter().map(|(_, rw)| *rw).max().unwrap_or(0) + 1;
-  let gap_x = if max_col > 1 { 46.0 } else { 0.0 };
+  let gap_x = if max_col > 1 { 42.0 } else { 0.0 };
   let gap_y = if max_row > 1 { 38.0 } else { 0.0 };
   let cell_w = ((r.w - gap_x * (max_col.saturating_sub(1) as f32)) / max_col as f32).min(460.0);
-  let cell_h = ((r.h - gap_y * (max_row.saturating_sub(1) as f32)) / max_row as f32).min(132.0);
+  let cell_h = ((r.h - gap_y * (max_row.saturating_sub(1) as f32)) / max_row as f32).min(126.0);
   let used_w = cell_w * max_col as f32 + gap_x * (max_col.saturating_sub(1) as f32);
   let used_h = cell_h * max_row as f32 + gap_y * (max_row.saturating_sub(1) as f32);
   let start_x = r.x + ((r.w - used_w) / 2.0).max(0.0);
@@ -1923,10 +1990,17 @@ fn render_flowchart(
 
   let mut boxes: HashMap<&str, Rect> = HashMap::new();
   for (n, &(c, rw)) in nodes.iter().zip(&coords) {
+    let cols_in_row = row_counts.get(&rw).copied().unwrap_or(1).max(1);
+    let row_used_w = cell_w * cols_in_row as f32 + gap_x * (cols_in_row.saturating_sub(1) as f32);
+    let row_start_x = if !any_explicit && !lr && cols_in_row < max_col {
+      r.x + ((r.w - row_used_w) / 2.0).max(0.0)
+    } else {
+      start_x
+    };
     boxes.insert(
       n.id.as_str(),
       Rect {
-        x: start_x + c as f32 * (cell_w + gap_x),
+        x: row_start_x + c as f32 * (cell_w + gap_x),
         y: start_y + rw as f32 * (cell_h + gap_y),
         w: cell_w,
         h: cell_h,
@@ -2194,44 +2268,53 @@ fn render_memory(
     let color = p.tone_color(reg.tone.as_deref(), ri);
     let reg_visible = ri < visible_regions;
     let reg_opacity = if reg_visible { 1.0 } else { 0.28 };
+    let has_sub = reg.subtitle.as_deref().is_some_and(|s| !s.is_empty());
+    let header_h = if has_sub { 56.0_f32 } else { 46.0_f32 };
+    let name_clipped = wrap_text(&reg.name, (rw - 24.0).max(60.0), 17.0, 1);
+    let name_txt = name_clipped
+      .first()
+      .map_or(reg.name.as_str(), String::as_str);
 
     let _ = writeln!(
       svg,
       "<g opacity=\"{reg_opacity:.2}\">\n\
        <rect x=\"{rx:.1}\" y=\"{:.1}\" width=\"{rw:.1}\" height=\"{:.1}\" rx=\"12\" fill=\"{}\" stroke=\"{color}\" stroke-width=\"1.8\"/>\n\
-       <rect x=\"{rx:.1}\" y=\"{:.1}\" width=\"{rw:.1}\" height=\"48\" rx=\"12\" fill=\"{color}\" fill-opacity=\"0.18\"/>\n\
-       <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"18\" font-weight=\"700\" fill=\"{color}\">{}</text>",
+       <rect x=\"{rx:.1}\" y=\"{:.1}\" width=\"{rw:.1}\" height=\"{header_h:.1}\" rx=\"12\" fill=\"{color}\" fill-opacity=\"0.18\"/>\n\
+       <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"17\" font-weight=\"700\" fill=\"{color}\">{}</text>",
       r.y,
       r.h,
       p.code_bg,
       r.y,
-      rx + 16.0,
-      r.y + 31.0,
-      xml_escape(&reg.name)
+      rx + 14.0,
+      if has_sub { r.y + 24.0 } else { r.y + 30.0 },
+      xml_escape(name_txt)
     );
     if let Some(sub) = reg.subtitle.as_deref().filter(|s| !s.is_empty()) {
-      let _ = writeln!(
-        svg,
-        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"{MONO_FONT}\" font-size=\"13.5\" fill=\"{}\">{}</text>",
-        rx + rw - 14.0,
-        r.y + 30.0,
-        p.text_muted,
-        xml_escape(sub)
-      );
+      let sub_clipped = wrap_text(sub, (rw - 24.0).max(60.0), 12.5, 1);
+      if let Some(st) = sub_clipped.first() {
+        let _ = writeln!(
+          svg,
+          "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"12.5\" fill=\"{}\">{}</text>",
+          rx + 14.0,
+          r.y + 44.0,
+          p.text_muted,
+          xml_escape(st)
+        );
+      }
     }
 
     let slot_count = reg.slots.len().max(1);
     let slot_gap = 12.0_f32;
-    let avail_h = (r.h - 76.0).max(80.0);
+    let avail_h = (r.h - header_h - 28.0).max(80.0);
     let sh = ((avail_h - slot_gap * (slot_count.saturating_sub(1) as f32)) / slot_count as f32)
       .clamp(54.0, 96.0);
 
     for (si, slot) in reg.slots.iter().enumerate() {
-      let sy = r.y + 62.0 + si as f32 * (sh + slot_gap);
+      let sy = r.y + header_h + 14.0 + si as f32 * (sh + slot_gap);
       let sr = Rect {
-        x: rx + 12.0,
+        x: rx + 10.0,
         y: sy,
-        w: rw - 24.0,
+        w: (rw - 20.0).max(64.0),
         h: sh,
       };
       slot_rects.insert(slot.id.as_str(), (sr, ri));
@@ -2243,34 +2326,56 @@ fn render_memory(
         "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"8\" fill=\"{}\" stroke=\"{s_border}\" stroke-width=\"{s_bw}\"/>",
         sr.x, sr.y, sr.w, sr.h, p.surface_alt
       );
+      let compact_col = sr.w < 210.0;
       if let Some(off) = slot.offset.as_deref().filter(|o| !o.is_empty()) {
+        if compact_col {
+          let _ = writeln!(
+            svg,
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"{MONO_FONT}\" font-size=\"11.5\" fill=\"{}\">{}</text>",
+            sr.x + sr.w - 10.0,
+            sr.y + sh - 13.0,
+            p.text_muted,
+            xml_escape(off)
+          );
+        } else {
+          let _ = writeln!(
+            svg,
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"13\" fill=\"{}\">{}</text>",
+            sr.x + 12.0,
+            sr.y + 22.0,
+            p.text_muted,
+            xml_escape(off)
+          );
+        }
+      }
+      let label_x = if slot.offset.is_some() && !compact_col {
+        sr.x + 74.0
+      } else {
+        sr.x + 12.0
+      };
+      let label_font = if compact_col { 14.5 } else { 16.0 };
+      let label_avail = (sr.x + sr.w - label_x - 10.0).max(40.0);
+      let lbl_lines = wrap_text(&slot.label, label_avail, label_font, 1);
+      if let Some(lt) = lbl_lines.first() {
         let _ = writeln!(
           svg,
-          "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"13\" fill=\"{}\">{}</text>",
-          sr.x + 12.0,
-          sr.y + 22.0,
-          p.text_muted,
-          xml_escape(off)
+          "<text x=\"{label_x:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"{label_font:.1}\" font-weight=\"700\" fill=\"{}\">{}</text>",
+          sr.y + 23.0,
+          p.text,
+          xml_escape(lt)
         );
       }
-      let label_x = if slot.offset.is_some() {
-        sr.x + 76.0
+      let val_avail = if compact_col && slot.offset.is_some() {
+        (sr.w - 68.0).max(40.0)
       } else {
-        sr.x + 14.0
+        (sr.w - 22.0).max(40.0)
       };
-      let _ = writeln!(
-        svg,
-        "<text x=\"{label_x:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"16\" font-weight=\"700\" fill=\"{}\">{}</text>",
-        sr.y + 23.0,
-        p.text,
-        xml_escape(&slot.label)
-      );
-      let val_lines = wrap_text(&slot.value, sr.w - 24.0, 14.5, 1);
+      let val_lines = wrap_text(&slot.value, val_avail, 13.5, 1);
       if let Some(vl) = val_lines.first() {
         let _ = writeln!(
           svg,
-          "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"14.5\" fill=\"{color}\">{}</text>",
-          sr.x + 14.0,
+          "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{MONO_FONT}\" font-size=\"13.5\" fill=\"{color}\">{}</text>",
+          sr.x + 12.0,
           sr.y + sh - 13.0,
           xml_escape(vl)
         );

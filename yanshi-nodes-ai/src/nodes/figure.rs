@@ -314,7 +314,12 @@ fn typst_package_dirs() -> Vec<PathBuf> {
 type Rendered = Result<String, String>;
 
 impl FigureNode {
-  async fn render(&self, language: Language, source: &str) -> Result<Rendered, YanshiError> {
+  async fn render(
+    &self,
+    language: Language,
+    source: &str,
+    d2_theme: Option<&str>,
+  ) -> Result<Rendered, YanshiError> {
     if language == Language::Svg {
       return Ok(yanshi_nodes::nodes::render::check_svg(source).map(|()| source.to_string()));
     }
@@ -326,7 +331,7 @@ impl FigureNode {
     let result = match language {
       Language::Tikz => self.render_tikz(&node_dir, &workdir, source).await,
       Language::Typst => self.render_typst(&workdir, source).await,
-      Language::D2 => self.render_d2(&workdir, source).await,
+      Language::D2 => self.render_d2(&workdir, source, d2_theme).await,
       Language::Python => self.render_python(&workdir, source).await,
       Language::Svg => unreachable!("handled before the work directory is created"),
     };
@@ -435,8 +440,23 @@ impl FigureNode {
     self.read_svg(workdir).await
   }
 
-  async fn render_d2(&self, workdir: &Path, source: &str) -> Result<Rendered, YanshiError> {
+  async fn render_d2(
+    &self,
+    workdir: &Path,
+    source: &str,
+    d2_theme: Option<&str>,
+  ) -> Result<Rendered, YanshiError> {
     let d2 = self.tool("d2")?;
+    let mut d2_args: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(theme_id) = d2_theme.map(str::trim).filter(|t| !t.is_empty()) {
+      d2_args.extend([
+        "--theme".into(),
+        theme_id.into(),
+        "--pad".into(),
+        "24".into(),
+      ]);
+    }
+    d2_args.extend(["fig.d2".into(), "fig.svg".into()]);
     // 1. Try compiling the exact raw `source` first so valid D2 (including
     //    single-quoted strings, globs, or nested styles) is never mutated.
     tokio::fs::write(workdir.join("fig.d2"), source)
@@ -445,7 +465,7 @@ impl FigureNode {
     let raw_run = sandboxed::run(sandboxed::SandboxedRun {
       node: &self.id,
       program: d2.clone(),
-      args: ["fig.d2", "fig.svg"].map(Into::into).to_vec(),
+      args: d2_args.clone(),
       workdir,
       read_paths: sandboxed::font_dirs(),
       write_paths: Vec::new(),
@@ -467,7 +487,7 @@ impl FigureNode {
       let cleaned_run = sandboxed::run(sandboxed::SandboxedRun {
         node: &self.id,
         program: d2,
-        args: ["fig.d2", "fig.svg"].map(Into::into).to_vec(),
+        args: d2_args,
         workdir,
         read_paths: sandboxed::font_dirs(),
         write_paths: Vec::new(),
@@ -495,6 +515,7 @@ impl FigureNode {
     &self,
     source: &str,
     initial_error: &str,
+    d2_theme: Option<&str>,
   ) -> Result<Option<(String, String)>, YanshiError> {
     let mut current = source.to_string();
     let mut last_err = initial_error.to_string();
@@ -528,7 +549,7 @@ impl FigureNode {
         return Ok(None);
       }
       current = balanced.join("\n");
-      match self.render(Language::D2, &current).await? {
+      match self.render(Language::D2, &current, d2_theme).await? {
         Ok(svg) => return Ok(Some((svg, current))),
         Err(next_err) => last_err = next_err,
       }
@@ -711,11 +732,12 @@ impl AsyncNode for FigureNode {
           .await?
       }
     };
+    let d2_theme = string_input(inputs, "d2_theme");
     let mut attempt: u64 = 1;
     let svg = loop {
       let rendered = match domain.as_ref().map(|domain| domain.check(&source)) {
         Some(Err(violations)) => Err(violations),
-        _ => self.render(language, &source).await?,
+        _ => self.render(language, &source, d2_theme).await?,
       };
       match rendered {
         Ok(svg) => break svg,
@@ -742,7 +764,8 @@ impl AsyncNode for FigureNode {
         Err(error) => {
           if language == Language::D2
             && domain.is_none()
-            && let Some((salvaged_svg, salvaged_src)) = self.salvage_d2(&source, &error).await?
+            && let Some((salvaged_svg, salvaged_src)) =
+              self.salvage_d2(&source, &error, d2_theme).await?
           {
             source = salvaged_src;
             break salvaged_svg;

@@ -11,7 +11,7 @@
 #   6. Millisecond-accurate FFmpeg assembly with breathing pauses, smooth slide fades, rounded PiP
 #      presenter overlay, SRT + WebVTT subtitles (`render_video`), plus `.pptx` & `.pdf` (`render_document`)
 #
-#   yanshi workflow run examples/generators/tech_slides_video.yml \
+#   yanshi workflow run examples/generators/tech_slides_video.yml --timeout 15m \
 #     --input topic "Rust Traits 深度讲解：零成本抽象与虚表内存模型" \
 #     --output-dir runs/traits-lecture
 name: tech_slides_video
@@ -82,8 +82,8 @@ inputs:
     description: "AI 插图统一视觉艺术风格（英文描述，严禁出现任何文字或字母）"
     default: "dark slate systems-engineering architectural illustration, glowing copper-orange and cyan conduits, crisp isometric geometry, studio lighting, strictly no text, no letters, no watermark"
   video_model:
-    description: "动态主讲人视频模型（仅在 presenter_mode 为 pip 或 intro_outro 时按需触发；置空则自动降级为高清静态演播室讲师卡）"
-    default: "veo-3.1-fast-generate-001"
+    description: "可选动态主讲人视频模型（留空默认使用高清演播室讲师形象卡，兼容所有厂商 Key；如有视频权限可填 veo-3.1-fast-generate-001 / kling-4.0-flash / hailuo-02）"
+    default: ""
   presenter_prompt:
     description: "主讲人演播室镜头画面提示词（仅在 pip / intro_outro 模式下使用）"
     default: "A confident software architect speaking naturally on a modern dark developer keynote stage, subtle warm rim light and soft cyan background bokeh, waist-up framing, calm hand gesture, photorealistic 16:9, strictly no text or logos"
@@ -121,6 +121,7 @@ nodes:
           "source_repo": {{ source_repo | json_encode() }},
           "source_pdf": {{ source_pdf | json_encode() }},
           "chat_model": {{ chat_model | json_encode() }},
+          "d2_theme": {% if slide_theme == "dark" %}"200"{% else %}"0"{% endif %},
           "image_model": {{ image_model | json_encode() }},
           "image_size": {{ image_size | json_encode() }},
           "video_model": {{ video_model | json_encode() }},
@@ -224,11 +225,10 @@ nodes:
         1. **工程级双栏可视化面板（拒绝空洞口号）**：
            - 每页必须提供 `left` 主面板与 `right` 备选结构化面板（当未启用外部插图或处于结构化对比页时直接并排渲染）：
              * `code`：真实可编译的核心代码（控制在 8-15 行，2 空格缩进），配合 1-3 个精炼 `callouts`（`{"line": 行号, "text": "≤8字批注", "tone": "rust|cyan|green"}`）；
-             * `flowchart`：编译流水线、调用链或决策拓扑（4-6 个 `nodes` 含简短 `sublabel`，配 `edges` 有向边说明）；
-             * `memory`：栈/堆/虚表/结构体真实字节偏移布局（`regions` 含 `slots` + `pointers` 跨区指针连线）；
+             * `flowchart`：编译流水线、调用链或决策拓扑（4-6 个 `nodes` 含 `id`、`label` 与简短 `sublabel`，配 `edges` 有向边说明）；
+             * `memory`：栈/堆/虚表/结构体真实字节偏移布局（严格控制在 2-3 个 `regions`，含 `name` 与 `slots: [{"id": "s1", "offset": "+0x00", "label": "data_ptr", "value": "0x7ffd..."}]`，配 `pointers: [{"from": "s1", "to": "h1", "label": "points to"}]`）；
              * `table`：多方案横向对比矩阵（单元格以 `✓` / `✗` / `⚠` 开头标识优劣，设 `highlight_col` 突出主角列）；
-             * `bullets`：带 `badge` 标签的高密度架构卡片（可设 `grid: true` 排成 2×2 象限）；
-             * `mindmap`：仅用于最后一页全景知识收敛树（`root: {"label": "...", "children": [...]}`）。
+             * `bullets`：带 `badge` 标签的高密度架构卡片（可设 `grid: true` 排成 2×2 全景知识象限用于开篇或收官页）。
         2. **混合视觉编排（`visual_mode`）**：
            - 全套课件挑选恰好 1 页最核心的系统架构或数据流页设为 `visual_mode: "arch_diagram"`，并在顶层 `arch_diagram_spec` 中详细描述该页 D2 架构图的分层容器、核心组件与调用边（8-12 个节点）；
            - 挑选 1-2 页（如第 1 页破题引入或末页总结升华）设为 `visual_mode: "illustration"`，提供纯英文视觉隐喻提示词 `illustration_prompt`（严禁包含任何文字、字母或水印）与简短中文图注 `illustration_caption`；
@@ -272,13 +272,189 @@ nodes:
             maxItems: 12
             items:
               type: object
-              required: [title, left, takeaway, notes]
+              required: [title, left, right, visual_mode, takeaway, notes, steps]
               properties:
                 section: { type: string }
                 title: { type: string }
                 subtitle: { type: string }
-                left: { type: object }
-                right: { type: object }
+                left:
+                  type: object
+                  required: [kind]
+                  properties:
+                    kind:
+                      type: string
+                      enum: [bullets, code, flowchart, memory, table]
+                    title: { type: string }
+                    grid: { type: boolean }
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        required: [heading, body]
+                        properties:
+                          badge: { type: string }
+                          heading: { type: string }
+                          body: { type: string }
+                          tone: { type: string }
+                    language: { type: string }
+                    code: { type: string }
+                    callouts:
+                      type: array
+                      items:
+                        type: object
+                        required: [line, text]
+                        properties:
+                          line: { type: integer }
+                          text: { type: string }
+                          tone: { type: string }
+                    direction: { type: string }
+                    nodes:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, label]
+                        properties:
+                          id: { type: string }
+                          label: { type: string }
+                          sublabel: { type: string }
+                          tone: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          dashed: { type: boolean }
+                    regions:
+                      type: array
+                      items:
+                        type: object
+                        required: [name, slots]
+                        properties:
+                          name: { type: string }
+                          subtitle: { type: string }
+                          tone: { type: string }
+                          slots:
+                            type: array
+                            items:
+                              type: object
+                              required: [id, label, value]
+                              properties:
+                                id: { type: string }
+                                offset: { type: string }
+                                label: { type: string }
+                                value: { type: string }
+                    pointers:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          tone: { type: string }
+                    highlight_col: { type: integer }
+                    columns:
+                      type: array
+                      items: { type: string }
+                    rows:
+                      type: array
+                      items:
+                        type: array
+                        items: { type: string }
+                right:
+                  type: object
+                  required: [kind]
+                  properties:
+                    kind:
+                      type: string
+                      enum: [bullets, code, flowchart, memory, table]
+                    title: { type: string }
+                    grid: { type: boolean }
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        required: [heading, body]
+                        properties:
+                          badge: { type: string }
+                          heading: { type: string }
+                          body: { type: string }
+                          tone: { type: string }
+                    language: { type: string }
+                    code: { type: string }
+                    callouts:
+                      type: array
+                      items:
+                        type: object
+                        required: [line, text]
+                        properties:
+                          line: { type: integer }
+                          text: { type: string }
+                          tone: { type: string }
+                    direction: { type: string }
+                    nodes:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, label]
+                        properties:
+                          id: { type: string }
+                          label: { type: string }
+                          sublabel: { type: string }
+                          tone: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          dashed: { type: boolean }
+                    regions:
+                      type: array
+                      items:
+                        type: object
+                        required: [name, slots]
+                        properties:
+                          name: { type: string }
+                          subtitle: { type: string }
+                          tone: { type: string }
+                          slots:
+                            type: array
+                            items:
+                              type: object
+                              required: [id, label, value]
+                              properties:
+                                id: { type: string }
+                                offset: { type: string }
+                                label: { type: string }
+                                value: { type: string }
+                    pointers:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          tone: { type: string }
+                    highlight_col: { type: integer }
+                    columns:
+                      type: array
+                      items: { type: string }
+                    rows:
+                      type: array
+                      items:
+                        type: array
+                        items: { type: string }
                 split_ratio: { type: number }
                 visual_mode:
                   type: string
@@ -314,7 +490,7 @@ nodes:
       plan: "{{ nodes.deck.outputs.output }}"
     parameters:
       template: |
-        为主题「{{ plan.title }}」绘制一张结构清晰、层次分明的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器与简短有向边标签，严格控制在 8-12 个节点以内，避免交叉重叠）：
+        为主题「{{ plan.title }}」绘制一张结构清晰、层次分明的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器与简短有向边标签，严格控制在 8-12 个节点以内，避免交叉重叠；不要手动指定刺眼的亮黄/亮绿/纯红背景色，保持默认主题配色即可）：
         {{ plan.arch_diagram_spec | default(value=plan.title) }}
 
   - id: arch_figure
@@ -324,6 +500,7 @@ nodes:
     input_mapping:
       description: "{{ nodes.arch_figure_desc.outputs.output }}"
       model: "{{ nodes.mode_flags.outputs.chat_model }}"
+      d2_theme: "{{ nodes.mode_flags.outputs.d2_theme }}"
     parameters:
       language: d2
       png: true
@@ -458,7 +635,7 @@ nodes:
       input_list: "{{ nodes.tts_items.outputs.items }}"
     parameters:
       parallel: true
-      max_concurrent: 4
+      max_concurrent: 2
       template:
         - id: say
           type: tts

@@ -61,6 +61,7 @@ pub fn extension_for_mime(mime: &str) -> &'static str {
     "text/csv" => "csv",
     "text/html" => "html",
     "text/markdown" => "md",
+    "text/vtt" => "vtt",
     "application/x-subrip" => "srt",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",

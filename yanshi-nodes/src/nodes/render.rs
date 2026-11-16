@@ -1358,6 +1358,49 @@ fn cues_to_vtt(cues: &[TimedCue]) -> String {
   vtt
 }
 
+fn ass_time(seconds: f64) -> String {
+  let cs = (seconds.max(0.0) * 100.0).round() as u64;
+  let h = cs / 360_000;
+  let m = (cs % 360_000) / 6_000;
+  let s = (cs % 6_000) / 100;
+  let c = cs % 100;
+  format!("{h}:{m:02}:{s:02}.{c:02}")
+}
+
+fn cues_to_ass(cues: &[TimedCue], width: u32, height: u32, margin_l: u32, margin_r: u32) -> String {
+  let font_sz = ((height as f64 * 0.031).round() as u32).clamp(16, 44);
+  let margin_v = ((height as f64 * 0.024).round() as u32).max(12);
+  let pad = ((height as f64 * 0.010).round() as u32).clamp(6, 14);
+  let mut ass = format!(
+    "[Script Info]\n\
+     ScriptType: v4.00+\n\
+     PlayResX: {width}\n\
+     PlayResY: {height}\n\
+     WrapStyle: 0\n\
+     ScaledBorderAndShadow: yes\n\n\
+     [V4+ Styles]\n\
+     Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+     Style: Default,sans-serif,{font_sz},&H00F8FAFC,&H000000FF,&H780B1120,&H780B1120,-1,0,0,0,100,100,0,0,3,{pad},0,2,{margin_l},{margin_r},{margin_v},1\n\n\
+     [Events]\n\
+     Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+  );
+  for cue in cues {
+    let escaped = cue
+      .text
+      .replace('\\', "\\\\")
+      .replace('{', "\\{")
+      .replace('}', "\\}")
+      .replace('\n', "\\N");
+    ass.push_str(&format!(
+      "Dialogue: 0,{},{},Default,,0,0,0,,{}\n",
+      ass_time(cue.start),
+      ass_time(cue.end),
+      escaped
+    ));
+  }
+  ass
+}
+
 /// Render crisp vector grayscale alpha mask + studio accent border ring PNGs for PiP presenter overlay.
 fn render_pip_overlay_chrome(pip_w: u32, pip_h: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
   let rx = (pip_h as f32 * 0.09).clamp(10.0, 22.0);
@@ -1972,10 +2015,17 @@ impl AsyncNode for RenderVideoNode {
         };
 
         let sub_tail = if burning {
-          let font_sz = ((height as f64 * 0.017).round() as u32).clamp(11, 22);
-          format!(
-            ";[v_pip]subtitles=captions.srt:force_style='FontSize={font_sz},PrimaryColour=&H00F8FAFC,OutlineColour=&HAA0B1120,BackColour=&H990B1120,BorderStyle=3,Outline=1.2,Shadow=0,MarginV=16'[vout]"
-          )
+          let margin_l = ((width as f64 * 0.040).round() as u32).max(24);
+          let margin_r = if pip_position == "bottom_right" {
+            pip_w + margin_x * 2 + 28
+          } else {
+            margin_l
+          };
+          let ass_text = cues_to_ass(&cues, width, height, margin_l, margin_r);
+          tokio::fs::write(workdir.join("captions.ass"), ass_text)
+            .await
+            .map_err(|e| input_error(&self.id, format!("cannot write ass captions: {e}")))?;
+          ";[v_pip]ass=captions.ass[vout]".to_string()
         } else {
           String::new()
         };
@@ -2025,14 +2075,16 @@ impl AsyncNode for RenderVideoNode {
         );
         join.push(format!("{timeline_cursor:.3}").into());
       } else if burning {
-        let font_sz = ((height as f64 * 0.017).round() as u32).clamp(11, 22);
-        let vf_sub = format!(
-          "subtitles=captions.srt:force_style='FontSize={font_sz},PrimaryColour=&H00F8FAFC,OutlineColour=&HAA0B1120,BackColour=&H990B1120,BorderStyle=3,Outline=1.2,Shadow=0,MarginV=16'"
-        );
+        let margin_h = ((width as f64 * 0.05).round() as u32).max(24);
+        let ass_text = cues_to_ass(&cues, width, height, margin_h, margin_h);
+        tokio::fs::write(workdir.join("captions.ass"), ass_text)
+          .await
+          .map_err(|e| input_error(&self.id, format!("cannot write ass captions: {e}")))?;
+        let vf_sub = "ass=captions.ass";
         join.extend(
           [
             "-vf",
-            vf_sub.as_str(),
+            vf_sub,
             "-c:v",
             "libx264",
             "-preset",
