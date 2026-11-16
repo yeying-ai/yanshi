@@ -89,6 +89,33 @@ impl MoonshotProvider {
       body["response_format"] = response_format_to_openai_value(format);
     }
 
+    // Moonshot Kimi K2.x / K3 hybrid models default server-side to
+    // thinking=enabled (`temperature: 1.0`), which also rejects multi-turn
+    // tool-call histories unless `reasoning_content` is echoed on every turn.
+    // Default to Moonshot Instant Mode (`thinking: {"type": "disabled"}`,
+    // `temperature: 0.6`) unless the caller explicitly opted into thinking.
+    let m = request.model.to_ascii_lowercase();
+    let is_kimi_reasoning = m.starts_with("kimi-k2.") || m.starts_with("kimi-k3");
+    let disable_thinking = match &request.thinking {
+      None => true,
+      Some(cfg) => cfg.is_disabled(),
+    };
+    if is_kimi_reasoning
+      && disable_thinking
+      && !body
+        .as_object()
+        .is_some_and(|map| map.contains_key("thinking"))
+    {
+      body["thinking"] = json!({ "type": "disabled" });
+      body["temperature"] = json!(0.6);
+    }
+    if is_kimi_reasoning && request.response_format.is_some() {
+      let cur_max = body.get("max_tokens").and_then(Value::as_u64).unwrap_or(0);
+      if cur_max < 16384 {
+        body["max_tokens"] = json!(16384);
+      }
+    }
+
     body
   }
 }
@@ -517,6 +544,29 @@ mod tests {
     let tools = body["tools"].as_array().expect("tools array");
     assert_eq!(tools[0]["function"]["name"], "ping");
     assert_eq!(body["tool_choice"], "auto");
+  }
+
+  #[test]
+  fn kimi_reasoning_json_mode_disables_thinking_and_raises_max_tokens_floor() {
+    use crate::providers::ResponseFormat;
+    let provider = MoonshotProvider::new("test-key", None).unwrap();
+    let mut params = std::collections::HashMap::new();
+    params.insert("max_tokens".to_string(), json!(8192));
+    params.insert("temperature".to_string(), json!(1.0));
+    let request = ProviderRequest {
+      model: "kimi-k2.6".to_string(),
+      messages: vec![json!({"role": "user", "content": "json"})],
+      stream: false,
+      parameters: params,
+      tools: None,
+      tool_choice: None,
+      thinking: None,
+      response_format: Some(ResponseFormat::JsonObject),
+    };
+    let body = provider.build_request_body(&request);
+    assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+    assert_eq!(body["temperature"], 0.6);
+    assert_eq!(body["max_tokens"], 16384);
   }
 
   #[test]

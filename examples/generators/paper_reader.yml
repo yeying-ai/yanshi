@@ -54,7 +54,7 @@ nodes:
         你是一位资深计算机与科学文献双语译者。请针对以下提取自论文原件的文本，面向「{{ target_lang }}」读者完成高质量忠实精译（信、达、专有名词保留英文括注，公式符号保持原样）：
         1. `paper_title_original` 与 `paper_title_translated`；
         2. `abstract_bilingual`：摘要原文与{{ target_lang }}逐段对照精译；
-        3. `section_translations`：按论文核心章节顺序（引言、核心方法/模型设计、关键理论/架构细节、结论），输出每一节的精准{{ target_lang }}全文级精译与术语批注。
+        3. `section_translations`：按论文 4-6 个最核心章节顺序（引言、核心方法/模型设计、关键理论/架构细节、结论），输出每一节的高密度精准{{ target_lang }}精译（每节控制在 200-350 字核心译文）与术语批注。
 
         论文全文提取内容：
         {{ paper_text | truncate(length=52000) }}
@@ -65,7 +65,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.translation_prompt.outputs.output }}"
     parameters:
-      max_tokens: 12288
+      max_tokens: 8192
       system: "你是严谨的学术论文翻译专家，术语准确、逻辑忠实于原文，仅输出合法 JSON。"
       json_schema:
         type: object
@@ -78,6 +78,7 @@ nodes:
           section_translations:
             type: array
             minItems: 2
+            maxItems: 7
             items:
               type: object
               required: [section_heading, translated_markdown, key_terms]
@@ -117,7 +118,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.thesis_prompt.outputs.output }}"
     parameters:
-      max_tokens: 12288
+      max_tokens: 8192
       system: "你是严谨的顶会审稿人，一切论点与数据必须严格忠于论文原文，严禁编造数值，仅输出合法 JSON。"
       json_schema:
         type: object
@@ -135,6 +136,7 @@ nodes:
           core_claims:
             type: array
             minItems: 2
+            maxItems: 8
             items:
               type: object
               required: [claim, evidence_in_paper, source_section]
@@ -150,7 +152,27 @@ nodes:
             required: [label, children]
             properties:
               label: { type: string }
-              children: { type: array }
+              children:
+                type: array
+                items:
+                  type: object
+                  required: [label]
+                  properties:
+                    label: { type: string }
+                    children:
+                      type: array
+                      items:
+                        type: object
+                        required: [label]
+                        properties:
+                          label: { type: string }
+                          children:
+                            type: array
+                            items:
+                              type: object
+                              required: [label]
+                              properties:
+                                label: { type: string }
 
   - id: experiments_prompt
     type: template
@@ -159,10 +181,10 @@ nodes:
       paper_text: "{{ nodes.extract.outputs.output }}"
     parameters:
       template: |
-        请从以下论文全文中完整、逐项提取支撑论文论点的所有关键实验设置与定量对比数据（包括主实验、基线对比、消融实验 Ablation Study、吞吐/参数量/开销对比）：
+        请从以下论文全文中提取最具代表性的 8-18 行关键实验设置与定量对比数据（涵盖主实验、基线对比、消融实验 Ablation Study、吞吐/参数量/开销对比）：
         1. `experimental_setup`：数据集、评价指标、训练/推理硬件与关键超参数总结；
         2. `ablation_findings`：关键消融实验发现与变量贡献度解读；
-        3. `metrics_rows`：结构化实验数据行数组，每行包含统一字段：
+        3. `metrics_rows`：结构化实验数据行数组（8-18 行核心数据），每行包含统一字段：
            - `table_or_figure`（原论文图表编号，如 "Table 1" / "Table 3"）
            - `task_or_dataset`（任务或数据集名称）
            - `model_or_variant`（对比基线或本文模型变体）
@@ -180,7 +202,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.experiments_prompt.outputs.output }}"
     parameters:
-      max_tokens: 10240
+      max_tokens: 8192
       system: "你是定量科学数据分析专家，严格提取论文真实实验表格与正文报告的原始数据，绝不虚构指标，仅输出合法 JSON。"
       json_schema:
         type: object
@@ -191,6 +213,7 @@ nodes:
           metrics_rows:
             type: array
             minItems: 1
+            maxItems: 18
             items:
               type: object
               required:
@@ -280,13 +303,13 @@ nodes:
       thesis: "{{ nodes.analyze_thesis.outputs.output }}"
     parameters:
       output_format: json
-      template: "{{ thesis.mindmap_tree | json_encode() }}"
+      template: '{"tree": {{ thesis.mindmap_tree | json_encode() }}}'
 
   - id: mindmap_svg
     type: render_mindmap
     dependencies: ["mindmap_tree_json"]
     input_mapping:
-      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+      tree: "{{ nodes.mindmap_tree_json.outputs.tree }}"
 
   - id: mindmap_png
     type: render_svg
@@ -300,7 +323,7 @@ nodes:
     type: render_mindmap
     dependencies: ["mindmap_tree_json"]
     input_mapping:
-      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+      tree: "{{ nodes.mindmap_tree_json.outputs.tree }}"
     parameters:
       format: html
 

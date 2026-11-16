@@ -40,10 +40,10 @@ nodes:
 
         输出要求：
         1. `project_title`：项目名称与一句话架构定位；
-        2. `executive_summary`：2-3 段系统性总结项目的核心解决的问题、设计哲学与整体分层模型；
-        3. `layers`：提炼出清晰的架构分层列表（每层含 `name`、`responsibility`、`modules`）；
-        4. `modules`：核心模块职责清单（含 `name`、`path`、`role`、`depends_on`）；
-        5. `request_or_data_flow`：核心执行链路或请求生命周期拆解；
+        2. `executive_summary`：2 段精炼高密度的架构总览（解决的核心问题、设计哲学与整体分层模型）；
+        3. `layers`：提炼出 3-6 个清晰的架构分层（每层含 `name`、`responsibility`、`modules`）；
+        4. `modules`：聚焦最重要的 6-12 个核心模块/Crate/Package 职责清单（含 `name`、`path`、`role` 精炼在 60 字以内、`depends_on`）；
+        5. `request_or_data_flow`：核心执行链路或请求生命周期拆解（300 字以内）；
         6. `system_arch_d2_brief`：用于交给 D2 绘图引擎生成「系统分层与运行时架构图」的精确结构描述（明确各层嵌套容器、核心子系统及关键交互流向，严格忠于真实模块名）；
         7. `module_dep_d2_brief`：用于交给 D2 绘图引擎生成「项目模块依赖有向拓扑图（DAG）」的精确结构描述（列出真实 crate / package / 模块节点及 `A -> B` 依赖关系，严禁臆造不存在的包名）。
 
@@ -56,7 +56,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.analysis_prompt.outputs.output }}"
     parameters:
-      max_tokens: 12288
+      max_tokens: 8192
       system: "你是严谨的系统架构分析师，所有模块名与依赖关系必须严格基于仓库真实清单与源码，仅输出合法 JSON。"
       json_schema:
         type: object
@@ -74,6 +74,7 @@ nodes:
           layers:
             type: array
             minItems: 1
+            maxItems: 8
             items:
               type: object
               required: [name, responsibility, modules]
@@ -86,6 +87,7 @@ nodes:
           modules:
             type: array
             minItems: 1
+            maxItems: 12
             items:
               type: object
               required: [name, path, role, depends_on]

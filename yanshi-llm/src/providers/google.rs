@@ -127,9 +127,32 @@ impl GoogleProvider {
         }
         ResponseFormat::JsonSchema { schema, .. } => {
           generation_config["responseMimeType"] = json!("application/json");
-          generation_config["responseSchema"] = schema.clone();
+          if let Some(clean_schema) = sanitize_schema_for_gemini(schema) {
+            generation_config["responseSchema"] = clean_schema;
+          }
         }
         ResponseFormat::Text => {}
+      }
+
+      // Gemini 2.5 models count dynamic `thoughtsTokenCount` against
+      // `maxOutputTokens`. When structured JSON output is requested without
+      // an explicit caller `ThinkingConfig`, cap the thinking budget to 1024
+      // tokens and ensure `maxOutputTokens` has headroom (>= 16384) so
+      // unbounded reasoning never truncates the JSON payload mid-object.
+      if matches!(
+        format,
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. }
+      ) && request.thinking.is_none()
+        && request.model.contains("gemini-2.5")
+      {
+        generation_config["thinkingConfig"] = json!({ "thinkingBudget": 1024 });
+        let cur_max = generation_config
+          .get("maxOutputTokens")
+          .and_then(Value::as_u64)
+          .unwrap_or(0);
+        if cur_max > 0 && cur_max < 16384 {
+          generation_config["maxOutputTokens"] = json!(16384);
+        }
       }
     }
 
@@ -308,6 +331,65 @@ fn is_youtube_url(url: &str) -> bool {
     host,
     "youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be"
   )
+}
+
+/// Sanitize a JSON Schema for Gemini's OpenAPI-3.0-based `responseSchema`
+/// proto, or return `None` to fall back to `responseMimeType: application/json`
+/// when the schema uses `$ref`/`$defs`, untyped `object` maps, untyped `array`s,
+/// or exceeds Gemini's finite-state grammar serving budget (`> 36` properties).
+fn sanitize_schema_for_gemini(schema: &Value) -> Option<Value> {
+  fn walk(val: &Value, prop_count: &mut usize) -> Option<Value> {
+    let obj = val.as_object()?;
+    if obj.contains_key("$ref") || obj.contains_key("$defs") || obj.contains_key("definitions") {
+      return None;
+    }
+    let mut out = serde_json::Map::new();
+    let ty = obj.get("type").and_then(Value::as_str);
+    for (k, v) in obj {
+      if matches!(
+        k.as_str(),
+        "minItems"
+          | "maxItems"
+          | "minimum"
+          | "maximum"
+          | "exclusiveMinimum"
+          | "exclusiveMaximum"
+          | "additionalProperties"
+          | "$schema"
+          | "default"
+      ) {
+        continue;
+      }
+      if k == "properties" {
+        let props = v.as_object()?;
+        if props.is_empty() {
+          return None;
+        }
+        *prop_count += props.len();
+        if *prop_count > 36 {
+          return None;
+        }
+        let mut clean_props = serde_json::Map::new();
+        for (pk, pv) in props {
+          clean_props.insert(pk.clone(), walk(pv, prop_count)?);
+        }
+        out.insert(k.clone(), Value::Object(clean_props));
+      } else if k == "items" {
+        out.insert(k.clone(), walk(v, prop_count)?);
+      } else {
+        out.insert(k.clone(), v.clone());
+      }
+    }
+    if ty == Some("object") && !out.contains_key("properties") {
+      return None;
+    }
+    if ty == Some("array") && !out.contains_key("items") {
+      return None;
+    }
+    Some(Value::Object(out))
+  }
+  let mut count = 0usize;
+  walk(schema, &mut count)
 }
 
 /// Encode a `ToolSpec` as a Gemini `functionDeclaration` entry.
@@ -1646,5 +1728,52 @@ mod tests {
     let chunk2 = response.parse_json_chunk(second).unwrap().unwrap();
     assert_eq!(chunk1.tool_call_deltas[0].index, 0);
     assert_eq!(chunk2.tool_call_deltas[0].index, 1);
+  }
+
+  #[test]
+  fn gemini_json_schema_sanitization_and_thinking_budget_guard() {
+    let provider = GoogleProvider::new("test-key", None).unwrap();
+    let mut params = std::collections::HashMap::new();
+    params.insert("max_tokens".to_string(), json!(8192));
+
+    let compact = json!({
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": { "type": "string" }
+        }
+      }
+    });
+    let req = ProviderRequest {
+      model: "models/gemini-2.5-flash".to_string(),
+      messages: vec![json!({"role": "user", "content": "list items"})],
+      stream: false,
+      parameters: params.clone(),
+      tools: None,
+      tool_choice: None,
+      thinking: None,
+      response_format: Some(ResponseFormat::JsonSchema {
+        name: "output".to_string(),
+        schema: compact,
+        strict: Some(true),
+      }),
+    };
+    let body = provider.build_request_body(&req);
+    let gc = &body["generationConfig"];
+    assert_eq!(gc["responseMimeType"], "application/json");
+    assert!(gc["responseSchema"]["properties"]["items"]["minItems"].is_null());
+    assert_eq!(gc["thinkingConfig"]["thinkingBudget"], 1024);
+    assert_eq!(gc["maxOutputTokens"], 16384);
+
+    // Untyped object or recursive $ref falls back to JSON mime mode cleanly.
+    let untyped = json!({
+      "type": "object",
+      "properties": { "left": { "type": "object" } }
+    });
+    assert!(sanitize_schema_for_gemini(&untyped).is_none());
   }
 }

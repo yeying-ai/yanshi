@@ -77,10 +77,10 @@ nodes:
         要求（着重后端深度）：
         1. `project_name`、`tagline`、`architecture_overview`（详述网关接入、业务服务层、缓存/消息中间件、存储与可观测性设计）；
         2. `non_functional_targets`：并发吞吐、P99 延迟、一致性级别、高可用与容灾指标；
-        3. `backend_modules`：后端模块清单（`name`、`layer`、`responsibility`、`dependencies`、`key_apis`）；
-        4. `postgresql_ddl`：可直接执行的生产级 PostgreSQL 建表 SQL（含主键、外键引用、唯一约束、复合索引、状态枚举检查与关键字段注释）；
+        3. `backend_modules`：4-8 个核心后端模块清单（`name`、`layer`、`responsibility`、`dependencies`、`key_apis`）；
+        4. `postgresql_ddl`：核心 4-6 张业务表的精炼可执行生产级 PostgreSQL 建表 SQL（含主键、外键引用、唯一约束、关键复合索引与状态枚举检查，省略冗长注释）；
         5. `mindmap_tree`：项目全景思维导图树（根节点 `label` 为项目名，3 层以内分支涵盖：业务域划分、后端技术架构、核心接口与流程、数据库与缓存、稳定性与运维）；
-        6. 为 6 张 D2 工程图分别提供精准、无歧义的结构描述：
+        6. 为 6 张 D2 工程图分别提供精准、紧凑的结构描述（每项控制在 250 字以内，聚焦节点 ID、核心字段/方法与连线方向，不写冗余长篇解说）：
            - `arch_d2_brief`：系统总体架构图（网关、微服务/核心进程、缓存、MQ、DB、可观测体系分层容器与链路）；
            - `module_d2_brief`：后端模块依赖图（各业务模块/Crate/Package 之间的单向依赖拓扑，严禁循环依赖）；
            - `uml_class_d2_brief`：核心领域模型与服务接口 UML 类图（明确 4-6 个核心聚合根/实体/DomainService 的字段类型、方法签名与关联关系，使用 D2 `shape: class`）；
@@ -100,7 +100,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.spec_prompt.outputs.output }}"
     parameters:
-      max_tokens: 16384
+      max_tokens: 8192
       system: "你是严谨的首席后端架构师，仅输出符合 JSON Schema 的完整工程设计 JSON。"
       json_schema:
         type: object
@@ -125,10 +125,12 @@ nodes:
           architecture_overview: { type: string }
           non_functional_targets:
             type: array
+            maxItems: 10
             items: { type: string }
           backend_modules:
             type: array
             minItems: 2
+            maxItems: 10
             items:
               type: object
               required: [name, layer, responsibility, dependencies, key_apis]
@@ -144,6 +146,7 @@ nodes:
                   items: { type: string }
           api_endpoints:
             type: array
+            maxItems: 12
             items:
               type: object
               required: [method, path, summary, idempotency_and_auth]
@@ -158,7 +161,27 @@ nodes:
             required: [label, children]
             properties:
               label: { type: string }
-              children: { type: array }
+              children:
+                type: array
+                items:
+                  type: object
+                  required: [label]
+                  properties:
+                    label: { type: string }
+                    children:
+                      type: array
+                      items:
+                        type: object
+                        required: [label]
+                        properties:
+                          label: { type: string }
+                          children:
+                            type: array
+                            items:
+                              type: object
+                              required: [label]
+                              properties:
+                                label: { type: string }
           arch_d2_brief: { type: string }
           module_d2_brief: { type: string }
           uml_class_d2_brief: { type: string }
@@ -299,13 +322,13 @@ nodes:
       spec: "{{ nodes.structure_spec.outputs.output }}"
     parameters:
       output_format: json
-      template: "{{ spec.mindmap_tree | json_encode() }}"
+      template: '{"tree": {{ spec.mindmap_tree | json_encode() }}}'
 
   - id: mindmap_svg
     type: render_mindmap
     dependencies: ["mindmap_extract"]
     input_mapping:
-      tree: "{{ nodes.mindmap_extract.outputs.output }}"
+      tree: "{{ nodes.mindmap_extract.outputs.tree }}"
 
   - id: mindmap_png
     type: render_svg
@@ -319,7 +342,7 @@ nodes:
     type: render_mindmap
     dependencies: ["mindmap_extract"]
     input_mapping:
-      tree: "{{ nodes.mindmap_extract.outputs.output }}"
+      tree: "{{ nodes.mindmap_extract.outputs.tree }}"
     parameters:
       format: html
 

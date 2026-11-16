@@ -278,6 +278,7 @@ pub fn collect_file_outputs(
   let mut node_ids: Vec<&String> = state.keys().collect();
   node_ids.sort();
   let mut found = Vec::new();
+  let mut seen_paths = std::collections::HashSet::new();
   for node_id in node_ids {
     let Ok(outputs) = &state[node_id] else {
       continue;
@@ -296,6 +297,9 @@ pub fn collect_file_outputs(
           path = %path.display(),
           "File output outside the run base dir is not treated as an artifact"
         );
+        continue;
+      }
+      if !seen_paths.insert((node_id.clone(), resolved)) {
         continue;
       }
       found.push(FileOutput {

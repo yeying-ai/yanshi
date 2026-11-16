@@ -17,7 +17,9 @@ use yanshi_core::{error::YanshiError, value::FlowValue};
 
 /// The writer is shared with the tool-tier render nodes (Y3.1), so it
 /// lives in `yanshi-nodes`; re-exported here so existing paths keep working.
-pub use yanshi_nodes::common::artifacts::{artifact_dir, extension_for_mime, write_artifact};
+pub use yanshi_nodes::common::artifacts::{
+  artifact_dir, extension_for_mime, sniff_image_mime, write_artifact,
+};
 
 /// How a modality node hands its bytes downstream. YAML: `output_format`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,8 +61,15 @@ pub async fn download_artifact(
     .map_err(|e| YanshiError::AsyncExecutionError {
       message: format!("failed to download generated media from {url}: {e}"),
     })?;
-  let mime = mime.unwrap_or_else(|| mime_hint.to_string());
-  write_artifact(node_id, &bytes, &mime).await
+  let resolved_mime = if mime_hint.starts_with("image/") {
+    sniff_image_mime(&bytes)
+      .map(str::to_string)
+      .or_else(|| mime.filter(|m| m != "application/octet-stream"))
+      .unwrap_or_else(|| mime_hint.to_string())
+  } else {
+    mime.unwrap_or_else(|| mime_hint.to_string())
+  };
+  write_artifact(node_id, &bytes, &resolved_mime).await
 }
 
 /// Upper bound on a generated image fetched from a vendor URL.
@@ -84,14 +93,22 @@ pub async fn image_output(
         .map_err(|e| YanshiError::AsyncExecutionError {
           message: format!("provider returned invalid base64 image data: {e}"),
         })?;
-      write_artifact(node_id, &bytes, "image/png").await
+      let mime = sniff_image_mime(&bytes).unwrap_or("image/png");
+      write_artifact(node_id, &bytes, mime).await
     }
     (ArtifactOutputFormat::File, None, Some(url)) => {
       download_artifact(node_id, url, "image/png", MAX_IMAGE_DOWNLOAD_BYTES).await
     }
-    (ArtifactOutputFormat::DataUri, Some(b64), _) => Ok(FlowValue::Json(Value::String(format!(
-      "data:image/png;base64,{b64}"
-    )))),
+    (ArtifactOutputFormat::DataUri, Some(b64), _) => {
+      let mime = STANDARD
+        .decode(b64)
+        .ok()
+        .and_then(|bytes| sniff_image_mime(&bytes))
+        .unwrap_or("image/png");
+      Ok(FlowValue::Json(Value::String(format!(
+        "data:{mime};base64,{b64}"
+      ))))
+    }
     (ArtifactOutputFormat::DataUri, None, Some(url)) => {
       Ok(FlowValue::Json(Value::String(url.clone())))
     }

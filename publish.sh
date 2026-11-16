@@ -170,12 +170,37 @@ CARGO_BUILD_JOBS=2
 RUST_LOG=info
 ENVEOF
 
-  # Import non-empty provider credentials from /root/.bashrc if present without printing values
-  python3 - "$ENV_FILE" <<'PY'
+  chmod 600 "$ENV_FILE"
+  echo "Created fresh production .env at ${ENV_FILE}"
+fi
+
+# Idempotently reconcile required allowed commands and newly available provider keys on upgrades
+python3 - "$ENV_FILE" <<'PY'
 import pathlib, re, sys
 
 env_path = pathlib.Path(sys.argv[1])
-bashrc = pathlib.Path("/root/.bashrc")
+lines = env_path.read_text(encoding="utf-8").splitlines()
+existing = {}
+for idx, line in enumerate(lines):
+  stripped = line.strip()
+  if stripped and not stripped.startswith("#") and "=" in stripped:
+    k, v = stripped.split("=", 1)
+    existing[k.strip()] = (idx, v.strip())
+
+required_cmds = ["ffmpeg", "ffprobe", "typst", "pandoc", "d2", "pdftotext", "yt-dlp"]
+if "YANSHI_GATEWAY_ALLOWED_COMMANDS" in existing:
+  idx, cur = existing["YANSHI_GATEWAY_ALLOWED_COMMANDS"]
+  cur_list = [c.strip() for c in cur.split(",") if c.strip()]
+  added = [c for c in required_cmds if c not in cur_list]
+  if added:
+    merged = ",".join(cur_list + added)
+    lines[idx] = f"YANSHI_GATEWAY_ALLOWED_COMMANDS={merged}"
+    print("Updated YANSHI_GATEWAY_ALLOWED_COMMANDS ->", merged)
+else:
+  merged = ",".join(required_cmds)
+  lines.append(f"YANSHI_GATEWAY_ALLOWED_COMMANDS={merged}")
+  print("Added YANSHI_GATEWAY_ALLOWED_COMMANDS ->", merged)
+
 wanted = [
   "OPENAI_API_KEY", "OPENAI_BASE_URL",
   "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
@@ -184,26 +209,30 @@ wanted = [
   "GLM_API_KEY", "ZHIPU_API_KEY",
   "MOONSHOT_API_KEY", "STEPFUN_API_KEY",
   "DASHSCOPE_API_KEY", "MINIMAX_API_KEY", "KLING_API_KEY",
+  "TAVILY_API_KEY", "BOCHA_API_KEY", "SERPER_API_KEY", "BRAVE_API_KEY",
+  "SEARXNG_URL", "GITHUB_TOKEN",
 ]
-found = {}
+bashrc = pathlib.Path("/root/.bashrc")
+imported = []
 if bashrc.is_file():
-  for line in bashrc.read_text(encoding="utf-8", errors="ignore").splitlines():
-    m = re.match(r"^\s*(?:export\s+)?([A-Z0-9_]+)=(.+?)\s*$", line)
+  for raw in bashrc.read_text(encoding="utf-8", errors="ignore").splitlines():
+    m = re.match(r"^\s*(?:export\s+)?([A-Z0-9_]+)=(.+?)\s*$", raw)
     if m and m.group(1) in wanted:
+      key = m.group(1)
       val = m.group(2).strip().strip("'").strip('"')
-      if val and "$" not in val:
-        found[m.group(1)] = val
+      if val and "$" not in val and (key not in existing or not existing[key][1]):
+        if key in existing:
+          lines[existing[key][0]] = f"{key}={val}"
+        else:
+          lines.append(f"{key}={val}")
+        existing[key] = (len(lines) - 1, val)
+        imported.append(key)
 
-if found:
-  with env_path.open("a", encoding="utf-8") as f:
-    f.write("\n# Imported LLM provider credentials\n")
-    for k, v in sorted(found.items()):
-      f.write(f"{k}={v}\n")
-  print("Imported provider keys:", ", ".join(sorted(found.keys())))
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+if imported:
+  print("Imported missing keys from /root/.bashrc:", ", ".join(sorted(imported)))
 PY
-  chmod 600 "$ENV_FILE"
-  echo "Created fresh production .env at ${ENV_FILE}"
-fi
+chmod 600 "$ENV_FILE"
 
 cd "$REMOTE_SRC_DIR"
 DOCKER_BUILDKIT=1 docker compose --env-file "$ENV_FILE" \
@@ -257,7 +286,17 @@ diag_json="$(curl -fsS \
   --resolve "${SITE_HOST}:443:127.0.0.1" \
   -H "Authorization: Bearer ${api_token}" \
   "${SITE_URL}/v1/diagnostics")"
-diag_status="$(printf '%s' "${diag_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status","unknown"), "pricing_models="+str(d.get("pricing",{}).get("models",0)))')"
+diag_status="$(printf '%s' "${diag_json}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+tools = {t["name"]: bool(t.get("path")) for t in d.get("external_tools", [])}
+req = ["ffmpeg", "ffprobe", "pandoc", "typst", "pdftotext", "d2", "yt-dlp"]
+missing = [name for name in req if not tools.get(name)]
+if missing:
+  sys.stderr.write("Missing required external tools in container: " + ", ".join(missing) + "\n")
+  sys.exit(1)
+print(d.get("status", "unknown"), "pricing_models=" + str(d.get("pricing", {}).get("models", 0)), "tools=" + ",".join(req))
+')"
 echo "HTTPS /v1/diagnostics authenticated check: ${diag_status}"
 EOF
 ok "Remote loopback & Pingora TLS verification passed"

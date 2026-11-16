@@ -41,17 +41,6 @@ impl AsyncNode for LlmNode {
       })?;
 
     let model_name = model.unwrap_or_default().to_string();
-    let mut request = Yanshi::model(&model_name).prompt(prompt);
-
-    if let Some(sys) = system {
-      request = request.system(sys);
-    }
-    if let Some(temp) = get_optional_f64_input(inputs, "temperature")? {
-      request = request.temperature(temp as f32);
-    }
-    if let Some(max_tokens) = get_optional_u64_input(inputs, "max_tokens")? {
-      request = request.max_tokens(max_tokens as u32);
-    }
     // Y4.1: `json_schema` (a JSON Schema object) constrains the reply and
     // makes `output` the parsed JSON value rather than a string, so a
     // generator's outline can feed a Map node directly.
@@ -69,6 +58,27 @@ impl AsyncNode for LlmNode {
         });
       }
     };
+    // Embed the schema contract in the user prompt as well so providers that
+    // fall back to `json_object` / `responseMimeType: application/json` (or
+    // ignore nested `json_schema` constraints) still see exact field names.
+    let effective_prompt = match &schema {
+      Some(s) => format!(
+        "{prompt}\n\nOutput ONLY valid JSON strictly conforming to this JSON Schema (no markdown fences, no extra prose):\n{}",
+        serde_json::to_string(s).unwrap_or_default()
+      ),
+      None => prompt.to_string(),
+    };
+    let mut request = Yanshi::model(&model_name).prompt(&effective_prompt);
+
+    if let Some(sys) = system {
+      request = request.system(sys);
+    }
+    if let Some(temp) = get_optional_f64_input(inputs, "temperature")? {
+      request = request.temperature(temp as f32);
+    }
+    if let Some(max_tokens) = get_optional_u64_input(inputs, "max_tokens")? {
+      request = request.max_tokens(max_tokens as u32);
+    }
     if let Some(schema) = &schema {
       request = request.json_schema("output", schema.clone());
     }
@@ -122,16 +132,54 @@ impl AsyncNode for LlmNode {
   }
 }
 
-/// The JSON in a schema-constrained reply. Providers that ignore the
-/// schema sometimes wrap it in a ```json fence; accept that too.
+/// The JSON in a schema-constrained reply. Providers that ignore or
+/// downgrade `json_schema` may prepend `<think>...</think>`, prose, or wrap
+/// the payload inside a ` ```json ` code fence.
 fn parse_json_reply(reply: &str) -> Result<Value, YanshiError> {
   let trimmed = reply.trim();
-  let unfenced = trimmed
-    .strip_prefix("```json")
-    .or_else(|| trimmed.strip_prefix("```"))
-    .and_then(|rest| rest.strip_suffix("```"))
-    .unwrap_or(trimmed);
-  serde_json::from_str(unfenced.trim()).map_err(|e| YanshiError::NodeExecutionFailed {
+  if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+    return Ok(v);
+  }
+
+  let without_think = if let Some(start) = trimmed.find("<think>")
+    && let Some(end) = trimmed[start..].find("</think>")
+  {
+    format!(
+      "{}{}",
+      &trimmed[..start],
+      &trimmed[start + end + "</think>".len()..]
+    )
+  } else {
+    trimmed.to_string()
+  };
+  let s = without_think.trim();
+  if let Ok(v) = serde_json::from_str::<Value>(s) {
+    return Ok(v);
+  }
+
+  if let Some(fence_start) = s.find("```") {
+    let after_ticks = &s[fence_start + 3..];
+    let body_start = after_ticks.find('\n').map_or(0, |nl| nl + 1);
+    let body = &after_ticks[body_start..];
+    let candidate = match body.find("```") {
+      Some(end) => &body[..end],
+      None => body,
+    };
+    if let Ok(v) = serde_json::from_str::<Value>(candidate.trim()) {
+      return Ok(v);
+    }
+  }
+
+  for (open, close) in [('{', '}'), ('[', ']')] {
+    if let (Some(first), Some(last)) = (s.find(open), s.rfind(close))
+      && last > first
+      && let Ok(v) = serde_json::from_str::<Value>(&s[first..=last])
+    {
+      return Ok(v);
+    }
+  }
+
+  serde_json::from_str(s).map_err(|e| YanshiError::NodeExecutionFailed {
     message: format!("the model did not return JSON for json_schema: {e}"),
   })
 }
@@ -226,6 +274,17 @@ mod tests {
     assert_eq!(
       parse_json_reply("```json\n[1, 2]\n```").unwrap(),
       json!([1, 2])
+    );
+    assert_eq!(
+      parse_json_reply(
+        "<think>reasoning</think>\nHere is JSON:\n```json\n{\"ok\":true}\n```\nDone."
+      )
+      .unwrap(),
+      json!({"ok": true})
+    );
+    assert_eq!(
+      parse_json_reply("Sure, result below:\n{\"k\": \"v\"}\nthanks!").unwrap(),
+      json!({"k": "v"})
     );
     assert!(parse_json_reply("not json").is_err());
   }

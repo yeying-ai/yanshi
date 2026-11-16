@@ -470,21 +470,28 @@ struct Placed {
 }
 
 fn tree_label(node: &Value) -> Result<String, String> {
-  node
-    .get("label")
-    .or_else(|| node.get("title"))
-    .and_then(Value::as_str)
+  if let Some(s) = node.as_str() {
+    let trimmed = s.trim();
+    if !trimmed.is_empty() {
+      return Ok(trimmed.to_string());
+    }
+  }
+  ["label", "title", "name", "topic", "text", "heading", "node"]
+    .iter()
+    .find_map(|k| node.get(*k).and_then(Value::as_str))
     .map(|label| label.trim().to_string())
     .filter(|label| !label.is_empty())
     .ok_or_else(|| "every node needs a non-empty \"label\"".to_string())
 }
 
-fn tree_children(node: &Value) -> &[Value] {
+fn tree_children(node: &Value) -> Vec<&Value> {
   node
     .get("children")
+    .or_else(|| node.get("items"))
+    .or_else(|| node.get("subtopics"))
     .and_then(Value::as_array)
-    .map(Vec::as_slice)
-    .unwrap_or(&[])
+    .map(|arr| arr.iter().filter(|c| tree_label(c).is_ok()).collect())
+    .unwrap_or_default()
 }
 
 /// Approximate rendered width of `text` at 14px: CJK and other wide
@@ -1596,9 +1603,10 @@ impl AsyncNode for RenderVideoNode {
 ///
 /// pandoc (and typst under it) runs under the platform OS sandbox
 /// backend, writing only to this node's artifact directory and the temp
-/// dir; see `run_pandoc`. Raw HTML in the source is read as
-/// text (`-f markdown-raw_html`), for the same reason as
-/// `render_markdown`.
+/// dir; see `run_pandoc`. Raw HTML and `@foo` Pandoc citations in the source
+/// are read as literal text (`-f markdown-raw_html-citations`), so untrusted
+/// HTML cannot inject script and `@mention` / `@Annotation` tokens never emit
+/// `#cite(...)` without a bibliography.
 pub struct RenderDocumentNode {
   id: String,
 }
@@ -1713,6 +1721,46 @@ async fn run_pandoc(
   Ok(())
 }
 
+/// Rewrite absolute run-artifact image paths inside staged Markdown into
+/// `workdir`-relative paths (`../<sibling_node>/<file>`) so both Pandoc's
+/// archive builders (`pptx`/`docx`/`html`) and Typst (`--root=<art_root>`,
+/// where leading `/` means root-relative rather than filesystem `/`) resolve
+/// sibling node artifacts identically.
+fn relativize_artifact_paths(
+  markdown: &str,
+  workdir: &std::path::Path,
+  art_root: Option<&std::path::Path>,
+) -> String {
+  let mut rules: Vec<(String, &'static str)> = Vec::new();
+  let mut push_dir = |dir: &std::path::Path, rel: &'static str| {
+    let raw = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
+    if raw.len() > 1 && !rules.iter().any(|(p, _)| p == &raw) {
+      rules.push((raw, rel));
+    }
+    if let Ok(canon) = dir.canonicalize() {
+      let c = format!("{}/", canon.to_string_lossy().trim_end_matches('/'));
+      if c.len() > 1 && !rules.iter().any(|(p, _)| p == &c) {
+        rules.push((c, rel));
+      }
+    }
+  };
+  // `workdir` is `<art_root>/artifacts/<node_id>`, so `<art_root>/artifacts/`
+  // is `../` and `<art_root>/` (for any root-level files) is `../../`.
+  if let Some(artifacts_dir) = workdir.parent() {
+    push_dir(artifacts_dir, "../");
+  }
+  if let Some(root) = art_root {
+    let root_artifacts = root.join("artifacts");
+    push_dir(&root_artifacts, "../");
+    push_dir(root, "../../");
+  }
+  let mut out = markdown.to_string();
+  for (prefix, rel) in rules {
+    out = out.replace(&prefix, rel);
+  }
+  out
+}
+
 #[async_trait]
 impl AsyncNode for RenderDocumentNode {
   async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
@@ -1739,19 +1787,31 @@ impl AsyncNode for RenderDocumentNode {
     let metadata = workdir.join(format!("{stem}.json"));
     let cleanup = [source.clone(), target.clone(), metadata.clone()];
 
+    let art_root = yanshi_core::run_context::current_artifact_root();
+    let staged_markdown = relativize_artifact_paths(&markdown, &workdir, art_root.as_deref());
+
     let rendered = async {
-      tokio::fs::write(&source, markdown.as_bytes())
+      tokio::fs::write(&source, staged_markdown.as_bytes())
         .await
         .map_err(|e| input_error(&self.id, format!("cannot stage the source: {e}")))?;
+      let mut res_dirs: Vec<&std::path::Path> = vec![workdir.as_path()];
+      if let Some(artifacts_dir) = workdir.parent() {
+        res_dirs.push(artifacts_dir);
+      }
+      if let Some(root) = art_root.as_deref() {
+        res_dirs.push(root);
+      }
+      let resource_path: std::ffi::OsString =
+        std::env::join_paths(res_dirs).unwrap_or_else(|_| workdir.clone().into_os_string());
       let mut args: Vec<std::ffi::OsString> = vec![
         source.clone().into(),
         "-f".into(),
-        "markdown-raw_html".into(),
+        "markdown-raw_html-citations".into(),
         "--standalone".into(),
         "-o".into(),
         target.clone().into(),
         "--resource-path".into(),
-        workdir.clone().into(),
+        resource_path,
       ];
       if let Some(title) = optional_str(inputs, "title") {
         tokio::fs::write(&metadata, serde_json::json!({ "title": title }).to_string())
@@ -1765,7 +1825,13 @@ impl AsyncNode for RenderDocumentNode {
       }
       match extension {
         "html" => args.push("--embed-resources".into()),
-        "pdf" => args.push("--pdf-engine=typst".into()),
+        "pdf" => {
+          args.push("--pdf-engine=typst".into());
+          let typst_root = art_root.as_deref().unwrap_or(workdir.as_path());
+          let mut root_opt = std::ffi::OsString::from("--pdf-engine-opt=--root=");
+          root_opt.push(typst_root.as_os_str());
+          args.push(root_opt);
+        }
         _ => {}
       }
       if let Some(theme) = optional_str(inputs, "theme")
@@ -1963,8 +2029,7 @@ mod tests {
   #[tokio::test]
   #[ignore = "needs pandoc and typst"]
   async fn render_document_pdf_has_pages_and_docx_reads_back() {
-    let markdown =
-      "# 潮汐\n\nTides follow **the moon**. 潮汐由月球引力引起。\n\n<script>x</script>\n";
+    let markdown = "# 潮汐\n\nTides follow **the moon**. 潮汐由月球引力引起（支持 @提及 与 @Transactional）。\n\n<script>x</script>\n";
     let (pdf, mime) = run(
       &RenderDocumentNode::new("doc"),
       inputs(&[
@@ -2465,6 +2530,43 @@ mod tests {
     assert!(
       err.to_string().contains("outside this run's artifacts"),
       "{err}"
+    );
+  }
+
+  #[test]
+  fn mindmap_accepts_common_label_aliases_string_leaves_and_skips_empty_children() {
+    let tree = json!({
+      "name": "Pingora Gateway",
+      "children": [
+        { "topic": "Zero-Downtime Upgrade", "children": ["FD Passing", "Graceful Drain", {}] },
+        { "heading": "Tokio Work-Stealing" },
+        {}
+      ]
+    });
+    let svg = mindmap_svg(&tree).expect("svg");
+    assert!(svg.contains("Pingora Gateway"));
+    assert!(svg.contains("FD Passing"));
+    let html = mindmap_page(&tree).expect("html");
+    assert!(html.contains("Zero-Downtime Upgrade"));
+  }
+
+  #[test]
+  fn relativize_artifact_paths_maps_sibling_artifacts_and_root_files() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let slides_dir = root.join("artifacts").join("slides_render");
+    let workdir = root.join("artifacts").join("deck_pptx");
+    std::fs::create_dir_all(&slides_dir).expect("mkdir");
+    std::fs::create_dir_all(&workdir).expect("mkdir");
+    let md = format!(
+      "![slide]({}/1.png)\n![raw]({}/cover.png)\n",
+      slides_dir.display(),
+      root.display()
+    );
+    let staged = relativize_artifact_paths(&md, &workdir, Some(root));
+    assert_eq!(
+      staged,
+      "![slide](../slides_render/1.png)\n![raw](../../cover.png)\n"
     );
   }
 }

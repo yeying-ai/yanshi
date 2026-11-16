@@ -122,6 +122,10 @@ pub struct CreateRunRequest {
   /// default when `run_mode == RunMode::Debug`).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub step_every_node: Option<bool>,
+  /// Optional per-run node concurrency cap (`1..=state.run_max_concurrency`),
+  /// useful when targeting model tiers with strict concurrency=1 quotas.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_concurrency: Option<usize>,
 }
 
 /// Execution mode distinguishing one-click Release runs from interactive Studio Debug runs.
@@ -1676,6 +1680,7 @@ pub async fn submit_run(
       run_mode: req.run_mode,
       breakpoints: req.breakpoints,
       step_every_node: req.step_every_node,
+      max_concurrency: req.max_concurrency,
     },
   )
   .await?;
@@ -1698,6 +1703,7 @@ pub(crate) struct RunOptions {
   pub run_mode: RunMode,
   pub breakpoints: Vec<String>,
   pub step_every_node: Option<bool>,
+  pub max_concurrency: Option<usize>,
 }
 
 /// Admission (the replica-local pre-check, then `create_if_admitted`'s
@@ -1787,6 +1793,7 @@ pub(crate) async fn admit_and_dispatch(
       model: options.model,
       notebook: options.notebook,
       debug_controller,
+      max_concurrency: options.max_concurrency,
     },
     local_admission_guard,
   );
@@ -1805,6 +1812,7 @@ struct DispatchedRun {
   model: Option<String>,
   notebook: Option<NotebookLink>,
   debug_controller: Option<FlowDebugController>,
+  max_concurrency: Option<usize>,
 }
 
 /// Execute a run in the background so the HTTP request returns
@@ -1823,7 +1831,9 @@ fn dispatch_run<G: Send + 'static>(
   let question_registry = state.question_registry.clone();
   let live_state_registry = state.live_state_registry.clone();
   let approval_registry = state.approval_registry.clone();
-  let run_max_concurrency = state.run_max_concurrency;
+  let run_max_concurrency = run.max_concurrency.map_or(state.run_max_concurrency, |n| {
+    n.clamp(1, state.run_max_concurrency.max(1))
+  });
   let cancellation_token = FlowCancellationToken::new();
   let task_token = cancellation_token.clone();
   let run_id = run.run_id;
@@ -2091,6 +2101,7 @@ async fn resume_run(
       model: None,
       notebook: None,
       debug_controller: None,
+      max_concurrency: None,
     },
     admission_guard,
   );

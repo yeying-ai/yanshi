@@ -79,6 +79,14 @@ pub struct SlideStep {
   pub show_takeaway: Option<bool>,
 }
 
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+  D: serde::Deserializer<'de>,
+  T: Default + Deserialize<'de>,
+{
+  Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Structured visual primitive occupying a slide column or full stage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -86,8 +94,9 @@ pub enum Panel {
   Bullets {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     grid: bool,
+    #[serde(default, deserialize_with = "null_default")]
     items: Vec<BulletItem>,
   },
   Code {
@@ -95,8 +104,9 @@ pub enum Panel {
     title: Option<String>,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
     code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     callouts: Vec<CodeCallout>,
   },
   Flowchart {
@@ -104,15 +114,17 @@ pub enum Panel {
     title: Option<String>,
     #[serde(default)]
     direction: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
     nodes: Vec<FlowNode>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     edges: Vec<FlowEdge>,
   },
   Memory {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
     regions: Vec<MemRegion>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pointers: Vec<MemPointer>,
   },
   Table {
@@ -120,12 +132,15 @@ pub enum Panel {
     title: Option<String>,
     #[serde(default)]
     highlight_col: Option<usize>,
+    #[serde(default, deserialize_with = "null_default")]
     columns: Vec<String>,
+    #[serde(default, deserialize_with = "null_default")]
     rows: Vec<Vec<String>>,
   },
   Mindmap {
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
     root: Value,
   },
   Image {
@@ -142,7 +157,7 @@ pub struct BulletItem {
   #[serde(default)]
   pub badge: Option<String>,
   pub heading: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_default")]
   pub body: String,
   #[serde(default)]
   pub tone: Option<String>,
@@ -176,7 +191,7 @@ pub struct FlowEdge {
   pub to: String,
   #[serde(default)]
   pub label: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_default")]
   pub dashed: bool,
 }
 
@@ -941,13 +956,14 @@ fn resolve_artifact_image_data_uri(src: &str) -> Option<String> {
     .and_then(|e| e.to_str())
     .unwrap_or("png")
     .to_ascii_lowercase();
-  let mime = match ext.as_str() {
+  let ext_mime = match ext.as_str() {
     "jpg" | "jpeg" => "image/jpeg",
     "webp" => "image/webp",
     "gif" => "image/gif",
     "svg" => "image/svg+xml",
     _ => "image/png",
   };
+  let mime = crate::common::artifacts::sniff_image_mime(&bytes).unwrap_or(ext_mime);
   use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
   Some(format!("data:{mime};base64,{}", B64.encode(&bytes)))
 }
@@ -2299,14 +2315,10 @@ fn collect_editable_markdown(panel: &Panel, out: &mut String) {
       }
       out.push('\n');
     }
-    Panel::Image { src, caption, .. } => {
-      if let Some(root) = yanshi_core::run_context::current_artifact_root()
-        && let (Ok(canon_root), Ok(canon_src)) =
-          (root.canonicalize(), Path::new(src.trim()).canonicalize())
-        && canon_src.starts_with(&canon_root)
-      {
-        let cap = caption.as_deref().unwrap_or("");
-        let _ = writeln!(out, "![{cap}]({})\n", canon_src.display());
+    Panel::Image { caption, title, .. } => {
+      let heading = title.as_deref().unwrap_or("配图说明");
+      if let Some(cap) = caption.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "- **{heading}**：{cap}\n");
       }
     }
     _ => {}

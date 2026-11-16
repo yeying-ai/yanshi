@@ -87,6 +87,10 @@ where
           .min(MAX_RETRY_WAIT_MS);
         let delay_ms = err
           .retry_after_ms()
+          .map(|ms| {
+            ms.saturating_mul(1u64 << attempt.min(6))
+              .min(MAX_RETRY_WAIT_MS)
+          })
           .unwrap_or_else(|| jittered_delay_ms(computed_delay_ms));
         #[cfg(feature = "logging")]
         warn!(

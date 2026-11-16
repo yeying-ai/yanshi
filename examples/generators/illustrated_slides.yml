@@ -148,10 +148,10 @@ nodes:
              * `{"kind": "code", "title": "...", "language": "rust", "code": "...", "callouts": [{"line": 3, "text": "...", "tone": "cyan"}]}`（8-14 行精炼代码）
              * `{"kind": "table", "title": "...", "highlight_col": 1, "columns": [...], "rows": [[...]]}`
              * `{"kind": "flowchart", "title": "...", "direction": "TB", "nodes": [{"id": "n1", "label": "..."}], "edges": [{"from": "n1", "to": "n2", "label": "..."}]}`
-           - `fallback_right`：右侧结构化备选面板（同样使用 `bullets` / `table` / `code` / `flowchart` / `mindmap` 之一；当该页为 `structured_panel` 或未启用文生图时直接展示在右栏）。
+           - `fallback_right`：右侧结构化备选面板（同样仅使用 `bullets` / `table` / `code` / `flowchart` 四种之一，严禁使用 `mindmap`；当该页为 `structured_panel` 或未启用文生图时直接展示在右栏）。
            - `visual_mode`：保持大纲设定的 `"illustration"` / `"arch_diagram"` / `"structured_panel"`。
            - `illustration_prompt`：若 `visual_mode == "illustration"`，给出 1-2 句精细英文画面提示词（纯视觉构图与隐喻物体，严禁文字与字母）及一句简短中文图注 `illustration_caption`。
-           - `notes`：3-4 句贴合「{{ narration_style }}」的完整讲师口播逐字稿。
+           - `notes`：2-3 句贴合「{{ narration_style }}」的精炼讲师口播逐字稿。
            - `takeaway`：页面底部一句凝练的工程结论。
 
         已确认大纲 JSON：
@@ -166,7 +166,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.expand_prompt.outputs.output }}"
     parameters:
-      max_tokens: 16384
+      max_tokens: 8192
       system: "你是资深演示文稿内容主笔，严格输出符合 SlideDeck 扩写 Schema 的合法 JSON。"
       json_schema:
         type: object
@@ -178,7 +178,7 @@ nodes:
           slides:
             type: array
             minItems: 3
-            maxItems: 12
+            maxItems: 10
             items:
               type: object
               required: [title, left, fallback_right, visual_mode, notes, takeaway]
@@ -186,9 +186,129 @@ nodes:
                 section: { type: string }
                 title: { type: string }
                 subtitle: { type: string }
-                left: { type: object }
-                fallback_right: { type: object }
-                visual_mode: { type: string }
+                left:
+                  type: object
+                  required: [kind]
+                  properties:
+                    kind:
+                      type: string
+                      enum: [bullets, code, table, flowchart]
+                    title: { type: string }
+                    grid: { type: boolean }
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        required: [heading, body]
+                        properties:
+                          badge: { type: string }
+                          heading: { type: string }
+                          body: { type: string }
+                          tone: { type: string }
+                    language: { type: string }
+                    code: { type: string }
+                    callouts:
+                      type: array
+                      items:
+                        type: object
+                        required: [line, text]
+                        properties:
+                          line: { type: integer }
+                          text: { type: string }
+                          tone: { type: string }
+                    highlight_col: { type: integer }
+                    columns:
+                      type: array
+                      items: { type: string }
+                    rows:
+                      type: array
+                      items:
+                        type: array
+                        items: { type: string }
+                    direction: { type: string }
+                    nodes:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, label]
+                        properties:
+                          id: { type: string }
+                          label: { type: string }
+                          sublabel: { type: string }
+                          tone: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          dashed: { type: boolean }
+                fallback_right:
+                  type: object
+                  required: [kind]
+                  properties:
+                    kind:
+                      type: string
+                      enum: [bullets, code, table, flowchart]
+                    title: { type: string }
+                    grid: { type: boolean }
+                    items:
+                      type: array
+                      items:
+                        type: object
+                        required: [heading, body]
+                        properties:
+                          badge: { type: string }
+                          heading: { type: string }
+                          body: { type: string }
+                          tone: { type: string }
+                    language: { type: string }
+                    code: { type: string }
+                    callouts:
+                      type: array
+                      items:
+                        type: object
+                        required: [line, text]
+                        properties:
+                          line: { type: integer }
+                          text: { type: string }
+                          tone: { type: string }
+                    highlight_col: { type: integer }
+                    columns:
+                      type: array
+                      items: { type: string }
+                    rows:
+                      type: array
+                      items:
+                        type: array
+                        items: { type: string }
+                    direction: { type: string }
+                    nodes:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, label]
+                        properties:
+                          id: { type: string }
+                          label: { type: string }
+                          sublabel: { type: string }
+                          tone: { type: string }
+                    edges:
+                      type: array
+                      items:
+                        type: object
+                        required: [from, to]
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                          label: { type: string }
+                          dashed: { type: boolean }
+                visual_mode:
+                  type: string
+                  enum: [illustration, arch_diagram, structured_panel]
                 illustration_prompt: { type: string }
                 illustration_caption: { type: string }
                 takeaway: { type: string }
@@ -233,7 +353,7 @@ nodes:
     parameters:
       output_format: json
       template: |
-        {
+        {"deck": {
           "title": {{ draft.title | json_encode() }},
           "subtitle": {{ draft.subtitle | default(value="") | json_encode() }},
           "author": {{ draft.author | default(value="Yanshi Studio") | json_encode() }},
@@ -250,13 +370,13 @@ nodes:
               "notes": {{ s.notes | json_encode() }}
             }{% if not loop.last %},{% endif %}{% endfor %}
           ]
-        }
+        }}
 
   - id: slides_render
     type: render_slides
     dependencies: ["final_deck_spec"]
     input_mapping:
-      deck: "{{ nodes.final_deck_spec.outputs.output }}"
+      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
     parameters:
       width: 1920
       progressive: false
@@ -289,7 +409,7 @@ nodes:
     type: template
     dependencies: ["final_deck_spec", "slides_render", "arch_figure", "deck_pptx", "deck_pdf"]
     input_mapping:
-      deck: "{{ nodes.final_deck_spec.outputs.output }}"
+      deck: "{{ nodes.final_deck_spec.outputs.deck }}"
       html: "{{ nodes.slides_render.outputs.slides_render_html }}"
       arch_svg: "{{ nodes.arch_figure.outputs.arch_figure_svg }}"
       pptx: "{{ nodes.deck_pptx.outputs.deck_pptx_output }}"

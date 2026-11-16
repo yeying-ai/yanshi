@@ -102,13 +102,31 @@ impl OpenAIProvider {
     if let Some(thinking) = &request.thinking {
       if is_deepseek_model(&request.model) {
         body["thinking"] = thinking_config_to_deepseek_value(thinking);
+      } else if is_glm_thinking_model(&request.model) && thinking.is_disabled() {
+        body["thinking"] = json!({ "type": "disabled" });
       } else if let Some(effort) = thinking_config_to_openai_effort(thinking) {
         body["reasoning_effort"] = Value::String(effort.to_string());
       }
+    } else if matches!(
+      request.response_format,
+      Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+    ) && (is_deepseek_v4_model(&request.model) || is_glm_thinking_model(&request.model))
+      && !body.as_object().is_some_and(|m| m.contains_key("thinking"))
+    {
+      // DeepSeek V4 and Zhipu GLM-4.5/5.x default to thinking=enabled, burning
+      // minutes and token budgets on structured JSON extraction unless disabled.
+      body["thinking"] = json!({ "type": "disabled" });
     }
 
     if let Some(format) = &request.response_format {
-      body["response_format"] = response_format_to_openai_value(format);
+      if matches!(format, ResponseFormat::JsonSchema { .. })
+        && (is_deepseek_model(&request.model) || is_glm_model(&request.model))
+      {
+        // DeepSeek and Zhipu GLM accept `json_object` (with schema in prompt) rather than `json_schema`.
+        body["response_format"] = json!({ "type": "json_object" });
+      } else {
+        body["response_format"] = response_format_to_openai_value(format);
+      }
     }
 
     body
@@ -166,6 +184,19 @@ pub(crate) fn thinking_config_to_openai_effort(config: &ThinkingConfig) -> Optio
 /// heuristic.
 pub(crate) fn is_deepseek_model(model: &str) -> bool {
   model.to_ascii_lowercase().starts_with("deepseek-")
+}
+
+fn is_deepseek_v4_model(model: &str) -> bool {
+  model.to_ascii_lowercase().starts_with("deepseek-v4")
+}
+
+fn is_glm_model(model: &str) -> bool {
+  model.to_ascii_lowercase().starts_with("glm-")
+}
+
+fn is_glm_thinking_model(model: &str) -> bool {
+  let m = model.to_ascii_lowercase();
+  m.starts_with("glm-4.5") || m.starts_with("glm-5")
 }
 
 /// Encode a [`ThinkingConfig`] as DeepSeek's `thinking` request block

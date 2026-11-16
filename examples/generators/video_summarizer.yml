@@ -8,13 +8,13 @@ description: "输入在线视频链接或上传本地音视频文件，优先提
 inputs:
   source:
     description: "在线视频 URL（支持 yt-dlp 站点与直链 MP4/WebM）或本地视频/音频文件（支持 Studio 一键选择本地文件）"
-    default: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
+    default: "https://media.w3.org/2010/05/sintel/trailer.mp4"
   subtitle_langs:
     description: "优先抓取的原生字幕语言列表（逗号分隔）"
     default: "zh-Hans,zh,en"
   asr_model:
-    description: "无现成字幕时使用的语音识别模型（如 gemini-2.5-flash、glm-asr、whisper-1）"
-    default: "gemini-2.5-flash"
+    description: "无现成字幕时使用的语音识别模型（如 gemini-2.5-flash-asr、glm-asr、whisper-1）"
+    default: "gemini-2.5-flash-asr"
   summary_lang:
     description: "观点总结与双语润色字幕的目标语言"
     default: "简体中文"
@@ -78,7 +78,7 @@ nodes:
     input_mapping:
       prompt: "{{ nodes.summary_prompt.outputs.output }}"
     parameters:
-      max_tokens: 10240
+      max_tokens: 8192
       system: "你是专业的内容主编与知识萃取专家，严格依据视频真实字幕内容提炼观点与时间点，仅输出合法 JSON。"
       json_schema:
         type: object
@@ -95,6 +95,7 @@ nodes:
           key_viewpoints:
             type: array
             minItems: 1
+            maxItems: 10
             items:
               type: object
               required: [viewpoint, supporting_detail, timestamp_hint]
@@ -105,6 +106,7 @@ nodes:
           chapters:
             type: array
             minItems: 1
+            maxItems: 10
             items:
               type: object
               required: [time_range, heading, summary]
@@ -123,7 +125,27 @@ nodes:
             required: [label, children]
             properties:
               label: { type: string }
-              children: { type: array }
+              children:
+                type: array
+                items:
+                  type: object
+                  required: [label]
+                  properties:
+                    label: { type: string }
+                    children:
+                      type: array
+                      items:
+                        type: object
+                        required: [label]
+                        properties:
+                          label: { type: string }
+                          children:
+                            type: array
+                            items:
+                              type: object
+                              required: [label]
+                              properties:
+                                label: { type: string }
 
   - id: polish_srt_prompt
     type: template
@@ -154,13 +176,13 @@ nodes:
       summary: "{{ nodes.summarize_video.outputs.output }}"
     parameters:
       output_format: json
-      template: "{{ summary.mindmap_tree | json_encode() }}"
+      template: '{"tree": {{ summary.mindmap_tree | json_encode() }}}'
 
   - id: mindmap_svg
     type: render_mindmap
     dependencies: ["mindmap_tree_json"]
     input_mapping:
-      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+      tree: "{{ nodes.mindmap_tree_json.outputs.tree }}"
 
   - id: mindmap_png
     type: render_svg
@@ -174,7 +196,7 @@ nodes:
     type: render_mindmap
     dependencies: ["mindmap_tree_json"]
     input_mapping:
-      tree: "{{ nodes.mindmap_tree_json.outputs.output }}"
+      tree: "{{ nodes.mindmap_tree_json.outputs.tree }}"
     parameters:
       format: html
 

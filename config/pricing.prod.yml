@@ -93,6 +93,31 @@ models:
   kimi-k2.6:
     input_per_1k: 0.00060
     output_per_1k: 0.00250
+  kimi-k3:
+    input_per_1k: 0.00060
+    output_per_1k: 0.00250
+  kimi-k3.1-pro:
+    input_per_1k: 0.00120
+    output_per_1k: 0.00400
   moonshot-v1-8k:
     input_per_1k: 0.00020
     output_per_1k: 0.00100
+
+  # Alibaba DashScope / Qwen
+  qwen-plus:
+    input_per_1k: 0.00011
+    output_per_1k: 0.00028
+  qwen-max:
+    input_per_1k: 0.00033
+    output_per_1k: 0.00132
+  qwen3-coder-plus:
+    input_per_1k: 0.00020
+    output_per_1k: 0.00080
+  wan2.5-t2i-preview:
+    per_image: 0.02000
+
+  # Google Imagen / Gemini Image
+  gemini-3.1-flash-image:
+    per_image: 0.03900
+  imagen-3.0-generate-002:
+    per_image: 0.03000

@@ -14,6 +14,33 @@ use std::path::{Path, PathBuf};
 
 use yanshi_core::{error::YanshiError, run_context, value::FlowValue};
 
+/// Sniff common raster/vector image MIME types from magic bytes so vendor
+/// responses (`b64_json` or generic `application/octet-stream` downloads) are
+/// saved with the true file extension (`.jpg`, `.png`, `.webp`, `.gif`, `.svg`)
+/// required by downstream decoders such as Typst.
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    return Some("image/png");
+  }
+  if bytes.starts_with(b"\xff\xd8\xff") {
+    return Some("image/jpeg");
+  }
+  if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    return Some("image/gif");
+  }
+  if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+    return Some("image/webp");
+  }
+  let head_len = bytes.len().min(256);
+  if let Ok(head) = std::str::from_utf8(&bytes[..head_len]) {
+    let trimmed = head.trim_start_matches('\u{feff}').trim_start();
+    if trimmed.starts_with("<svg") || (trimmed.starts_with("<?xml") && trimmed.contains("<svg")) {
+      return Some("image/svg+xml");
+    }
+  }
+  None
+}
+
 /// File extension for the MIME types nodes write.
 pub fn extension_for_mime(mime: &str) -> &'static str {
   match mime.split(';').next().unwrap_or("").trim() {
@@ -195,5 +222,27 @@ mod tests {
     assert_eq!(safe_segment("a/b"), "a_b");
     assert_eq!(safe_segment(""), "node");
     assert_eq!(safe_segment("speak-1"), "speak-1");
+  }
+
+  #[test]
+  fn sniffs_common_image_magic_bytes() {
+    assert_eq!(
+      sniff_image_mime(b"\x89PNG\r\n\x1a\n\x00"),
+      Some("image/png")
+    );
+    assert_eq!(
+      sniff_image_mime(b"\xff\xd8\xff\xe0JFIF"),
+      Some("image/jpeg")
+    );
+    assert_eq!(
+      sniff_image_mime(b"RIFF\x24\x00\x00\x00WEBP"),
+      Some("image/webp")
+    );
+    assert_eq!(sniff_image_mime(b"GIF89a\x01\x00"), Some("image/gif"));
+    assert_eq!(
+      sniff_image_mime(b"  <svg xmlns=\"x\"/>"),
+      Some("image/svg+xml")
+    );
+    assert_eq!(sniff_image_mime(b"not an image"), None);
   }
 }
