@@ -500,7 +500,7 @@ nodes:
       plan: "{{ nodes.deck.outputs.output }}"
     parameters:
       template: |
-        为主题「{{ plan.title }}」绘制一张结构清晰、层次分明的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器与简短有向边标签，严格控制在 8-12 个节点以内，避免交叉重叠；不要手动指定刺眼的亮黄/亮绿/纯红背景色，保持默认主题配色即可）：
+        为主题「{{ plan.title }}」绘制一张结构紧凑清晰的 D2 系统架构与核心机制图（`direction: right`，严格控制在 5-8 个节点以内；若需分组容器请直接写 `group_id: "分组标题" { node_a: "组件名" }`，严禁使用 `container` 关键字，跨分组连线必须写在所有 `{}` 之外的顶层并带完整路径 `group_a.node_x -> group_b.node_y`；保持默认主题配色）：
         {{ plan.arch_diagram_spec | default(value=plan.title) }}
 
   - id: arch_figure
@@ -687,7 +687,7 @@ nodes:
             {"node_id": "film", "name": {{ vtt | split(pat="/") | last | json_encode() }}, "mime_type": "text/vtt", "role": "asset"}{% endif %},
             {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if arch_svg is defined and arch_svg %},
             {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% for img in painted %},
-            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": {{ img.mime_type | default(value="image/png") | json_encode() }}, "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
             {"node_id": "slides", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
             {"node_id": "slides", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]

@@ -187,7 +187,7 @@ nodes:
     input_mapping:
       deck: "{{ nodes.deck_spec.outputs.deck }}"
       model: "{{ nodes.options.outputs.image_model }}"
-      theme: "{{ nodes.options.outputs.palette }}"
+      palette: "{{ nodes.options.outputs.palette }}"
       enabled: "{{ nodes.options.outputs.enable_illustrations }}"
     parameters:
       max_images: 3
@@ -262,6 +262,6 @@ nodes:
           "files": [
             {"node_id": {% if use_native %}"deck_pptx"{% else %}"ref_pptx"{% endif %}, "name": {{ out_pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% for r in drawn %}{% if r.fig.Ok %},
             {"node_id": "fig", "name": {{ r.fig.Ok.fig_svg.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% endfor %}{% for img in painted %},
-            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": {{ img.mime_type | default(value="image/png") | json_encode() }}, "role": "asset"}{% endfor %}
           ]
         }}

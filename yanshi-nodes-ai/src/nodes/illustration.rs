@@ -525,7 +525,8 @@ impl AsyncNode for IllustrationNode {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-      let theme = str_input(inputs, "theme")
+      let theme = str_input(inputs, "palette")
+        .or_else(|| str_input(inputs, "theme"))
         .or(self.theme.as_deref())
         .or_else(|| deck_obj.get("theme").and_then(Value::as_str))
         .unwrap_or("dark")
@@ -614,6 +615,7 @@ impl AsyncNode for IllustrationNode {
 
       let total_jobs = jobs.len();
       let mut generated_entries: Vec<Value> = Vec::with_capacity(total_jobs);
+      let mut generated_files: Vec<FlowValue> = Vec::with_capacity(total_jobs);
 
       if total_jobs > 0 {
         // Poll concurrently on the current task so `run_context` task-locals
@@ -646,10 +648,13 @@ impl AsyncNode for IllustrationNode {
         for (done_idx, (job, outcome)) in ordered.into_iter().enumerate() {
           match outcome {
             Ok((file_val, final_prompt)) => {
-              let src_str = match &file_val {
-                FlowValue::File { path, .. } => path.to_string_lossy().into_owned(),
-                FlowValue::Json(Value::String(s)) => s.clone(),
-                _ => String::new(),
+              let (src_str, mime_str) = match &file_val {
+                FlowValue::File { path, mime_type } => (
+                  path.to_string_lossy().into_owned(),
+                  mime_type.as_deref().unwrap_or("image/png").to_string(),
+                ),
+                FlowValue::Json(Value::String(s)) => (s.clone(), "image/png".to_string()),
+                _ => (String::new(), "image/png".to_string()),
               };
               if let Some(s_obj) = slides_arr
                 .get_mut(job.slide_index)
@@ -676,9 +681,11 @@ impl AsyncNode for IllustrationNode {
               generated_entries.push(json!({
                 "slide_index": job.slide_index,
                 "path": src_str,
+                "mime_type": mime_str,
                 "caption": job.caption,
                 "prompt": final_prompt,
               }));
+              generated_files.push(file_val);
             }
             Err(err @ YanshiError::CostLimitExceeded { .. }) => return Err(err),
             Err(err) if graceful => {
@@ -708,14 +715,18 @@ impl AsyncNode for IllustrationNode {
       }
 
       let count = generated_entries.len();
-      return Ok(HashMap::from([
+      let mut out_map = HashMap::from([
         (format!("{}_deck", self.id), FlowValue::Json(deck_val)),
         (
           format!("{}_images", self.id),
           FlowValue::Json(Value::Array(generated_entries)),
         ),
         (format!("{}_count", self.id), FlowValue::Json(json!(count))),
-      ]));
+      ]);
+      for (i, fv) in generated_files.into_iter().enumerate() {
+        out_map.insert(format!("{}_image_{}", self.id, i + 1), fv);
+      }
+      return Ok(out_map);
     }
 
     // ── Mode B2: Explicit Batch List (`items` input) ───────────────────
@@ -723,7 +734,8 @@ impl AsyncNode for IllustrationNode {
       let arr = items_val
         .as_array()
         .ok_or_else(|| self.input_error("'items' must be a JSON array"))?;
-      let theme = str_input(inputs, "theme")
+      let theme = str_input(inputs, "palette")
+        .or_else(|| str_input(inputs, "theme"))
         .or(self.theme.as_deref())
         .unwrap_or("dark")
         .to_string();
@@ -792,20 +804,26 @@ impl AsyncNode for IllustrationNode {
       let mut ordered = results;
       ordered.sort_by_key(|((idx, _, _), _)| *idx);
       let mut out_items = Vec::with_capacity(ordered.len());
+      let mut out_files: Vec<FlowValue> = Vec::with_capacity(ordered.len());
       for ((idx, _, cap), outcome) in ordered {
         match outcome {
           Ok((file_val, final_prompt)) => {
-            let src_str = match &file_val {
-              FlowValue::File { path, .. } => path.to_string_lossy().into_owned(),
-              FlowValue::Json(Value::String(s)) => s.clone(),
-              _ => String::new(),
+            let (src_str, mime_str) = match &file_val {
+              FlowValue::File { path, mime_type } => (
+                path.to_string_lossy().into_owned(),
+                mime_type.as_deref().unwrap_or("image/png").to_string(),
+              ),
+              FlowValue::Json(Value::String(s)) => (s.clone(), "image/png".to_string()),
+              _ => (String::new(), "image/png".to_string()),
             };
             out_items.push(json!({
               "slide_index": idx,
               "path": src_str,
+              "mime_type": mime_str,
               "caption": cap,
               "prompt": final_prompt,
             }));
+            out_files.push(file_val);
           }
           Err(err @ YanshiError::CostLimitExceeded { .. }) => return Err(err),
           Err(err) if graceful => {
@@ -815,13 +833,17 @@ impl AsyncNode for IllustrationNode {
         }
       }
       let count = out_items.len();
-      return Ok(HashMap::from([
+      let mut out_map = HashMap::from([
         (
           format!("{}_images", self.id),
           FlowValue::Json(Value::Array(out_items)),
         ),
         (format!("{}_count", self.id), FlowValue::Json(json!(count))),
-      ]));
+      ]);
+      for (i, fv) in out_files.into_iter().enumerate() {
+        out_map.insert(format!("{}_image_{}", self.id, i + 1), fv);
+      }
+      return Ok(out_map);
     }
 
     // ── Mode A: Single Illustration (`concept` or `prompt` input) ──────
@@ -836,7 +858,8 @@ impl AsyncNode for IllustrationNode {
       return Err(self.input_error("missing 'model' (text_to_image model name)"));
     }
     let context = str_input(inputs, "context");
-    let theme = str_input(inputs, "theme")
+    let theme = str_input(inputs, "palette")
+      .or_else(|| str_input(inputs, "theme"))
       .or(self.theme.as_deref())
       .unwrap_or("dark");
 

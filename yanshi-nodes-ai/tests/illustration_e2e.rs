@@ -129,5 +129,16 @@ async fn single_and_deck_modes_generate_files_wire_arch_and_preserve_fallbacks()
     std::path::Path::new(slides[1]["right"]["src"].as_str().expect("src")).exists(),
     "generated artifact file must exist on disk"
   );
+  assert!(
+    matches!(
+      deck_out.get("illustrate_image_1"),
+      Some(FlowValue::File { path, .. }) if path.exists()
+    ),
+    "batch illustration must emit FlowValue::File output so collect_file_outputs registers it"
+  );
+  let Some(FlowValue::Json(images_arr)) = deck_out.get("illustrate_images") else {
+    panic!("expected illustrate_images array");
+  };
+  assert_eq!(images_arr[0]["mime_type"], "image/png");
   assert_eq!(slides[2]["right"]["kind"], "table");
 }

@@ -1286,7 +1286,7 @@ nodes:
           subtitle: { type: string }
           arch_diagram_spec:
             type: string
-            description: "核心架构/机制页的 D2 图详细绘制说明（指明分层容器、核心组件与有向调用边）"
+            description: "用自然语言列出核心架构图的 2 个分层与 5-7 个核心组件及其调用流向（切勿在此处写 D2 代码语法）"
           chapters:
             type: array
             minItems: 3
@@ -1313,7 +1313,7 @@ nodes:
       outline: "{{ nodes.plan_outline.outputs.output }}"
     parameters:
       template: |
-        为主题「{{ outline.title }}」绘制一张清晰、美观的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器、语义节点标签与简短有向边说明，控制在 8-14 个核心节点内，避免杂乱交叉）：
+        为主题「{{ outline.title }}」绘制一张紧凑清晰的 D2 系统架构图（\`direction: right\`，总计 5-8 个核心节点；若需分组容器请直接写 \`group_id: "分组标题" { node_a: "组件名" }\`，严禁使用不存在的 \`container\` 关键字；跨容器连线必须写在所有 \`{}\` 之外的顶层并带完整路径，如 \`user_space.app -> kernel_space.ring: "提交 SQE"\`）：
         {{ outline.arch_diagram_spec }}
 
   - id: arch_figure
@@ -1558,7 +1558,7 @@ nodes:
           "files": [
             {"node_id": "slides_render", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% for img in painted %},
-            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": {{ img.mime_type | default(value="image/png") | json_encode() }}, "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
             {"node_id": "slides_render", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
             {"node_id": "slides_render", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
@@ -3186,7 +3186,7 @@ nodes:
     input_mapping:
       deck: "{{ nodes.deck_spec.outputs.deck }}"
       model: "{{ nodes.options.outputs.image_model }}"
-      theme: "{{ nodes.options.outputs.palette }}"
+      palette: "{{ nodes.options.outputs.palette }}"
       enabled: "{{ nodes.options.outputs.enable_illustrations }}"
     parameters:
       max_images: 3
@@ -3261,7 +3261,7 @@ nodes:
           "files": [
             {"node_id": {% if use_native %}"deck_pptx"{% else %}"ref_pptx"{% endif %}, "name": {{ out_pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% for r in drawn %}{% if r.fig.Ok %},
             {"node_id": "fig", "name": {{ r.fig.Ok.fig_svg.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% endfor %}{% for img in painted %},
-            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": {{ img.mime_type | default(value="image/png") | json_encode() }}, "role": "asset"}{% endfor %}
           ]
         }}
 `,n5=`# Live-Presenter Keynote Technical Lecture Video Generator (\`tech_slides_video\`).
@@ -3766,7 +3766,7 @@ nodes:
       plan: "{{ nodes.deck.outputs.output }}"
     parameters:
       template: |
-        为主题「{{ plan.title }}」绘制一张结构清晰、层次分明的 D2 系统架构与核心机制图（direction: right，合理使用嵌套容器与简短有向边标签，严格控制在 8-12 个节点以内，避免交叉重叠；不要手动指定刺眼的亮黄/亮绿/纯红背景色，保持默认主题配色即可）：
+        为主题「{{ plan.title }}」绘制一张结构紧凑清晰的 D2 系统架构与核心机制图（\`direction: right\`，严格控制在 5-8 个节点以内；若需分组容器请直接写 \`group_id: "分组标题" { node_a: "组件名" }\`，严禁使用 \`container\` 关键字，跨分组连线必须写在所有 \`{}\` 之外的顶层并带完整路径 \`group_a.node_x -> group_b.node_y\`；保持默认主题配色）：
         {{ plan.arch_diagram_spec | default(value=plan.title) }}
 
   - id: arch_figure
@@ -3953,7 +3953,7 @@ nodes:
             {"node_id": "film", "name": {{ vtt | split(pat="/") | last | json_encode() }}, "mime_type": "text/vtt", "role": "asset"}{% endif %},
             {"node_id": "slides", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if arch_svg is defined and arch_svg %},
             {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% for img in painted %},
-            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
+            {"node_id": "illustrate", "name": {{ img.path | split(pat="/") | last | json_encode() }}, "mime_type": {{ img.mime_type | default(value="image/png") | json_encode() }}, "role": "asset"}{% endfor %}{% if pptx is defined and pptx %},
             {"node_id": "slides", "name": {{ pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% endif %}{% if pdf is defined and pdf %},
             {"node_id": "slides", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]

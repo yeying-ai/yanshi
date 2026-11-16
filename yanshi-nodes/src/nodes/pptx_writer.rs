@@ -33,8 +33,8 @@ const NOTES_CX: i64 = 6_858_000;
 const NOTES_CY: i64 = 9_144_000;
 const PX_TO_EMU: f32 = 6350.0;
 
-/// Safe cross-platform font stack (Calibri / Courier New + PingFang SC East Asian slot).
-const LATIN_SANS: &str = "Calibri";
+/// Safe cross-platform font stack (Arial / Courier New + PingFang SC East Asian slot).
+const LATIN_SANS: &str = "Arial";
 const LATIN_MONO: &str = "Courier New";
 const EA_FONT: &str = "PingFang SC";
 
@@ -320,9 +320,7 @@ impl SlideXmlBuilder {
     name: &str,
     p1: (f32, f32),
     p2: (f32, f32),
-    color: &str,
-    width_px: f32,
-    dashed: bool,
+    stroke: StrokeStyle<'_>,
     arrow_end: bool,
     bent: bool,
   ) {
@@ -343,8 +341,8 @@ impl SlideXmlBuilder {
     } else {
       "straightConnector1"
     };
-    let w_emu = (width_px * 9525.0).round().max(9525.0) as i64;
-    let col = hex6(color);
+    let w_emu = (stroke.width_px * 9525.0).round().max(9525.0) as i64;
+    let col = hex6(stroke.color);
 
     let _ = write!(
       self.body,
@@ -358,10 +356,21 @@ impl SlideXmlBuilder {
           <a:xfrm{flip_h}{flip_v}><a:off x=\"{off_x}\" y=\"{off_y}\"/><a:ext cx=\"{ext_cx}\" cy=\"{ext_cy}\"/></a:xfrm>\
           <a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>\
           <a:ln w=\"{w_emu}\">\
-            <a:solidFill><a:srgbClr val=\"{col}\"/></a:solidFill>",
+            <a:solidFill><a:srgbClr val=\"{col}\"/>",
       xml_escape(name)
     );
-    if dashed {
+    if stroke.alpha < 100_000 {
+      // Rewrite srgbClr with alpha child when translucent
+      let trim_len = self.body.len() - 2;
+      self.body.truncate(trim_len);
+      let _ = write!(
+        self.body,
+        "><a:alpha val=\"{}\"/></a:srgbClr>",
+        stroke.alpha
+      );
+    }
+    self.body.push_str("</a:solidFill>");
+    if stroke.dashed {
       self.body.push_str("<a:prstDash val=\"dash\"/>");
     }
     if arrow_end {
@@ -523,9 +532,7 @@ impl SlideXmlBuilder {
         } else {
           p.text_sub
         };
-        let fill_col = if is_hi {
-          p.surface_alt
-        } else if ri % 2 == 1 {
+        let fill_col = if is_hi || ri % 2 == 1 {
           p.surface_alt
         } else {
           p.surface
@@ -1885,9 +1892,12 @@ fn build_code_panel(
         &format!("Callout Leader {}", ci + 1),
         (line_end_x + 6.0, mid_y),
         (bx - 4.0, mid_y),
-        badge_col,
-        1.2,
-        true,
+        StrokeStyle {
+          color: badge_col,
+          width_px: 1.2,
+          alpha: 100_000,
+          dashed: true,
+        },
         false,
         false,
       );
@@ -1951,9 +1961,12 @@ fn build_flowchart_panel(
       &format!("Flow Edge {}", ei + 1),
       p1,
       p2,
-      p.cyan,
-      2.0,
-      edge.dashed,
+      StrokeStyle {
+        color: p.cyan,
+        width_px: 2.0,
+        alpha: 100_000,
+        dashed: edge.dashed,
+      },
       true,
       true,
     );
@@ -2219,9 +2232,12 @@ fn build_memory_panel(
       &format!("Pointer {}", pi + 1),
       p1,
       p2,
-      stroke,
-      2.2,
-      false,
+      StrokeStyle {
+        color: stroke,
+        width_px: 2.2,
+        alpha: 100_000,
+        dashed: false,
+      },
       true,
       true,
     );
@@ -2415,9 +2431,12 @@ fn build_mindmap_panel(sb: &mut SlideXmlBuilder, r: Rect, root: &Value, p: &Pale
         &format!("Mindmap Branch {ni}"),
         p1,
         p2,
-        branch_col,
-        if n.depth == 1 { 2.2 } else { 1.5 },
-        false,
+        StrokeStyle {
+          color: branch_col,
+          width_px: if n.depth == 1 { 2.2 } else { 1.5 },
+          alpha: 100_000,
+          dashed: false,
+        },
         false,
         true,
       );
