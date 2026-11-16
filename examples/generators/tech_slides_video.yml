@@ -64,7 +64,7 @@ inputs:
     description: "主策划与脚本生成模型（推荐 gemini-2.5-flash / gemini-2.5-pro，兼容 qwen-plus / deepseek-v4-flash / glm-5.1 / kimi-k2.6）"
     default: "gemini-2.5-flash"
   tts_model:
-    description: "语音合成模型（推荐 gemini-2.5-flash-preview-tts，兼容 qwen-tts-2025-05-22 / step-tts-mini / gpt-4o-mini-tts）"
+    description: "语音合成模型（推荐 gemini-2.5-flash-preview-tts，兼容 qwen3-tts-flash / step-tts-mini / gpt-4o-mini-tts）"
     default: "gemini-2.5-flash-preview-tts"
   voice:
     description: "主讲人音色（如 Kore / Charon / Puck，跨厂商切换时自动归一化兜底）"
@@ -228,7 +228,8 @@ nodes:
              * `flowchart`：编译流水线、调用链或决策拓扑（4-6 个 `nodes` 含 `id`、`label` 与简短 `sublabel`，配 `edges` 有向边说明）；
              * `memory`：栈/堆/虚表/结构体真实字节偏移布局（严格控制在 2-3 个 `regions`，含 `name` 与 `slots: [{"id": "s1", "offset": "+0x00", "label": "data_ptr", "value": "0x7ffd..."}]`，配 `pointers: [{"from": "s1", "to": "h1", "label": "points to"}]`）；
              * `table`：多方案横向对比矩阵（单元格以 `✓` / `✗` / `⚠` 开头标识优劣，设 `highlight_col` 突出主角列）；
-             * `bullets`：带 `badge` 标签的高密度架构卡片（可设 `grid: true` 排成 2×2 全景知识象限用于开篇或收官页）。
+             * `bullets`：带 `badge` 标签的高密度架构卡片（可设 `grid: true` 排成 2×2 全景知识象限用于开篇或收官页）；
+           - **严禁输出空面板**：即使本页 `visual_mode` 为 `"illustration"` 或 `"arch_diagram"`，`left` 主面板也必须完整填充对应类型数据（`bullets` 的 `items` 至少 3-4 条完整卡片、`code` 非空、`flowchart` 的 `nodes` 至少 4 个、`memory` 的 `regions` 至少 2 个、`table` 的 `rows` 至少 3 行），绝不允许出现空数组或空白左栏。
         2. **混合视觉编排（`visual_mode`）**：
            - 全套课件挑选恰好 1 页最核心的系统架构或数据流页设为 `visual_mode: "arch_diagram"`，并在顶层 `arch_diagram_spec` 中详细描述该页 D2 架构图的分层容器、核心组件与调用边（8-12 个节点）；
            - 挑选 1-2 页（如第 1 页破题引入或末页总结升华）设为 `visual_mode: "illustration"`，提供纯英文视觉隐喻提示词 `illustration_prompt`（严禁包含任何文字、字母或水印）与简短中文图注 `illustration_caption`；

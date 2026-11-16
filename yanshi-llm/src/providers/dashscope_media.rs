@@ -17,7 +17,8 @@
 //! `dashscope` provider's chat entries use — a different API surface
 //! entirely, just the same vendor/API key.
 //!
-//! TTS targets Qwen-TTS (`qwen-tts-2025-05-22`), not CosyVoice: CosyVoice
+//! TTS targets Qwen3-TTS (`qwen3-tts-flash`, automatically redirecting retired
+//! `qwen-tts` / `qwen-tts-2025-05-22` aliases), not CosyVoice: CosyVoice
 //! is WebSocket-only (no REST variant documented) and this crate has no
 //! WebSocket infrastructure. Qwen-TTS is a synchronous REST call that
 //! returns a presigned URL to the audio (not inline bytes) — this module
@@ -570,6 +571,13 @@ pub(crate) fn normalize_dashscope_tts_voice(voice: &str) -> String {
   trimmed.to_string()
 }
 
+fn normalize_dashscope_tts_model(raw: &str) -> &str {
+  match raw.trim() {
+    "" | "qwen-tts" | "qwen-tts-latest" | "qwen-tts-2025-05-22" => "qwen3-tts-flash",
+    other => other,
+  }
+}
+
 #[async_trait]
 impl TtsProvider for DashScopeMediaProvider {
   fn name(&self) -> &str {
@@ -582,8 +590,9 @@ impl TtsProvider for DashScopeMediaProvider {
       self.base_url
     );
     let voice = normalize_dashscope_tts_voice(&request.voice);
+    let model = normalize_dashscope_tts_model(&request.model);
     let body = json!({
-      "model": request.model,
+      "model": model,
       "input": { "text": request.input, "voice": voice },
     });
 
@@ -796,5 +805,22 @@ mod tests {
     assert_eq!(normalize_dashscope_tts_voice("auto"), "Cherry");
     assert_eq!(normalize_dashscope_tts_voice("cherry"), "Cherry");
     assert_eq!(normalize_dashscope_tts_voice("Ethan"), "Ethan");
+  }
+
+  #[test]
+  fn dashscope_tts_model_redirects_retired_qwen_tts_aliases() {
+    assert_eq!(normalize_dashscope_tts_model("qwen-tts"), "qwen3-tts-flash");
+    assert_eq!(
+      normalize_dashscope_tts_model("qwen-tts-2025-05-22"),
+      "qwen3-tts-flash"
+    );
+    assert_eq!(
+      normalize_dashscope_tts_model("qwen-tts-latest"),
+      "qwen3-tts-flash"
+    );
+    assert_eq!(
+      normalize_dashscope_tts_model("qwen3-tts-flash"),
+      "qwen3-tts-flash"
+    );
   }
 }
