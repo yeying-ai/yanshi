@@ -50,6 +50,12 @@ impl GoogleEndpoint {
     let trimmed_base = base_url
       .as_deref()
       .map(|s| s.trim_end_matches('/'))
+      .map(|s| {
+        s.strip_suffix("/v1beta/openai")
+          .or_else(|| s.strip_suffix("/v1beta"))
+          .unwrap_or(s)
+          .trim_end_matches('/')
+      })
       .filter(|s| !s.is_empty());
 
     let is_explicit_vertex = trimmed_base
@@ -234,6 +240,22 @@ mod tests {
         Some("alt=sse")
       ),
       "https://aiplatform.googleapis.com/v1/projects/340214391376/locations/global/publishers/google/models/gemini-4-hydrogen:streamGenerateContent?alt=sse"
+    );
+  }
+
+  #[test]
+  fn legacy_v1beta_openai_base_url_normalizes_to_gemini_host() {
+    let ep = GoogleEndpoint::with_env(
+      "AIzaSyTestKey",
+      Some("https://generativelanguage.googleapis.com/v1beta/openai/".to_string()),
+      None,
+      None,
+    );
+    assert!(!ep.is_vertex());
+    assert_eq!(ep.base_url, DEFAULT_GEMINI_BASE_URL);
+    assert_eq!(
+      ep.model_action_url("models/gemini-2.5-flash", "generateContent", None),
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     );
   }
 }

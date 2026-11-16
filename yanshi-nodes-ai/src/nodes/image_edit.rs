@@ -69,6 +69,12 @@ impl AsyncNode for ImageEditNode {
 
     let image_data = load_bytes_from_source(&self.image_source, inputs).await?;
 
+    Yanshi::ensure_init()
+      .await
+      .map_err(|e| YanshiError::ConfigurationError {
+        message: format!("Failed to initialize Yanshi LLM service: {}", e),
+      })?;
+
     // P-LLM.3: route through the modality dispatcher.
     let provider =
       Yanshi::image_edit(&self.model)

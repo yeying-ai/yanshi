@@ -73,6 +73,12 @@ impl AsyncNode for ImageToImageNode {
 
     let source_url = load_data_uri_from_source(&self.source_image, inputs).await?;
 
+    Yanshi::ensure_init()
+      .await
+      .map_err(|e| YanshiError::ConfigurationError {
+        message: format!("Failed to initialize Yanshi LLM service: {}", e),
+      })?;
+
     // P-LLM.3: route through the modality dispatcher.
     let provider =
       Yanshi::image2image(&self.model)

@@ -562,24 +562,46 @@ impl TtsProvider for DashScopeMediaProvider {
       "input": { "text": request.input, "voice": voice },
     });
 
-    let response = self
-      .client
-      .post(&url)
-      .bearer_auth(&self.api_key)
-      .json(&body)
-      .send()
-      .await?;
-
-    if !response.status().is_success() {
-      let status_code = response.status().as_u16();
-      let message = response.text().await.unwrap_or_default();
-      return Err(LLMError::HttpError {
-        status_code,
-        message,
-      });
+    const RETRY_DELAYS: [Option<u64>; 4] = [Some(2), Some(5), Some(12), None];
+    let mut response_body = String::new();
+    for next_delay in RETRY_DELAYS {
+      match self
+        .client
+        .post(&url)
+        .bearer_auth(&self.api_key)
+        .json(&body)
+        .send()
+        .await
+      {
+        Ok(resp) if resp.status().is_success() => {
+          response_body = resp.text().await?;
+          break;
+        }
+        Ok(resp) => {
+          let status_code = resp.status().as_u16();
+          let message = resp.text().await.unwrap_or_default();
+          if matches!(status_code, 429 | 500 | 502 | 503 | 504)
+            && let Some(wait_secs) = next_delay
+          {
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            continue;
+          }
+          return Err(LLMError::HttpError {
+            status_code,
+            message,
+          });
+        }
+        Err(err) => {
+          if let Some(wait_secs) = next_delay {
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            continue;
+          }
+          return Err(err.into());
+        }
+      }
     }
 
-    let audio_url = parse_tts_response(&response.text().await?)?;
+    let audio_url = parse_tts_response(&response_body)?;
     let mime_type = mime_for_audio_url(&audio_url).to_string();
 
     let audio_response = self.client.get(&audio_url).send().await?;

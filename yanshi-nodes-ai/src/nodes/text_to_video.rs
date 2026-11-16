@@ -206,6 +206,12 @@ impl TextToVideoNode {
       "executing text-to-video request via modality dispatcher"
     );
 
+    Yanshi::ensure_init()
+      .await
+      .map_err(|e| YanshiError::ConfigurationError {
+        message: format!("Failed to initialize Yanshi LLM service: {}", e),
+      })?;
+
     let provider =
       Yanshi::text2video_for(&model)
         .await

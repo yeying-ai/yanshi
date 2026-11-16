@@ -76,6 +76,9 @@ impl GoogleMediaProvider {
   /// Shared core for `generateContent`-backed media modalities: POST
   /// `generateContent` with the given `parts` and `generation_config`,
   /// then collect every response part carrying `inlineData`.
+  ///
+  /// Retries transient transport failures and HTTP 429 / 5xx responses
+  /// (honoring Google's `"retryDelay": "NNs"` hint on RPM quota windows).
   async fn generate_content_parts(
     &self,
     model: &str,
@@ -90,24 +93,55 @@ impl GoogleMediaProvider {
       "generationConfig": generation_config,
     });
 
-    let response = self
-      .client
-      .post(&url)
-      .headers(self.build_headers()?)
-      .json(&body)
-      .send()
-      .await?;
+    const RETRY_DELAYS: [Option<u64>; 5] = [Some(2), Some(6), Some(15), Some(30), None];
+    let mut last_err: Option<LLMError> = None;
 
-    if !response.status().is_success() {
-      let status_code = response.status().as_u16();
-      let message = response.text().await.unwrap_or_default();
-      return Err(LLMError::HttpError {
-        status_code,
-        message,
-      });
+    for next_delay in RETRY_DELAYS {
+      let headers = self.build_headers()?;
+      match self
+        .client
+        .post(&url)
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+      {
+        Ok(response) if response.status().is_success() => {
+          let text = response.text().await?;
+          return parse_generate_content_media_response(&text);
+        }
+        Ok(response) => {
+          let status_code = response.status().as_u16();
+          let message = response.text().await.unwrap_or_default();
+          let retryable = matches!(status_code, 429 | 500 | 502 | 503 | 504);
+          if retryable && let Some(fallback_secs) = next_delay {
+            let wait_secs = parse_google_retry_delay_secs(&message).unwrap_or(fallback_secs);
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            last_err = Some(LLMError::HttpError {
+              status_code,
+              message,
+            });
+            continue;
+          }
+          return Err(LLMError::HttpError {
+            status_code,
+            message,
+          });
+        }
+        Err(err) => {
+          if let Some(wait_secs) = next_delay {
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            last_err = Some(err.into());
+            continue;
+          }
+          return Err(err.into());
+        }
+      }
     }
 
-    parse_generate_content_media_response(&response.text().await?)
+    Err(last_err.unwrap_or_else(|| LLMError::InternalError {
+      message: "Google media request exhausted retry budget".to_string(),
+    }))
   }
 
   async fn generate_content_media(
@@ -444,6 +478,21 @@ pub(crate) fn normalize_google_tts_voice(voice: &str) -> String {
   trimmed.to_string()
 }
 
+pub(crate) fn parse_google_retry_delay_secs(body: &str) -> Option<u64> {
+  let idx = body.find("\"retryDelay\"")?;
+  let rest = &body[idx + "\"retryDelay\"".len()..];
+  let q1 = rest.find('"')?;
+  let inner = &rest[q1 + 1..];
+  let q2 = inner.find('"')?;
+  let raw = inner[..q2].trim().trim_end_matches('s');
+  let parsed: f64 = raw.parse().ok()?;
+  if parsed.is_finite() && parsed > 0.0 {
+    Some((parsed.ceil() as u64 + 1).clamp(2, 65))
+  } else {
+    None
+  }
+}
+
 pub(crate) fn build_google_tts_prompt(input: &str, instructions: Option<&str>) -> String {
   match instructions.map(str::trim).filter(|s| !s.is_empty()) {
     Some(dir) => format!("Say in the following vocal style ({dir}):\n{input}"),
@@ -459,6 +508,11 @@ impl TtsProvider for GoogleMediaProvider {
 
   async fn synthesize(&self, request: TtsRequest) -> Result<TtsResponse> {
     let voice_name = normalize_google_tts_voice(&request.voice);
+    let has_instructions = request
+      .instructions
+      .as_deref()
+      .map(str::trim)
+      .is_some_and(|s| !s.is_empty());
     let prompt = build_google_tts_prompt(&request.input, request.instructions.as_deref());
     let generation_config = json!({
       "responseModalities": ["AUDIO"],
@@ -468,9 +522,20 @@ impl TtsProvider for GoogleMediaProvider {
         }
       }
     });
-    let parts = self
-      .generate_content_media(&request.model, &prompt, generation_config)
-      .await?;
+    let parts = match self
+      .generate_content_media(&request.model, &prompt, generation_config.clone())
+      .await
+    {
+      Ok(parts) => parts,
+      Err(LLMError::ResponseParsingError { .. }) if has_instructions => {
+        // Fallback to plain narration text if the vocal-style prefix caused
+        // Gemini TTS to stop with finishReason: OTHER without audio bytes.
+        self
+          .generate_content_media(&request.model, &request.input, generation_config)
+          .await?
+      }
+      Err(err) => return Err(err),
+    };
 
     let first = parts
       .into_iter()
@@ -816,5 +881,10 @@ mod tests {
     let styled = build_google_tts_prompt("请看左侧代码", Some("资深架构师自然演讲语气"));
     assert!(styled.contains("资深架构师自然演讲语气"));
     assert!(styled.ends_with("\n请看左侧代码"));
+    assert_eq!(
+      parse_google_retry_delay_secs(r#"{"error":{"details":[{"retryDelay":"22.4s"}]}}"#),
+      Some(24)
+    );
+    assert_eq!(parse_google_retry_delay_secs("{}"), None);
   }
 }

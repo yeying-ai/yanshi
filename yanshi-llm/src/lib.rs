@@ -214,9 +214,17 @@ impl Yanshi {
   /// (and its rate-limit bucket) per call and raced concurrent callers
   /// in a parallel Map. A failed load is retried on the next call.
   pub async fn ensure_init() -> Result<()> {
+    if ModelRegistry::global().is_loaded() {
+      return Ok(());
+    }
     static LOADED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     LOADED
-      .get_or_try_init(|| async { Self::init().await })
+      .get_or_try_init(|| async {
+        if ModelRegistry::global().is_loaded() {
+          return Ok(());
+        }
+        Self::init().await
+      })
       .await?;
     Ok(())
   }

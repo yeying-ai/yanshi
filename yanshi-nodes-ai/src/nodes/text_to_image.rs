@@ -294,6 +294,12 @@ impl TextToImageNode {
       "executing text-to-image request via modality dispatcher"
     );
 
+    Yanshi::ensure_init()
+      .await
+      .map_err(|e| YanshiError::ConfigurationError {
+        message: format!("Failed to initialize Yanshi LLM service: {}", e),
+      })?;
+
     let provider =
       Yanshi::text2image_for(&model)
         .await

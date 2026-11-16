@@ -234,6 +234,11 @@ impl ModelRegistry {
     }
   }
 
+  /// Check whether a model configuration has already been loaded.
+  pub fn is_loaded(&self) -> bool {
+    self.config.read().map(|g| g.is_some()).unwrap_or(false)
+  }
+
   /// Get the current configuration
   pub async fn get_config(&self) -> Result<LLMConfig> {
     let config_guard = self.config.read().map_err(|e| LLMError::InternalError {
