@@ -367,6 +367,90 @@ impl ImageEditProvider for GoogleMediaProvider {
   }
 }
 
+const GOOGLE_PREBUILT_VOICES: &[&str] = &[
+  "Zephyr",
+  "Puck",
+  "Charon",
+  "Kore",
+  "Fenrir",
+  "Leda",
+  "Orus",
+  "Aoede",
+  "Callirrhoe",
+  "Autonoe",
+  "Enceladus",
+  "Iapetus",
+  "Umbriel",
+  "Algieba",
+  "Despina",
+  "Erinome",
+  "Algenib",
+  "Rasalgethi",
+  "Laomedeia",
+  "Achernar",
+  "Alnilam",
+  "Schedar",
+  "Gacrux",
+  "Pulcherrima",
+  "Achird",
+  "Zubenelgenubi",
+  "Vindemiatrix",
+  "Sadachbia",
+  "Sadaltager",
+  "Sulafat",
+];
+
+pub(crate) fn normalize_google_tts_voice(voice: &str) -> String {
+  let trimmed = voice.trim();
+  if trimmed.is_empty()
+    || trimmed.eq_ignore_ascii_case("auto")
+    || trimmed.eq_ignore_ascii_case("default")
+  {
+    return "Kore".to_string();
+  }
+  if let Some(&canonical) = GOOGLE_PREBUILT_VOICES
+    .iter()
+    .find(|v| v.eq_ignore_ascii_case(trimmed))
+  {
+    return canonical.to_string();
+  }
+  let lower = trimmed.to_ascii_lowercase();
+  if matches!(
+    lower.as_str(),
+    "ethan" | "dylan" | "cixingnansheng" | "onyx" | "echo" | "ash" | "fable"
+  ) || lower.starts_with("male-")
+  {
+    return "Charon".to_string();
+  }
+  if matches!(
+    lower.as_str(),
+    "cherry"
+      | "serena"
+      | "chelsie"
+      | "sunny"
+      | "jada"
+      | "wenrounvsheng"
+      | "alloy"
+      | "coral"
+      | "nova"
+      | "shimmer"
+      | "ballad"
+      | "sage"
+      | "verse"
+  ) || lower.starts_with("female-")
+  {
+    return "Kore".to_string();
+  }
+  trimmed.to_string()
+}
+
+pub(crate) fn build_google_tts_prompt(input: &str, instructions: Option<&str>) -> String {
+  match instructions.map(str::trim).filter(|s| !s.is_empty()) {
+    Some(dir) => format!("Say in the following vocal style ({dir}):\n{input}"),
+    None => input.to_string(),
+  }
+}
+
 #[async_trait]
 impl TtsProvider for GoogleMediaProvider {
   fn name(&self) -> &str {
@@ -374,16 +458,18 @@ impl TtsProvider for GoogleMediaProvider {
   }
 
   async fn synthesize(&self, request: TtsRequest) -> Result<TtsResponse> {
+    let voice_name = normalize_google_tts_voice(&request.voice);
+    let prompt = build_google_tts_prompt(&request.input, request.instructions.as_deref());
     let generation_config = json!({
       "responseModalities": ["AUDIO"],
       "speechConfig": {
         "voiceConfig": {
-          "prebuiltVoiceConfig": { "voiceName": request.voice }
+          "prebuiltVoiceConfig": { "voiceName": voice_name }
         }
       }
     });
     let parts = self
-      .generate_content_media(&request.model, &request.input, generation_config)
+      .generate_content_media(&request.model, &prompt, generation_config)
       .await?;
 
     let first = parts
@@ -716,5 +802,19 @@ mod tests {
     .to_string();
     let parsed = parse_generate_content_text_response(&body).expect("parse ok");
     assert_eq!(parsed, "1\n00:00:00,000 --> 00:00:02,500\nHello Yanshi");
+  }
+
+  #[test]
+  fn google_tts_voice_and_director_prompt_normalize_cleanly() {
+    assert_eq!(normalize_google_tts_voice("kore"), "Kore");
+    assert_eq!(normalize_google_tts_voice("auto"), "Kore");
+    assert_eq!(normalize_google_tts_voice("Cherry"), "Kore");
+    assert_eq!(normalize_google_tts_voice("Ethan"), "Charon");
+    assert_eq!(normalize_google_tts_voice("Puck"), "Puck");
+    assert_eq!(build_google_tts_prompt("你好", None), "你好");
+    assert_eq!(build_google_tts_prompt("你好", Some("   ")), "你好");
+    let styled = build_google_tts_prompt("请看左侧代码", Some("资深架构师自然演讲语气"));
+    assert!(styled.contains("资深架构师自然演讲语气"));
+    assert!(styled.ends_with("\n请看左侧代码"));
   }
 }

@@ -77,6 +77,10 @@ impl Tool for TtsTool {
         "sample_rate": {
           "type": "integer",
           "description": "Sample rate hint in Hz. Vendor-specific."
+        },
+        "instructions": {
+          "type": "string",
+          "description": "Optional speaking style/pacing direction (supported by Gemini TTS and OpenAI TTS)."
         }
       },
       "required": ["model", "input", "voice"]
@@ -104,6 +108,7 @@ impl Tool for TtsTool {
       speed: optional_f32(&params, "speed"),
       volume: optional_f32(&params, "volume"),
       sample_rate: optional_u32(&params, "sample_rate"),
+      instructions: optional_str(&params, "instructions"),
     };
 
     match provider.synthesize(request).await {

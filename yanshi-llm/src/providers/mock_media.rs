@@ -266,6 +266,7 @@ mod tests {
         speed: None,
         volume: None,
         sample_rate: None,
+        instructions: None,
       })
       .await
       .expect("mock never fails");
@@ -278,6 +279,7 @@ mod tests {
         speed: None,
         volume: None,
         sample_rate: None,
+        instructions: None,
       })
       .await
       .expect("mock never fails");

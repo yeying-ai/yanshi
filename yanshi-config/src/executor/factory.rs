@@ -375,11 +375,29 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "tts" => {
-      let model = get_string_param_optional(&node_def.parameters, "model");
-      let voice = get_string_param_optional(&node_def.parameters, "voice");
-      let input_template = get_string_param_optional(&node_def.parameters, "input_template");
-      let node = TTSNode::new(&node_def.id, &model, &voice, &input_template)
-        .with_output_format(get_output_format(&node_def.parameters)?);
+      let params = &node_def.parameters;
+      let model = get_string_param_optional(params, "model");
+      let voice = get_string_param_optional(params, "voice");
+      let input_template = get_string_param_optional(params, "input_template");
+      let mut node = TTSNode::new(&node_def.id, &model, &voice, &input_template)
+        .with_output_format(get_output_format(params)?);
+      let instructions = get_string_param_optional(params, "instructions");
+      if !instructions.is_empty() {
+        node = node.with_instructions(instructions);
+      }
+      if let Some(speed) = params.get("speed").and_then(|v| v.as_f64()) {
+        node = node.with_speed(speed as f32);
+      }
+      let fmt = get_string_param_optional(params, "response_format");
+      if !fmt.is_empty() {
+        let parsed = match fmt.to_ascii_lowercase().as_str() {
+          "wav" => yanshi_nodes_ai::nodes::tts::AudioResponseFormat::Wav,
+          "flac" => yanshi_nodes_ai::nodes::tts::AudioResponseFormat::Flac,
+          "opus" => yanshi_nodes_ai::nodes::tts::AudioResponseFormat::Opus,
+          _ => yanshi_nodes_ai::nodes::tts::AudioResponseFormat::Mp3,
+        };
+        node = node.with_response_format(parsed);
+      }
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "while" => {

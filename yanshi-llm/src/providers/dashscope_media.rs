@@ -493,6 +493,58 @@ impl Image2ImageProvider for DashScopeMediaProvider {
   }
 }
 
+pub(crate) fn normalize_dashscope_tts_voice(voice: &str) -> String {
+  let trimmed = voice.trim();
+  if trimmed.is_empty()
+    || trimmed.eq_ignore_ascii_case("auto")
+    || trimmed.eq_ignore_ascii_case("default")
+  {
+    return "Cherry".to_string();
+  }
+  for &canonical in &[
+    "Cherry", "Serena", "Ethan", "Chelsie", "Sunny", "Jada", "Dylan",
+  ] {
+    if canonical.eq_ignore_ascii_case(trimmed) {
+      return canonical.to_string();
+    }
+  }
+  let lower = trimmed.to_ascii_lowercase();
+  if matches!(
+    lower.as_str(),
+    "charon"
+      | "puck"
+      | "fenrir"
+      | "orus"
+      | "iapetus"
+      | "umbriel"
+      | "cixingnansheng"
+      | "onyx"
+      | "echo"
+      | "ash"
+  ) || lower.starts_with("male-")
+  {
+    return "Ethan".to_string();
+  }
+  if matches!(
+    lower.as_str(),
+    "kore"
+      | "zephyr"
+      | "leda"
+      | "aoede"
+      | "callirrhoe"
+      | "autonoe"
+      | "wenrounvsheng"
+      | "alloy"
+      | "coral"
+      | "nova"
+      | "shimmer"
+  ) || lower.starts_with("female-")
+  {
+    return "Cherry".to_string();
+  }
+  trimmed.to_string()
+}
+
 #[async_trait]
 impl TtsProvider for DashScopeMediaProvider {
   fn name(&self) -> &str {
@@ -504,9 +556,10 @@ impl TtsProvider for DashScopeMediaProvider {
       "{}/api/v1/services/aigc/multimodal-generation/generation",
       self.base_url
     );
+    let voice = normalize_dashscope_tts_voice(&request.voice);
     let body = json!({
       "model": request.model,
-      "input": { "text": request.input, "voice": request.voice },
+      "input": { "text": request.input, "voice": voice },
     });
 
     let response = self
@@ -687,5 +740,14 @@ mod tests {
     assert_eq!(mime_for_audio_url("https://x/a.flac"), "audio/flac");
     assert_eq!(mime_for_audio_url("https://x/a.opus"), "audio/opus");
     assert_eq!(mime_for_audio_url("https://x/a.unknown"), "audio/wav");
+  }
+
+  #[test]
+  fn dashscope_tts_voice_maps_cross_vendor_defaults() {
+    assert_eq!(normalize_dashscope_tts_voice("Kore"), "Cherry");
+    assert_eq!(normalize_dashscope_tts_voice("Charon"), "Ethan");
+    assert_eq!(normalize_dashscope_tts_voice("auto"), "Cherry");
+    assert_eq!(normalize_dashscope_tts_voice("cherry"), "Cherry");
+    assert_eq!(normalize_dashscope_tts_voice("Ethan"), "Ethan");
   }
 }

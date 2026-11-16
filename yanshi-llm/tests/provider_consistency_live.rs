@@ -1929,6 +1929,7 @@ models:
     speed: None,
     volume: None,
     sample_rate: None,
+    instructions: None,
   };
   let response = tokio::time::timeout(Duration::from_secs(30), provider.synthesize(request))
     .await
@@ -2054,6 +2055,7 @@ models:
     speed: None,
     volume: None,
     sample_rate: None,
+    instructions: None,
   };
   let response = tokio::time::timeout(Duration::from_secs(30), provider.synthesize(request))
     .await
@@ -2179,6 +2181,7 @@ models:
     speed: None,
     volume: None,
     sample_rate: None,
+    instructions: None,
   };
   let response = tokio::time::timeout(Duration::from_secs(30), provider.synthesize(request))
     .await
@@ -2299,6 +2302,7 @@ models:
     speed: None,
     volume: None,
     sample_rate: None,
+    instructions: None,
   };
   let response = tokio::time::timeout(Duration::from_secs(30), provider.synthesize(request))
     .await

@@ -151,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
             speed: None,
             volume: None,
             sample_rate: None,
+            instructions: None,
           })
           .await?;
         tokio::fs::write(&target, &audio.audio).await?;

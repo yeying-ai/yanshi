@@ -49,6 +49,7 @@ pub async fn execute(
     speed: Some(speed),
     volume: None,
     sample_rate: None,
+    instructions: None,
   };
 
   let start_time = std::time::Instant::now();

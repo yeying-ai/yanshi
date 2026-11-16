@@ -2,11 +2,9 @@
 //!
 //! Implements [`TtsProvider`] via `POST {base_url}/audio/speech` — a
 //! JSON request body, raw audio bytes response (unlike the JSON-wrapped
-//! responses everywhere else in this crate). Known gap: OpenAI's
-//! `instructions` field (natural-language tone/style guidance) has no
-//! analog in [`TtsRequest`] today and is simply not sent — extending the
-//! trait for one vendor's extra field is out of scope for this
-//! vendor-implementation batch (P-LLM2.3).
+//! responses everywhere else in this crate). Forwards `instructions`
+//! when provided so models such as `gpt-4o-mini-tts` apply tone/pacing
+//! guidance.
 
 use crate::{
   LLMError, Result,
@@ -71,6 +69,17 @@ impl OpenAITtsProvider {
       if let Some(number) = serde_json::Number::from_f64(speed as f64) {
         body.insert("speed".to_string(), Value::Number(number));
       }
+    }
+    if let Some(instructions) = request
+      .instructions
+      .as_deref()
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+    {
+      body.insert(
+        "instructions".to_string(),
+        Value::String(instructions.to_string()),
+      );
     }
     Value::Object(body)
   }
@@ -157,6 +166,7 @@ mod tests {
       speed: Some(1.25),
       volume: None,
       sample_rate: None,
+      instructions: Some("Speak like a seasoned technical keynote presenter.".into()),
     };
     let body = OpenAITtsProvider::build_request_body(&request);
     assert_eq!(body["model"], "gpt-4o-mini-tts");
@@ -164,6 +174,10 @@ mod tests {
     assert_eq!(body["voice"], "coral");
     assert_eq!(body["response_format"], "wav");
     assert_eq!(body["speed"], 1.25);
+    assert_eq!(
+      body["instructions"],
+      "Speak like a seasoned technical keynote presenter."
+    );
   }
 
   #[test]
@@ -176,9 +190,11 @@ mod tests {
       speed: None,
       volume: None,
       sample_rate: None,
+      instructions: Some("   ".into()),
     };
     let body = OpenAITtsProvider::build_request_body(&request);
     assert!(body.get("response_format").is_none());
     assert!(body.get("speed").is_none());
+    assert!(body.get("instructions").is_none());
   }
 }

@@ -27,6 +27,15 @@ models:
     output_per_1k: 0.00060
   gemini-2.5-flash-asr:
     per_output_second: 0.00003
+  gemini-2.5-flash-preview-tts:
+    per_1k_input_chars: 0.00060
+    per_output_second: 0.00040
+  gemini-2.5-pro-preview-tts:
+    per_1k_input_chars: 0.00120
+    per_output_second: 0.00080
+  gemini-3.1-flash-tts-preview:
+    per_1k_input_chars: 0.00060
+    per_output_second: 0.00040
   gemini-2.5-pro:
     input_per_1k: 0.00125
     output_per_1k: 0.01000
@@ -115,9 +124,21 @@ models:
     output_per_1k: 0.00080
   wan2.5-t2i-preview:
     per_image: 0.02000
+  qwen-tts:
+    per_1k_input_chars: 0.00200
+  qwen-tts-2025-05-22:
+    per_1k_input_chars: 0.00200
+  qwen3-tts-flash:
+    per_1k_input_chars: 0.00120
+  gpt-4o-mini-tts:
+    per_1k_input_chars: 0.01500
+  step-tts-mini:
+    per_1k_input_chars: 0.00800
 
-  # Google Imagen / Gemini Image
+  # Google Imagen / Gemini Image / Veo Video
   gemini-3.1-flash-image:
     per_image: 0.03900
   imagen-3.0-generate-002:
     per_image: 0.03000
+  veo-3.1-fast-generate-001:
+    per_output_second: 0.15000

@@ -46,6 +46,8 @@ pub struct TTSNode {
   pub input_template: String,
   pub response_format: AudioResponseFormat,
   pub speed: Option<f32>,
+  #[serde(default)]
+  pub instructions: Option<String>,
   pub output_key: String,
   pub input_keys: Vec<String>,
   /// Y1.1: `file` (default) writes the audio under the run's artifact
@@ -64,6 +66,7 @@ impl TTSNode {
       input_template: input_template.to_string(),
       response_format: Default::default(),
       speed: None,
+      instructions: None,
       output_key: format!("{}_output", name),
       input_keys: vec![],
       output_format: ArtifactOutputFormat::default(),
@@ -72,6 +75,24 @@ impl TTSNode {
 
   pub fn with_output_format(mut self, format: ArtifactOutputFormat) -> Self {
     self.output_format = format;
+    self
+  }
+
+  pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+    let trimmed = instructions.into();
+    if !trimmed.trim().is_empty() {
+      self.instructions = Some(trimmed);
+    }
+    self
+  }
+
+  pub fn with_speed(mut self, speed: f32) -> Self {
+    self.speed = Some(speed);
+    self
+  }
+
+  pub fn with_response_format(mut self, format: AudioResponseFormat) -> Self {
+    self.response_format = format;
     self
   }
 
@@ -105,6 +126,13 @@ impl AsyncNode for TTSNode {
     };
     let model = string_input("model").unwrap_or_else(|| self.model.clone());
     let voice = string_input("voice").unwrap_or_else(|| self.voice.clone());
+    let instructions = string_input("instructions").or_else(|| self.instructions.clone());
+    let speed = match inputs.get("speed") {
+      Some(FlowValue::Json(Value::Number(n))) => n.as_f64().map(|v| v as f32),
+      Some(FlowValue::Json(Value::String(s))) => s.trim().parse::<f32>().ok(),
+      _ => None,
+    }
+    .or(self.speed);
     let mut resolved_input =
       string_input("input_template").unwrap_or_else(|| self.input_template.clone());
     for key in &self.input_keys {
@@ -126,16 +154,18 @@ impl AsyncNode for TTSNode {
         ),
       })?;
 
-    let response_format = self.response_format.as_wire_str().to_string();
+    let response_format = string_input("response_format")
+      .unwrap_or_else(|| self.response_format.as_wire_str().to_string());
     let input_chars = resolved_input.chars().count();
     let request = TtsRequest {
       model: model.clone(),
       input: resolved_input,
       voice,
       response_format: Some(response_format),
-      speed: self.speed,
+      speed,
       volume: None,
       sample_rate: None,
+      instructions,
     };
 
     tracing::debug!(provider = %provider.name(), "synthesizing speech via provider");
@@ -186,6 +216,7 @@ mod tests {
       input_template: "Hello world!".to_string(),
       response_format: AudioResponseFormat::Mp3,
       speed: Some(1.0),
+      instructions: None,
       output_key: "audio_output".to_string(),
       input_keys: vec![],
       output_format: ArtifactOutputFormat::DataUri,

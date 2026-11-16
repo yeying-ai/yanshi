@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Request to synthesise speech audio from text.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TtsRequest {
   /// Model identifier (e.g. `"step-tts-mini"`, `"eleven-monolingual-v1"`).
   pub model: String,
@@ -30,6 +30,11 @@ pub struct TtsRequest {
   /// Sample rate hint in Hz. Vendor-specific.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sample_rate: Option<u32>,
+  /// Optional natural-language delivery/prosody direction (supported by
+  /// Gemini Native TTS and OpenAI `gpt-4o-mini-tts`; safely ignored by
+  /// providers whose wire protocol accepts plain transcript text only).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub instructions: Option<String>,
 }
 
 /// Synthesised audio bytes for a [`TtsRequest`].
