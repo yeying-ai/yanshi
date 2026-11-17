@@ -4,7 +4,7 @@
 
 [book]
 title = "Yanshi Manual"
-description = "User and operator manual for Yanshi, a Rust framework for DAG workflows and agent-native loops."
+description = "User and operator manual for Yanshi, a multimodal content-production runtime in Rust built on deterministic DAG workflows and agent-native loops."
 language = "en"
 # Pages are written to be read on GitHub too, so they stay in docs/; the table
 # of contents is docs/SUMMARY.md.
@@ -20,5 +20,5 @@ command = "python3 repo_links.py"
 
 [output.html]
 site-url = "/yanshi/"
-git-repository-url = "https://github.com/yuxuetr/yanshi"
-edit-url-template = "https://github.com/yuxuetr/yanshi/edit/main/docs/{path}"
+git-repository-url = "https://github.com/yeying-ai/yanshi"
+edit-url-template = "https://github.com/yeying-ai/yanshi/edit/main/docs/{path}"

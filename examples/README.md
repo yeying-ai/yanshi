@@ -66,6 +66,8 @@ referenced file for the runnable code, comments, and run commands.
 | 12 | Tool policy + sandbox capability decision | [`tool_policy_sandbox_demo.rs`](../yanshi-tools/examples/tool_policy_sandbox_demo.rs) | `yanshi-tools` | ✓ (added under P3.1) |
 | 13 | Multimodal studio (Chat + T2I + VLM + Veo I2V + TTS + MP4/HTML) | [`rust_traits_studio.rs`](../yanshi-llm/examples/rust_traits_studio.rs), [`rust-traits-tutorial/workflow.yml`](applications/rust-traits-tutorial/workflow.yml) | `yanshi-llm`, `yanshi-cli` | ✓ |
 | 14 | Deterministic 1080p PPT slide studio (`render_slides` + code/flowchart/memory/table/mindmap + progressive MP4 + PPTX + PDF) | [`rust_traits_ppt_studio.rs`](../yanshi-config/examples/rust_traits_ppt_studio.rs), [`tech_slides_video.yml`](generators/tech_slides_video.yml) | `yanshi-config`, `yanshi-nodes` | ✓ |
+| 15 | Art-directed illustrated slides + native OOXML `.pptx` & `16:9` Typst `.pdf` (`illustration` + `figure` + `render_slides`) | [`illustrated_slides.yml`](generators/illustrated_slides.yml), [`slides.yml`](generators/slides.yml) | `yanshi-nodes-ai`, `yanshi-nodes` | ✓ |
+| 16 | Daily engineering & research Studio suite (GitHub repo arch, HITL `ask_user` backend planner, arXiv/PDF reader → `.xlsx`, video ASR summarizer) | [`repo_architecture.yml`](generators/repo_architecture.yml), [`backend_project_planner.yml`](generators/backend_project_planner.yml), [`paper_reader.yml`](generators/paper_reader.yml), [`video_summarizer.yml`](generators/video_summarizer.yml) | `yanshi-nodes`, `yanshi-nodes-ai`, `yanshi-config` | ✓ |
 
 ## Ecosystem / scenario-level demos
 

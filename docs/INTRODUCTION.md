@@ -30,6 +30,7 @@ gateway with a Web UI.
 
 | Part | Read it when you want to… |
 | --- | --- |
+| [Content Studio Catalogue & Desktop](STUDIO_CATALOGUE.md) | run the 15 built-in slide, video, paper, repo, and report generators or install `Yanshi Studio` desktop |
 | [Getting Started](CONFIGURATION.md) | configure providers and run a first workflow without API keys |
 | [Workflows](WORKFLOW_SCHEMA.md) | write, debug, and make DAG workflows resilient |
 | [Agents](AGENT_RUNTIME.md) | run agent loops, multi-agent setups, and Harness sessions |

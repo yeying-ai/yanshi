@@ -1,6 +1,6 @@
 # Yanshi Docs
 
-Last updated: 2026-05-09
+Last updated: 2026-11-17
 
 This directory contains current user and maintainer documentation. Historical
 phase reports, old TODO trackers, implementation summaries, and stale backups
@@ -8,17 +8,20 @@ have been removed from the active docs tree so this directory stays focused on
 working references.
 
 The curated manual built from this directory is published at
-<https://yuxuetr.github.io/yanshi/> (table of contents:
+<https://yeying-ai.github.io/yanshi/> (table of contents:
 [SUMMARY.md](SUMMARY.md); build locally with `mdbook build site`).
 
 ## Start Here
 
 - [CURRENT_STATUS.md](CURRENT_STATUS.md): current authoritative project status,
   implemented surfaces, stability links, and active work.
+- [STUDIO_CATALOGUE.md](STUDIO_CATALOGUE.md): the 15 built-in Content Studio
+  generators (`.pptx`, `.pdf`, `.mp4`, `.xlsx`, `.mp3`, diagrams), Web Studio,
+  and `Yanshi Studio` desktop app.
 - [RFC_CONTENT_STUDIO.md](RFC_CONTENT_STUDIO.md): the product direction —
   a multimodal content-production runtime — and the contracts the Y track
   implements.
-- [TRIAL_GUIDE.md](TRIAL_GUIDE.md): 试用手册 — which CLI paths are green today.
+- [TRIAL_GUIDE.md](TRIAL_GUIDE.md): 试用手册 — Studio 生成器、桌面端与 CLI 快速上手路径.
 - [ARCHITECTURE.md](ARCHITECTURE.md): current workspace layout and runtime model.
 - [CONFIGURATION.md](CONFIGURATION.md): CLI config, secrets, workflow YAML, and run directories.
 - [WORKFLOW_SCHEMA.md](WORKFLOW_SCHEMA.md): implemented config-first workflow validation contract.

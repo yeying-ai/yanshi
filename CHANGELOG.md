@@ -353,6 +353,12 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **GitHub Pages manual refresh (`docs/STUDIO_CATALOGUE.md`).** Added a
+  dedicated Content Studio & `Yanshi Studio` desktop chapter covering all 15
+  generator templates and slide visual routing (`illustration` / `figure` /
+  native OOXML `.pptx`), refreshed `TRIAL_GUIDE.md`, `WEB_UI.md`,
+  `MULTIMODAL_GUIDE.md`, `README.md`, and `examples/README.md`, and updated
+  `site/book.toml` links to `yeying-ai/yanshi`.
 - **Streamed reasoning text.** `StreamChunk` gains a `thinking` delta,
   filled from Anthropic `thinking_delta`, the OpenAI-compatible
   `reasoning_content` / `reasoning` deltas (DeepSeek, Qwen, GLM, …),

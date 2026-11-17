@@ -1,353 +1,162 @@
-# Yanshi Multimodal LLM Guide
+# Yanshi Multimodal & Media Production Guide
 
-Yanshi now supports multimodal LLMs that can process both text and images. This guide covers how to use multimodal capabilities in your agent flows.
+Yanshi treats media and rendered documents as first-class citizens across both
+its config-first DAG workflows and its Rust SDK. For the full per-provider model
+table (context windows, tool calling, vision, image/audio/video generation, and
+reasoning support), see [`LLM_PROVIDERS_MATRIX.md`](LLM_PROVIDERS_MATRIX.md) and
+[`GRANULAR_MODEL_TYPES.md`](GRANULAR_MODEL_TYPES.md).
 
-## Overview
+---
 
-Multimodal LLMs allow you to:
-- Analyze images with natural language questions
-- Combine multiple images with text instructions
-- Process visual content in automated workflows
-- Create sophisticated AI agents that understand visual context
+## 1. First-Class `FlowValue::File` Artifact Pipeline
 
-## Supported Models
+Modality and renderer nodes emit `FlowValue::File { path, mime_type }` written
+under `<run_dir>/artifacts/<node_id>/<n>.<ext>` rather than stuffing base64
+blobs into the workflow state pool:
 
-### StepFun (Primary Multimodal Provider)
-- `step-1o-turbo-vision` - High-performance multimodal model
-- `step-2-16k` - Advanced multimodal with extended context
-- `step-1v-8k`, `step-1v-32k` - Vision-enabled models
+- **Constant-size state & checkpoints**: a 100 MB MP4 or 20-slide `.pptx` keeps
+  state serialization under a few kilobytes, making `--checkpoint` /
+  `workflow resume` fast and deterministic.
+- **Direct downstream consumption**: `image_understand`, `image_edit`,
+  `image_to_image`, `render_slides`, `render_video`, `render_audio`, and `file`
+  (`copy` / `move` / `read_bytes` / `write`) read `FlowValue::File` inputs
+  directly from disk; Tera templates expose the path plus `{{ f | mime }}` and
+  `{{ f | file_size }}` filters.
+- **Export & streaming download**:
+  - CLI: `yanshi workflow run <file.yml> --output-dir ./out` copies every file
+    artifact to `./out/<node_id>/<file>` alongside `artifacts.json` (size +
+    SHA-256).
+  - Gateway / Studio: `GET /v1/runs/{id}/artifacts` lists registered files and
+    `GET /v1/runs/{id}/artifacts/{artifact_id}` streams them with tenant
+    isolation.
+- **Legacy compatibility**: modality nodes still accept `output_format: data_uri`
+  when an external consumer explicitly requires inline `data:` strings.
 
-### OpenAI (Compatible)
-- `gpt-4o` - Text and image understanding
-- `gpt-4o-mini` - Lightweight multimodal model
+---
 
-## Quick Start
+## 2. Multimodal & Rendering Nodes in Config-First YAML
 
-### Simple Text + Image Analysis
+### Vision, Image Generation & Art-Directed Illustrations
+
+| Node `type:` | Crate | Purpose |
+| --- | --- | --- |
+| `image_understand` | `yanshi-nodes-ai` | Visual Q&A and structured critique over local `FlowValue::File` images or URLs (`model`, `text_prompt`, `image_source`). |
+| `text_to_image` | `yanshi-nodes-ai` | Direct prompt-to-image synthesis across Gemini / Imagen (Vertex AI & AI Studio), OpenAI (`gpt-image-1` / DALL-E), DashScope (`wanx` / `qwen-image`), and GLM (`cogview`), with automatic aspect-ratio normalization. |
+| `image_to_image` / `image_edit` | `yanshi-nodes-ai` | Reference-guided restyling and mask/instruction editing over `FlowValue::File` inputs. |
+| `illustration` | `yanshi-nodes-ai` | Art-directed conceptual illustration generator ([`illustration.rs`](../yanshi-nodes-ai/src/nodes/illustration.rs)): optional LLM prompt refinement (`refine_prompt: true`), dark/light canvas palette harmonization (`#0B1120` / `#F8FAFC`), strict anti-text/no-watermark guardrails, bounded concurrent batch generation over `SlideDeck`s, and 6 `style_preset`s (`editorial_tech`, `isometric_3d`, `flat_vector`, `blueprint_schematic`, `scientific_diagram`, `cinematic_keynote`). |
+| `figure` | `yanshi-nodes-ai` | Validated vector diagram compiler (`language`: `d2`, `svg`, `typst`, `tikz`, or isolated container `python`) with automatic compile-error feedback repair (`max_attempts`) and domain parts-list verification (`domain: circuit`). |
+
+Example YAML combining `figure` + `illustration` + native OOXML `render_slides`:
+
+```yaml
+name: "illustrated-brief"
+cost_limit_usd: 0.50
+nodes:
+  - id: arch_svg
+    type: figure
+    parameters:
+      language: d2
+      description: "Client -> Pingora TLS Gateway -> Axum Server -> PostgreSQL"
+
+  - id: hero_art
+    type: illustration
+    parameters:
+      model: gemini-3.1-flash-image
+      concept: "Deterministic DAG scheduler orchestrating parallel media pipelines"
+      style_preset: editorial_tech
+      theme: dark
+      refine_prompt: true
+
+  - id: critique
+    type: image_understand
+    dependencies: ["hero_art"]
+    input_mapping:
+      image_source: "{{ nodes.hero_art.outputs.output }}"
+    parameters:
+      model: gemini-2.5-flash
+      text_prompt: "Describe the visual metaphor and color palette in two sentences."
+```
+
+### Audio, Video & Keynote Renderers
+
+| Node `type:` | Crate | Purpose |
+| --- | --- | --- |
+| `tts` | `yanshi-nodes-ai` | Expressive speech synthesis across OpenAI, Gemini TTS, DashScope (`qwen3-tts-flash` / `cosyvoice`), MiniMax, and StepFun, with cross-vendor voice normalization and vocal style `instructions`. |
+| `asr` & `video_ingest` | `yanshi-nodes-ai` / `yanshi-nodes` | Speech-to-text transcription (`whisper-1`, `gemini-2.5-flash-asr`, `glm-asr`) and video caption/audio ingestion with `.srt` output. |
+| `text_to_video` | `yanshi-nodes-ai` | Generative video clips (Google Veo, DashScope Wan, Kling 4.0, MiniMax Hailuo) downloaded to `FlowValue::File` with size caps. |
+| `render_slides` | `yanshi-nodes` | 1920×1080 vector slide engine: interactive `.html`, pure-Rust native editable OOXML `.pptx` (`export_pptx: true`), and sandboxed `16:9` Typst `.pdf` (`export_pdf: true`). |
+| `render_video` | `yanshi-nodes` | Sandboxed FFmpeg 1080p video compositor: progressive step-synced narration, smooth transitions, burned-in ASS or soft `.srt`/`.vtt` subtitles, and rounded PiP presenter overlays. |
+| `render_audio` | `yanshi-nodes` | Multi-clip concatenation and two-pass EBU R128 loudness normalization (`.mp3`). |
+
+---
+
+## 3. Cost Accounting & Retry Discipline
+
+Paid multimodal runs are governed by hierarchical `CostMeter` tracking
+([`yanshi-llm/src/pricing.rs`](../yanshi-llm/src/pricing.rs)):
+
+- **Granular unit pricing**: `PricingTable` tracks token rates alongside
+  `per_image`, `per_output_second` (TTS / video), and `per_1k_input_chars`.
+- **Hard budget ceiling**: set `cost_limit_usd` at the top of a workflow YAML or
+  in `POST /v1/runs`. Once cumulative spend reaches the ceiling, unstarted nodes
+  abort with `YanshiError::CostLimitExceeded` before calling external vendors,
+  emitting `cost.limit_exceeded`.
+- **Smart retry classification**: modality calls retry transient `429`, `5xx`,
+  and network timeouts with backoff, and **never** retry `4xx` content-policy or
+  schema rejections so rejected prompts are never double-billed.
+
+---
+
+## 4. Rust SDK (`yanshi-llm`) Multimodal Chat & Streaming
+
+When embedding `yanshi-llm` directly in Rust, use `MultimodalMessage` to combine
+text, image URLs, or local bytes, and stream responses including reasoning
+(`chunk.thinking`) and inline generated images (`chunk.media`):
 
 ```rust
-use yanshi_llm::Yanshi;
+use yanshi_llm::{MultimodalMessage, Yanshi};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize Yanshi
-    Yanshi::init().await?;
-    
-    // Simple image analysis - recreating the Python example
-    let response = Yanshi::model("step-1o-turbo-vision")
-        .text_and_image(
-            "Describe this image in elegant language",
-            "https://www.stepfun.com/assets/section-1-CTe4nZiO.webp"
-        )
-        .temperature(0.7)
-        .execute()
-        .await?;
-    
-    println!("Analysis: {}", response);
-    Ok(())
-}
-```
+  Yanshi::ensure_init().await?;
 
-### Complex Multimodal Messages
-
-```rust
-use yanshi_llm::{Yanshi, MultimodalMessage};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    Yanshi::init().await?;
-    
-    // Create a system message (optional)
-    let system_message = MultimodalMessage::system()
-        .add_text("You are an expert image analyst. Provide detailed, accurate descriptions.")
-        .build();
-    
-    // Create a user message with multiple images
-    let user_message = MultimodalMessage::user()
-        .add_text("Compare these architectural images and describe their similarities:")
-        .add_image_url_with_detail("https://example.com/building1.jpg", "high")
-        .add_image_url_with_detail("https://example.com/building2.jpg", "high")
-        .build();
-    
-    let response = Yanshi::model("step-1o-turbo-vision")
-        .multimodal_messages(vec![system_message, user_message])
-        .temperature(0.8)
-        .max_tokens(1500)
-        .execute()
-        .await?;
-    
-    println!("Comparison: {}", response);
-    Ok(())
-}
-```
-
-## Multimodal Message Builder
-
-The `MultimodalMessage` API provides a flexible way to construct complex messages:
-
-### Text Content
-```rust
-let message = MultimodalMessage::user()
-    .add_text("What do you see in this image?")
+  let system = MultimodalMessage::system()
+    .add_text("You are a systems architecture reviewer. Be concise and precise.")
     .build();
-```
 
-### Image URLs
-```rust
-let message = MultimodalMessage::user()
-    .add_text("Analyze this:")
-    .add_image_url("https://example.com/image.jpg")
-    .add_image_url_with_detail("https://example.com/detailed.jpg", "high")
+  let user = MultimodalMessage::user()
+    .add_text("Compare the dataflow bottlenecks in this diagram:")
+    .add_image_url_with_detail("https://example.com/architecture.png", "high")
     .build();
-```
 
-### Base64 Images (for local files)
-```rust
-let message = MultimodalMessage::user()
-    .add_text("What's in this local image?")
-    .add_image_data("data:image/jpeg;base64,/9j/4AAQ...", "image/jpeg")
-    .build();
-```
-
-### Builder Shortcuts
-```rust
-// Quick text + single image
-let message = MultimodalMessage::text_and_image(
-    "user", 
-    "Describe this", 
-    "https://example.com/image.jpg"
-);
-
-// Text + multiple images
-let message = MultimodalMessage::text_and_images(
-    "user",
-    "Compare these images:",
-    vec!["https://example.com/1.jpg", "https://example.com/2.jpg"]
-);
-```
-
-## Using in Agent Flows
-
-Multimodal capabilities can be integrated into Yanshi nodes for automated image processing workflows:
-
-```rust
-use yanshi_core::{AsyncFlow, AsyncNode, SharedState};
-use yanshi_llm::{Yanshi as LLMYanshi, MultimodalMessage};
-use async_trait::async_trait;
-
-struct ImageAnalyzerNode {
-    model_name: String,
-}
-
-#[async_trait]
-impl AsyncNode for ImageAnalyzerNode {
-    async fn exec_async(&self, prep_result: serde_json::Value) -> yanshi_core::Result<serde_json::Value> {
-        let image_url = prep_result["image_url"].as_str().unwrap();
-        let prompt = prep_result["prompt"].as_str().unwrap();
-
-        // Create multimodal message
-        let message = MultimodalMessage::text_and_image("user", prompt, image_url);
-
-        // Execute multimodal LLM
-        let response = LLMYanshi::model(&self.model_name)
-            .multimodal_prompt(message)
-            .temperature(0.7)
-            .execute()
-            .await
-            .map_err(|e| yanshi_core::YanshiError::AsyncExecutionError {
-                message: format!("Multimodal LLM failed: {}", e),
-            })?;
-
-        Ok(serde_json::json!({
-            "analysis": response,
-            "success": true
-        }))
-    }
-    
-    // ... other AsyncNode methods
-}
-```
-
-## Streaming Multimodal Responses
-
-```rust
-use futures::StreamExt;
-
-let message = MultimodalMessage::text_and_image(
-    "user",
-    "Provide a detailed analysis of this image",
-    "https://example.com/complex-image.jpg"
-);
-
-let mut stream = Yanshi::model("step-1o-turbo-vision")
-    .multimodal_prompt(message)
+  let mut stream = Yanshi::model("gpt-4o")
+    .multimodal_messages(vec![system, user])
+    .temperature(0.3)
     .execute_streaming()
     .await?;
 
-println!("Streaming analysis:");
-while let Some(chunk) = stream.next_chunk().await? {
-    print!("{}", chunk.content);
+  while let Some(chunk) = stream.next_chunk().await? {
+    if !chunk.content.is_empty() {
+      print!("{}", chunk.content);
+    }
     if chunk.is_final {
-        break;
+      break;
     }
-}
-println!();
-```
-
-## Configuration
-
-### Environment Variables
-```bash
-# StepFun API key for multimodal models
-export STEP_API_KEY="your-stepfun-api-key"
-
-# Optional: OpenAI for additional multimodal support
-export OPENAI_API_KEY="your-openai-api-key"
-```
-
-### Model Configuration
-Models are automatically configured with multimodal support. You can check if a model supports multimodal:
-
-```rust
-// This information is available in model configs
-// step-1o-turbo-vision: supports_multimodal: true
-// gpt-4o: supports_multimodal: true (when OpenAI provider used)
-```
-
-## Best Practices
-
-### Image Quality and Detail Levels
-- Use `"high"` detail for images requiring precise analysis
-- Use `"low"` detail for simple recognition tasks to save tokens
-- Default is usually sufficient for most use cases
-
-### Token Management
-- Multimodal requests consume more tokens than text-only
-- Images are processed and converted to tokens by the provider
-- High-detail images use significantly more tokens
-
-### Error Handling
-```rust
-match Yanshi::model("step-1o-turbo-vision")
-    .text_and_image("Analyze this", image_url)
-    .execute()
-    .await
-{
-    Ok(response) => println!("Analysis: {}", response),
-    Err(yanshi_llm::LLMError::HttpError { status_code, message }) => {
-        println!("API Error {}: {}", status_code, message);
-    },
-    Err(e) => println!("Other error: {}", e),
+  }
+  println!();
+  Ok(())
 }
 ```
 
-## Examples
+### Related Runnable Examples
 
-### Image Description Service
-```rust
-async fn describe_image(image_url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let response = Yanshi::model("step-1o-turbo-vision")
-        .text_and_image("Describe this image in detail", image_url)
-        .temperature(0.5)  // Lower temperature for consistent descriptions
-        .execute()
-        .await?;
-    
-    Ok(response)
-}
-```
-
-### Batch Image Processing
-```rust
-async fn analyze_multiple_images(image_urls: Vec<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut results = Vec::new();
-    
-    for url in image_urls {
-        let analysis = Yanshi::model("step-1o-turbo-vision")
-            .text_and_image("What are the key elements in this image?", url)
-            .execute()
-            .await?;
-        
-        results.push(analysis);
-    }
-    
-    Ok(results)
-}
-```
-
-### Visual Question Answering
-```rust
-async fn answer_about_image(image_url: &str, question: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let message = MultimodalMessage::user()
-        .add_text(&format!("Question: {}", question))
-        .add_image_url(image_url)
-        .add_text("Please provide a specific answer based on what you can see in the image.")
-        .build();
-    
-    let response = Yanshi::model("step-1o-turbo-vision")
-        .multimodal_prompt(message)
-        .temperature(0.3)  // Low temperature for factual answers
-        .execute()
-        .await?;
-    
-    Ok(response)
-}
-```
-
-## Limitations and Considerations
-
-1. **Provider Support**: Not all providers support multimodal. StepFun has the most comprehensive support.
-
-2. **Image Formats**: Most common formats (JPEG, PNG, WebP) are supported. Check provider documentation for specifics.
-
-3. **Image Size**: Large images may be resized by the provider. Consider image dimensions and file size.
-
-4. **Cost**: Multimodal requests are typically more expensive than text-only requests.
-
-5. **Rate Limits**: Image processing may have different rate limits than text processing.
-
-## Troubleshooting
-
-### Common Issues
-
-**"Model not found"**
-- Ensure you're using a multimodal-capable model like `step-1o-turbo-vision`
-- Check that the model is configured in your `models.yml`
-
-**"Invalid image URL"**
-- Verify the image URL is accessible
-- Ensure the image format is supported
-- Check that the URL returns an image, not an HTML page
-
-**"API key not found"**
-- Set the appropriate environment variable (`STEP_API_KEY` for StepFun)
-- Verify the API key is valid and has multimodal access
-
-**High token usage**
-- Try using `"low"` detail level for images
-- Consider resizing images before processing
-- Use smaller context windows when possible
-
-## Integration with Other Yanshi Features
-
-### With Observability
-```rust
-let response = Yanshi::model("step-1o-turbo-vision")
-    .text_and_image("Analyze this", image_url)
-    .with_metrics(metrics_collector)  // Track multimodal usage
-    .execute()
-    .await?;
-```
-
-### With Tools (Future)
-```rust
-// When MCP integration is available
-let response = Yanshi::model("step-1o-turbo-vision")
-    .multimodal_prompt(message)
-    .tools(vision_tools)  // Image processing tools
-    .execute()
-    .await?;
-```
-
-For more examples, see:
-- `examples/multimodal_demo.rs` - Comprehensive multimodal examples
-- `examples/multimodal_agent_flow.rs` - Integration with agent flows
+- [`examples/generators/`](../examples/generators/) — 15 production Content
+  Studio YAML workflows (`illustrated_slides.yml`, `tech_slides_video.yml`,
+  `video_overview.yml`, `audio_overview.yml`, `paper_reader.yml`,
+  `video_summarizer.yml`; see [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)).
+- [`yanshi-llm/examples/rust_traits_studio.rs`](../yanshi-llm/examples/rust_traits_studio.rs) —
+  Code-first multimodal pipeline combining Chat, Text-to-Image, VLM review, Veo
+  I2V, and TTS.
+- [`yanshi-config/examples/rust_traits_ppt_studio.rs`](../yanshi-config/examples/rust_traits_ppt_studio.rs) —
+  Deterministic 1080p slide deck + progressive MP4 + native `.pptx` & `.pdf`
+  export.

@@ -1,8 +1,8 @@
 # Yanshi 偃师
 
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yuxuetr.github.io/yanshi/)
+[![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yeying-ai.github.io/yanshi/)
 
 > **A multimodal content-production runtime in Rust: sources in (an idea, a URL, files, a recording), finished deliverables out (reports, mind maps, audio overviews, slides, quizzes, infographics, videos, domain diagrams) — built on deterministic DAG workflows, agent-native loops, Skills, MCP tools, memory, tracing and checkpointed recovery.**
 
@@ -14,16 +14,19 @@ oldest Chinese account of a built autonomous agent, and the idea this project
 is built on: autonomous agents assembled from explicit, inspectable structure
 (workflows, contracts, tools) that can be traced, replayed and recomposed.
 
-**Direction (reset 2026-11-04).** Yanshi is a runtime for turning sources into
-finished content, in the shape of NotebookLM Studio but with a richer and
-extensible catalogue. Every deliverable runs the same five stages — Sources →
-Planner → Generators → Renderers → Artifacts — where the LLM plans the
-*content* (outline, which deliverables, which figures) and hand-written DAG
-templates do the work, so cost is predictable and quality is testable. Media
-is a first-class value (`FlowValue::File`), and renderers (pandoc, TeX, ffmpeg,
-mermaid) run as sandboxed external tools. The design is
-[`docs/RFC_CONTENT_STUDIO.md`](docs/RFC_CONTENT_STUDIO.md); the active track
-is `RoadMap.md` § Y. It is not a coding-agent framework.
+**Direction (reset 2026-11-04, Y0–Y10 closed).** Yanshi is a runtime for turning
+sources into finished content, in the shape of NotebookLM Studio with a
+15-template catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md))
+and a cross-platform `Yanshi Studio` Web & Tauri desktop app. Every deliverable
+runs the same five stages — Sources → Planner → Generators → Renderers →
+Artifacts — where the LLM plans the *content* (outline, visual routing, figures)
+and hand-written DAG templates do the work, so cost is predictable and quality
+is testable. Media is a first-class value (`FlowValue::File`), slide decks emit
+pure-Rust native editable OOXML `.pptx` and `16:9` Typst `.pdf`, conceptual
+visuals are art-directed by `illustration`, and external renderers (`pandoc`,
+`typst`, `ffmpeg`, `d2`, `lualatex`) run inside OS sandboxes. The design is
+[`docs/RFC_CONTENT_STUDIO.md`](docs/RFC_CONTENT_STUDIO.md); see `RoadMap.md` for
+completed and deferred tracks. It is not a coding-agent framework.
 
 Underneath sits the general runtime this README describes: deterministic DAG
 workflows for production automation and agent-native loops for planning, tool
@@ -76,6 +79,27 @@ other, only on shared contracts. See
 for the full three-axis mental model (with an honest model-vs-code status), and
 [`docs/RFC_CRATE_ARCHITECTURE.md`](docs/RFC_CRATE_ARCHITECTURE.md) for the kernel design.
 
+## 🎬 Content Studio Quickstart (CLI · Web · Desktop)
+
+Run any of the 15 built-in generators under [`examples/generators/`](examples/generators/)
+(full guide in [`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)):
+
+```bash
+# Illustrated Keynote Deck -> native editable .pptx + 16:9 .pdf + interactive .html
+yanshi workflow run examples/generators/illustrated_slides.yml \
+  --input subject "Rust Async Runtime & Work-Stealing Scheduler" \
+  --output-dir out/slides
+
+# Academic Paper Reader -> bilingual .pdf + extracted .xlsx tables + D2 diagram
+yanshi workflow run examples/generators/paper_reader.yml \
+  --input source "https://arxiv.org/abs/1706.03762" \
+  --output-dir out/paper
+
+# Launch Web Studio (/ui/studio & /ui/app) or install macOS Yanshi Studio.app
+cargo run -p yanshi-server
+./scripts/install_desktop.sh --open
+```
+
 ## 🎯 Two Ways to Build
 
 ### 💻 **Code-First Approach (Core SDK)**
@@ -83,13 +107,12 @@ For developers who need maximum power and type-safety.
 
 ```rust
 use yanshi_core::{
-    FlowExt, // brings `flow.run()` into scope (the executor for the graph IR)
-    flow::{Flow, GraphNode, NodeType},
-    async_node::{AsyncNode, AsyncNodeInputs, AsyncNodeResult},
-    value::FlowValue,
+  FlowExt, // brings `flow.run()` into scope (the executor for the graph IR)
+  flow::{Flow, GraphNode, NodeType},
+  value::FlowValue,
 };
-use yanshi_nodes::nodes::llm::LlmNode;
 use yanshi_nodes::nodes::template::TemplateNode;
+use yanshi_nodes_ai::nodes::llm::LlmNode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::json;
@@ -183,9 +206,9 @@ yanshi workflow run workflow_v2.yml
 - **Tracing Across Boundaries**: Workflow, agent, tool, and MCP calls can be linked through structured trace events.
 - **Checkpointed Recovery**: Workflow resume skips completed nodes and preserves serialized agent step history.
 
-## ✨ New in v0.2.0: Production-Ready Stability
+## 🛡️ Production Reliability & Observability
 
-Yanshi v0.2.0 introduces comprehensive stability and observability improvements for production workflows. The 2026-05-24 deep audit (`docs/audit/`) flagged several gaps in the retry / timeout / checkpoint paths; those are tracked in `TODOs.md` under the Q2 wave and progressively hardened — most recently `ExponentialBackoff` jitter (Q2.4.2), retry error-cause preservation (Q2.4.3), and graceful Ctrl-C / SIGTERM handling for CLI + worker + server (Q3.1.1 / Q3.1.2 / Q3.1.3). The examples below reflect the post-audit shape; see `TODOs.md` "Quality Gates" for any open items.
+Yanshi includes first-class retry, error context, resource budgets, timeouts, health checks, and checkpointed resume (`--checkpoint` / `workflow resume` / `POST /v1/runs/{id}:resume`) across CLI, gateway, and Studio runs.
 
 ### 🔄 Retry Mechanism
 Automatic retry with configurable strategies for handling transient failures.
@@ -346,7 +369,8 @@ cargo check --workspace
 ## 📚 Documentation
 
 ### Core Documentation
-- **[Docs Index](docs/README.md)**: Current documentation entry point.
+- **[Docs Index](docs/README.md)** & **[Online Manual](https://yeying-ai.github.io/yanshi/)**: Current documentation entry points.
+- **[Content Studio Catalogue & Desktop](docs/STUDIO_CATALOGUE.md)**: Guide to the 15 built-in generators, slide visual routing, Web Studio, and `Yanshi Studio` desktop app.
 - **[RoadMap](RoadMap.md)**: Current direction — the Content Studio runtime (track Y) — plus deferred tracks with their re-evaluate conditions.
 - **[Content Studio RFC](docs/RFC_CONTENT_STUDIO.md)**: Five-stage model, artifact and `Deliverable` / `Citation` contracts, notebook entity, renderer strategy, decision log.
 - **[Project Evaluation 2026-11-04](docs/PROJECT_EVALUATION_2026-11-04.md)**: Latest full evaluation, re-weighted for the content-production goal.
@@ -389,6 +413,7 @@ cargo check --workspace
 [dependencies]
 yanshi-core = { path = "yanshi-core" }
 yanshi-nodes = { path = "yanshi-nodes" }
+yanshi-nodes-ai = { path = "yanshi-nodes-ai" }
 ```
 
 ### For CLI Usage

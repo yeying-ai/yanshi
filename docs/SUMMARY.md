@@ -12,6 +12,7 @@
 
 # Getting Started
 
+- [Content Studio Catalogue & Desktop](STUDIO_CATALOGUE.md)
 - [Configuration](CONFIGURATION.md)
 - [Trial Guide (中文)](TRIAL_GUIDE.md)
 - [CLI Config-First Tutorial](examples/cli_config_first_tutorial.md)
