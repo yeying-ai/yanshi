@@ -48,6 +48,9 @@ use yanshi_harness::{ApprovalDecision, ApprovalOutcome, ApprovalScope};
 use yanshi_llm::Yanshi;
 
 use crate::local_harness::LocalApprovalResolveError;
+use crate::local_questions::{
+  LocalQuestionResolveError, LocalRunQuestionHandler, LocalRunQuestionRegistry,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalRunRecord {
@@ -153,6 +156,7 @@ type TenantPreferencesMap = BTreeMap<String, BTreeMap<String, serde_json::Value>
 pub struct LocalEngineState {
   runs: Arc<Mutex<HashMap<Uuid, RunEntry>>>,
   preferences: Arc<Mutex<TenantPreferencesMap>>,
+  questions: LocalRunQuestionRegistry,
   harness: crate::local_harness::LocalHarnessState,
   notebooks: crate::local_notebooks::LocalNotebooksState,
   base_dir: PathBuf,
@@ -162,11 +166,13 @@ impl LocalEngineState {
   pub fn new(base_dir: PathBuf) -> Self {
     let initial_prefs = load_preferences_from_disk(&base_dir);
     let hydrated_runs = hydrate_runs_from_disk(&base_dir);
+    let questions = LocalRunQuestionRegistry::new();
     let harness = crate::local_harness::LocalHarnessState::new(base_dir.clone());
     let notebooks = crate::local_notebooks::LocalNotebooksState::new(base_dir.clone());
     Self {
       runs: Arc::new(Mutex::new(hydrated_runs)),
       preferences: Arc::new(Mutex::new(initial_prefs)),
+      questions,
       harness,
       notebooks,
       base_dir,
@@ -175,6 +181,10 @@ impl LocalEngineState {
 
   pub fn base_dir(&self) -> &Path {
     &self.base_dir
+  }
+
+  pub fn questions(&self) -> &LocalRunQuestionRegistry {
+    &self.questions
   }
 
   pub fn harness(&self) -> &crate::local_harness::LocalHarnessState {
@@ -338,12 +348,58 @@ fn default_studio_runs_dir() -> PathBuf {
     .join("studio-runs")
 }
 
+const BUNDLED_PRICING_YAML: &str = include_str!("../../../config/pricing.prod.yml");
+
+pub(crate) fn should_seed_bundled_pricing_env(
+  explicit_env: Option<&str>,
+  home_dir: Option<&Path>,
+) -> bool {
+  if explicit_env.is_some_and(|val| !val.trim().is_empty()) {
+    return false;
+  }
+  if home_dir.is_some_and(|home| home.join(".yanshi").join("pricing.yml").is_file()) {
+    return false;
+  }
+  true
+}
+
+pub(crate) fn materialize_bundled_pricing_table(base_dir: &Path) -> std::io::Result<PathBuf> {
+  std::fs::create_dir_all(base_dir)?;
+  let dst = base_dir.join("_bundled_pricing.yml");
+  let tmp = base_dir.join(format!("_bundled_pricing.yml.tmp.{}", Uuid::new_v4()));
+  std::fs::write(&tmp, BUNDLED_PRICING_YAML.as_bytes())?;
+  std::fs::rename(tmp, &dst)?;
+  Ok(dst)
+}
+
 pub(crate) fn load_user_dotenv() {
-  let _ = dotenvy::dotenv();
-  if let Some(home) = dirs::home_dir() {
-    let user_env = home.join(".yanshi").join(".env");
-    if user_env.is_file() {
-      let _ = dotenvy::from_path(user_env);
+  static DOTENV_ONCE: std::sync::Once = std::sync::Once::new();
+  DOTENV_ONCE.call_once(|| {
+    let _ = dotenvy::dotenv();
+    if let Some(home) = dirs::home_dir() {
+      let user_env = home.join(".yanshi").join(".env");
+      if user_env.is_file() {
+        let _ = dotenvy::from_path(user_env);
+      }
+    }
+  });
+}
+
+/// Initialize process environment (`~/.yanshi/.env` + bundled baseline
+/// `pricing.prod.yml` fallback) synchronously on the main thread before Tokio
+/// or Tauri worker threads are spawned.
+pub fn bootstrap_process_env() {
+  load_user_dotenv();
+  let explicit = std::env::var("YANSHI_PRICING_TABLE").ok();
+  let home = dirs::home_dir();
+  if should_seed_bundled_pricing_env(explicit.as_deref(), home.as_deref()) {
+    let base_dir = default_studio_runs_dir();
+    if let Ok(path) = materialize_bundled_pricing_table(&base_dir) {
+      // SAFETY: `bootstrap_process_env` runs synchronously at the start of
+      // `main()` before any Tokio or Tauri worker threads exist.
+      unsafe {
+        std::env::set_var("YANSHI_PRICING_TABLE", path);
+      }
     }
   }
 }
@@ -421,6 +477,11 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
     .route(
       "/v1/runs/:id/approvals/:request_id",
       post(decide_run_approval),
+    )
+    .route("/v1/runs/:id/questions", get(list_run_questions))
+    .route(
+      "/v1/runs/:id/questions/:question_id",
+      post(answer_run_question),
     )
     .route("/v1/runs/:id/debug", get(get_run_debug))
     .route("/v1/runs/:id/events", get(stream_events))
@@ -908,7 +969,12 @@ async fn execute_local_flow(
 
     let mut exec_cfg = FlowExecutionConfig::concurrent(8)
       .with_run_base_dir(base_dir.clone())
-      .with_cancellation_token(cancel_token.clone());
+      .with_cancellation_token(cancel_token.clone())
+      .with_question_handler(Arc::new(LocalRunQuestionHandler::new(
+        run_id,
+        state.questions.clone(),
+        cancel_token.clone(),
+      )));
     if let Some(limit) = flow_def
       .effective_cost_limit(cost_limit_usd)
       .map_err(anyhow::Error::msg)?
@@ -949,6 +1015,7 @@ async fn execute_local_flow(
   }
   .await;
 
+  state.questions.clear_run(run_id);
   if let Some(ctrl) = &debug_controller {
     ctrl.abort();
   }
@@ -1242,6 +1309,72 @@ async fn decide_run_approval(
   }
 }
 
+#[derive(Debug, Deserialize)]
+struct AnswerRunQuestionRequest {
+  answer: String,
+}
+
+async fn list_run_questions(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(run_id): RoutePath<Uuid>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    if !guard
+      .get(&run_id)
+      .is_some_and(|entry| entry.record.tenant_id == tenant)
+    {
+      return error_json(StatusCode::NOT_FOUND, &format!("run {run_id} not found"));
+    }
+  }
+  let pending = state.questions.list(run_id);
+  Json(serde_json::json!({ "pending": pending })).into_response()
+}
+
+async fn answer_run_question(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath((run_id, question_id)): RoutePath<(Uuid, String)>,
+  Json(body): Json<AnswerRunQuestionRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    if !guard
+      .get(&run_id)
+      .is_some_and(|entry| entry.record.tenant_id == tenant)
+    {
+      return error_json(StatusCode::NOT_FOUND, &format!("run {run_id} not found"));
+    }
+  }
+  let trimmed = body.answer.trim();
+  if trimmed.is_empty() {
+    return error_json(StatusCode::BAD_REQUEST, "answer must not be empty");
+  }
+
+  match state
+    .questions
+    .answer(run_id, &question_id, trimmed.to_string())
+  {
+    Ok(()) => Json(serde_json::json!({
+      "run_id": run_id,
+      "question_id": question_id,
+      "resolved": true,
+    }))
+    .into_response(),
+    Err(LocalQuestionResolveError::WaiterGone) => error_json(
+      StatusCode::BAD_REQUEST,
+      &format!("question {question_id} cannot be answered: node future already dropped"),
+    ),
+    Err(LocalQuestionResolveError::NotFound) => error_json(
+      StatusCode::NOT_FOUND,
+      &format!("no pending question {question_id} for run {run_id}"),
+    ),
+  }
+}
+
 #[derive(Debug, Serialize)]
 struct DebugStatusResponse {
   run_id: Uuid,
@@ -1311,6 +1444,7 @@ async fn post_run_action(
         return error_json(StatusCode::NOT_FOUND, "run not found");
       };
       entry.cancel_token.cancel();
+      state.questions.clear_run(run_id);
       if let Some(ctrl) = entry.debug_controller.take() {
         ctrl.abort();
       }
@@ -2416,7 +2550,14 @@ nodes:
       .await
       .expect("inspect flagship json");
     assert!(inspect_res.valid);
-    assert_eq!(inspect_res.nodes.len(), 11);
+    assert_eq!(inspect_res.nodes.len(), 19);
+    assert!(
+      inspect_res
+        .nodes
+        .iter()
+        .any(|n| n.node_type == "illustration"),
+      "flagship tech_slides_video.yml must expose illustration node"
+    );
 
     // 2. Run a 2-node one-click `release` slide-rendering workflow end-to-end
     let slide_yaml = r#"name: smoke_slide_release
@@ -2452,6 +2593,7 @@ nodes:
     parameters:
       width: 1280
       progressive: false
+      export_pptx: true
 "#;
 
     let created: serde_json::Value = client
@@ -2502,6 +2644,14 @@ nodes:
       .expect("artifacts json");
     let list = arts["artifacts"].as_array().expect("artifacts array");
     assert!(!list.is_empty());
+    assert!(
+      list.iter().any(|a| {
+        a["name"].as_str().is_some_and(|n| n.ends_with(".pptx"))
+          && a["mime_type"].as_str()
+            == Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+      }),
+      "native OOXML .pptx artifact must be registered on desktop runs"
+    );
     let html_art = list
       .iter()
       .find(|a| a["mime_type"].as_str() == Some("text/html"))
@@ -3084,5 +3234,153 @@ nodes:
         .and_then(|v| v.to_str().ok()),
       Some("application/javascript; charset=utf-8")
     );
+  }
+
+  #[tokio::test]
+  async fn local_engine_run_questions_enforce_tenant_and_unblock_handler() {
+    use yanshi_core::run_context::RunQuestionHandler;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = LocalEngineState::new(temp.path().to_path_buf());
+    let questions_reg = state.questions().clone();
+    let app = build_local_router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+      let _ = axum::serve(listener, app).await;
+    });
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no_proxy client");
+
+    let created: serde_json::Value = client
+      .post(format!("{base_url}/v1/runs"))
+      .header("X-Yanshi-Tenant", "ops")
+      .json(&serde_json::json!({
+        "workflow": SAMPLE_YAML,
+        "run_mode": "debug",
+      }))
+      .send()
+      .await
+      .expect("create run")
+      .json()
+      .await
+      .expect("create json");
+    let run_id_str = created["run_id"].as_str().expect("run_id").to_string();
+    let run_id = Uuid::parse_str(&run_id_str).expect("valid uuid");
+
+    let handler =
+      LocalRunQuestionHandler::new(run_id, questions_reg.clone(), FlowCancellationToken::new());
+    let waiter = tokio::spawn(async move {
+      handler
+        .ask_user("clarify_arch", "Use PostgreSQL or SQLite?")
+        .await
+    });
+
+    // Wait briefly until the question is parked
+    let mut question_id = String::new();
+    for _ in 0..40 {
+      let parked = questions_reg.list(run_id);
+      if let Some(first) = parked.first() {
+        question_id = first.question_id.clone();
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!question_id.is_empty(), "question should be parked");
+
+    // Cross-tenant cannot list or answer
+    let cross_list = client
+      .get(format!("{base_url}/v1/runs/{run_id}/questions"))
+      .header("X-Yanshi-Tenant", "other")
+      .send()
+      .await
+      .expect("cross list");
+    assert_eq!(cross_list.status(), StatusCode::NOT_FOUND);
+
+    // Owner tenant sees pending question
+    let list_json: serde_json::Value = client
+      .get(format!("{base_url}/v1/runs/{run_id}/questions"))
+      .header("X-Yanshi-Tenant", "ops")
+      .send()
+      .await
+      .expect("list questions")
+      .json()
+      .await
+      .expect("list json");
+    assert_eq!(list_json["pending"].as_array().map(Vec::len), Some(1));
+    assert_eq!(list_json["pending"][0]["node_id"], "clarify_arch");
+
+    // Empty answer is rejected with 400
+    let empty_ans = client
+      .post(format!(
+        "{base_url}/v1/runs/{run_id}/questions/{question_id}"
+      ))
+      .header("X-Yanshi-Tenant", "ops")
+      .json(&serde_json::json!({ "answer": "   " }))
+      .send()
+      .await
+      .expect("empty answer");
+    assert_eq!(empty_ans.status(), StatusCode::BAD_REQUEST);
+
+    // Valid answer unblocks the parked handler
+    let ans_json: serde_json::Value = client
+      .post(format!(
+        "{base_url}/v1/runs/{run_id}/questions/{question_id}"
+      ))
+      .header("X-Yanshi-Tenant", "ops")
+      .json(&serde_json::json!({ "answer": "PostgreSQL 17 with pgvector" }))
+      .send()
+      .await
+      .expect("answer question")
+      .json()
+      .await
+      .expect("answer json");
+    assert_eq!(ans_json["resolved"], true);
+
+    let resolved_text = waiter.await.expect("waiter task").expect("handler answer");
+    assert_eq!(resolved_text, "PostgreSQL 17 with pgvector");
+
+    let _ = client
+      .post(format!("{base_url}/v1/runs/{run_id}:cancel"))
+      .header("X-Yanshi-Tenant", "ops")
+      .send()
+      .await;
+  }
+
+  #[test]
+  fn bundled_pricing_table_materializes_and_parses_production_catalog() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    assert!(should_seed_bundled_pricing_env(None, Some(temp.path())));
+    assert!(!should_seed_bundled_pricing_env(
+      Some("/custom/pricing.yml"),
+      Some(temp.path())
+    ));
+
+    let user_cfg_dir = temp.path().join(".yanshi");
+    std::fs::create_dir_all(&user_cfg_dir).expect("mkdir .yanshi");
+    std::fs::write(user_cfg_dir.join("pricing.yml"), "models: {}\n").expect("write user pricing");
+    assert!(
+      !should_seed_bundled_pricing_env(None, Some(temp.path())),
+      "existing ~/.yanshi/pricing.yml must take precedence over bundled fallback"
+    );
+
+    let runs_dir = temp.path().join("studio-runs");
+    let path = materialize_bundled_pricing_table(&runs_dir).expect("materialize bundled pricing");
+    let table =
+      yanshi_llm::pricing::PricingTable::load_from_yaml(&path).expect("parse pricing.prod.yml");
+    assert!(table.default.is_some(), "default fallback row expected");
+    assert!(
+      table.models.len() >= 40,
+      "expected full production model pricing catalog, got {}",
+      table.models.len()
+    );
+    assert!(table.models.contains_key("gemini-3.1-flash-image"));
+    assert!(table.models.contains_key("qwen3-tts-flash"));
   }
 }

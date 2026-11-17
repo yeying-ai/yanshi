@@ -85,6 +85,18 @@ export const NODE_PALETTE: NodePaletteItem[] = [
     },
   },
   {
+    type: 'illustration',
+    label: '概念艺术插图 (illustration)',
+    category: '多模态生成',
+    description: '艺术指导级概念配图与批量幻灯片插画生成（支持无杂乱文字约束与统一画风）',
+    defaultInputKey: 'concept',
+    defaultParameters: {
+      concept: '{{ concept }}',
+      style: 'editorial_tech',
+      aspect_ratio: '16:9',
+    },
+  },
+  {
     type: 'text_to_image',
     label: '文生图 (text_to_image)',
     category: '多模态生成',
@@ -121,11 +133,12 @@ export const NODE_PALETTE: NodePaletteItem[] = [
     type: 'render_slides',
     label: '幻灯片渲染 (render_slides)',
     category: '内容渲染器',
-    description: '将结构化 deck JSON 渲染为高清 PNG/SVG 与交互式 HTML 课件',
+    description: '将结构化 deck JSON 渲染为原生 OOXML .pptx、16:9 PDF 讲义、PNG/SVG 与 HTML 课件',
     defaultInputKey: 'deck',
     defaultParameters: {
       width: 1920,
       progressive: true,
+      export_pptx: true,
     },
   },
   {

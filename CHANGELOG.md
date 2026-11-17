@@ -111,6 +111,14 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Tauri desktop (`Yanshi Studio`) parity with gateway Studio.** The
+  zero-Postgres local engine now serves `GET /v1/runs/{id}/questions` and
+  `POST /v1/runs/{id}/questions/{question_id}` via `LocalRunQuestionHandler`
+  so inline `type: agent` workflows (e.g. `backend_project_planner`) can
+  pause on `ask_user` prompts offline, seeds `YANSHI_PRICING_TABLE` from
+  the bundled `config/pricing.prod.yml` when no user pricing table is
+  configured, and registers the `illustration` node and native OOXML
+  `export_pptx` defaults in the Studio DAG editor.
 - **Anthropic structured output on current Claude models.** A `JsonSchema`
   response format was emulated with a forced tool call, which Opus 5.5,
   Sonnet 5.5 and Fable 5.1 reject with a 400. Claude 4.5 and later now get

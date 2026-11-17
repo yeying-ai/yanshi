@@ -125,6 +125,9 @@ fn main() {
   sanitize_macos_dyld_library_path();
 
   #[cfg(not(any(target_os = "android", target_os = "ios")))]
+  yanshi_studio_lib::local_engine::bootstrap_process_env();
+
+  #[cfg(not(any(target_os = "android", target_os = "ios")))]
   match parse_launch_mode() {
     Ok(LaunchMode::Desktop) => {}
     Ok(LaunchMode::Help) => {

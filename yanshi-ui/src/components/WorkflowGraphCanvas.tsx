@@ -73,10 +73,19 @@ function nodeTypePalette(nodeType: string): { label: string; accent: string; tin
     return { label: nodeType, accent: '#c84b24', tint: '#fff1ec' };
   }
   if (
+    normalized === 'illustration' ||
+    normalized === 'text_to_image' ||
+    normalized === 'image_gen' ||
+    normalized === 'image_edit'
+  ) {
+    return { label: nodeType, accent: '#be185d', tint: '#fdf2f8' };
+  }
+  if (
     normalized === 'render_document' ||
     normalized === 'render_markdown' ||
     normalized === 'render_mindmap' ||
     normalized === 'render_table' ||
+    normalized === 'render_svg' ||
     normalized === 'figure' ||
     normalized === 'markmap'
   ) {

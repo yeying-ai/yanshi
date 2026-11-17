@@ -8,6 +8,8 @@ pub mod local_engine;
 pub mod local_harness;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod local_notebooks;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod local_questions;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resolve_desktop_webview_url(api_base: &str) -> Result<WebviewUrl, Box<dyn std::error::Error>> {
