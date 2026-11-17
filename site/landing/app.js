@@ -5,11 +5,12 @@
 
 (() => {
   const TITLES = {
-    zh: "Yanshi 偃师 · 确定性工作流与智能体多模态内容生产引擎",
-    en: "Yanshi · Multimodal Content-Production Runtime in Rust",
+    zh: "Yanshi 偃师 · Rust 确定性 DAG 工作流与智能体多模态内容生产引擎",
+    en: "Yanshi · Deterministic DAG Workflow & Multimodal AI Agent Runtime in Rust",
   };
 
   const html = document.documentElement;
+  const assetPrefix = html.dataset.assetPrefix || "";
   const schemeMeta = document.querySelector('meta[name="color-scheme"]');
   const darkMql = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -162,14 +163,14 @@
     codeEl.innerHTML = prefixHtml + highlightBlock(raw, codeEl.dataset.hl);
   });
 
-  // Bilingual controller
+  // Bilingual route & fallback controller
   function getLang() {
     return html.dataset.lang === "zh" ? "zh" : "en";
   }
 
   let activeWorkflowKey = null;
 
-  function applyLang(lang, persist) {
+  function applyLang(lang) {
     const normalized = lang === "zh" ? "zh" : "en";
     html.dataset.lang = normalized;
     html.lang = normalized === "zh" ? "zh-CN" : "en";
@@ -177,21 +178,43 @@
     if (activeWorkflowKey) {
       updateModalStatsText(activeWorkflowKey);
     }
-    if (persist) {
-      try {
-        localStorage.setItem("yanshi-lang", normalized);
-      } catch {
-        // Ignore storage errors
-      }
-    }
   }
 
-  document.title = TITLES[getLang()];
-
   const langBtn = document.getElementById("lang-toggle");
+  const isPreRenderedSingleLang =
+    !document.querySelector("[data-i18n-zh]") ||
+    !document.querySelector("[data-i18n-en]");
+
   if (langBtn) {
-    langBtn.addEventListener("click", () => {
-      applyLang(getLang() === "zh" ? "en" : "zh", true);
+    const baseHref = langBtn.getAttribute("href") || "en/";
+    const syncLangHref = () => {
+      if (!isPreRenderedSingleLang) {
+        return;
+      }
+      let targetBase = baseHref;
+      if (location.protocol === "file:" && targetBase.endsWith("/")) {
+        targetBase += "index.html";
+      }
+      try {
+        const params = new URLSearchParams(location.search);
+        params.delete("lang");
+        const qs = params.toString();
+        langBtn.setAttribute(
+          "href",
+          targetBase + (qs ? `?${qs}` : "") + location.hash
+        );
+      } catch {}
+    };
+    syncLangHref();
+    langBtn.addEventListener("pointerenter", syncLangHref, { passive: true });
+    langBtn.addEventListener("focus", syncLangHref);
+    langBtn.addEventListener("click", (event) => {
+      if (!isPreRenderedSingleLang) {
+        event.preventDefault();
+        applyLang(getLang() === "zh" ? "en" : "zh");
+        return;
+      }
+      syncLangHref();
     });
   }
 
@@ -232,8 +255,6 @@
           ? event.newValue
           : "light dark";
       schemeMeta.content = next;
-    } else if (event.key === "yanshi-lang" && event.newValue) {
-      applyLang(event.newValue, false);
     }
   });
 
@@ -402,6 +423,85 @@
     .map((el) => el.dataset.workflow)
     .filter(Boolean);
 
+  // Lazy-load 203 KB workflows-data.js off the critical rendering path
+  let workflowsPromise = null;
+
+  function ensureWorkflowsLoaded() {
+    if (window.YANSHI_WORKFLOWS) {
+      return Promise.resolve(window.YANSHI_WORKFLOWS);
+    }
+    if (!workflowsPromise) {
+      workflowsPromise = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = `${assetPrefix}workflows-data.js`;
+        script.async = true;
+        script.setAttribute("fetchpriority", "low");
+        script.onload = () => resolve(window.YANSHI_WORKFLOWS || {});
+        script.onerror = () => {
+          workflowsPromise = null;
+          reject(new Error("Failed to load workflows-data.js"));
+        };
+        document.head.appendChild(script);
+      });
+    }
+    return workflowsPromise;
+  }
+
+  const catalogueSection = document.getElementById("catalogue");
+  if (catalogueSection) {
+    catalogueSection.addEventListener(
+      "pointerenter",
+      () => {
+        ensureWorkflowsLoaded().catch(() => {});
+      },
+      { once: true, passive: true }
+    );
+    catalogueSection.addEventListener(
+      "focusin",
+      () => {
+        ensureWorkflowsLoaded().catch(() => {});
+      },
+      { once: true }
+    );
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            observer.disconnect();
+            ensureWorkflowsLoaded().catch(() => {});
+          }
+        },
+        { rootMargin: "320px 0px" }
+      );
+      observer.observe(catalogueSection);
+    }
+  }
+
+  document.querySelectorAll('a[href="#catalogue"]').forEach((anchor) => {
+    anchor.addEventListener(
+      "pointerenter",
+      () => {
+        ensureWorkflowsLoaded().catch(() => {});
+      },
+      { once: true, passive: true }
+    );
+  });
+
+  function syncWorkflowQuery(filename) {
+    if (location.protocol !== "http:" && location.protocol !== "https:") {
+      return;
+    }
+    try {
+      const url = new URL(location.href);
+      if (filename) {
+        url.searchParams.set("workflow", filename);
+      } else {
+        url.searchParams.delete("workflow");
+      }
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch {}
+  }
+
   function getWorkflowData(filename) {
     const store = window.YANSHI_WORKFLOWS || {};
     return store[filename] || null;
@@ -459,7 +559,7 @@
 
     // Render Download & GitHub links
     if (modalDownload) {
-      modalDownload.href = `workflows/${encodeURIComponent(wf.file)}`;
+      modalDownload.href = `${assetPrefix}workflows/${encodeURIComponent(wf.file)}`;
       modalDownload.setAttribute("download", wf.file);
     }
     if (modalGithub) {
@@ -481,11 +581,22 @@
       modalCodeScroll.scrollTop = 0;
       modalCodeScroll.scrollLeft = 0;
     }
+    syncWorkflowQuery(filename);
     return true;
   }
 
-  function openWorkflowModal(filename) {
-    if (!modal || !renderWorkflowIntoModal(filename)) {
+  async function openWorkflowModal(filename) {
+    if (!modal) {
+      return;
+    }
+    try {
+      await ensureWorkflowsLoaded();
+    } catch {
+      // Graceful fallback: navigate directly to the crawlable .yml file
+      location.href = `${assetPrefix}workflows/${encodeURIComponent(filename)}`;
+      return;
+    }
+    if (!renderWorkflowIntoModal(filename)) {
       return;
     }
     if (!modal.open) {
@@ -503,15 +614,29 @@
     renderWorkflowIntoModal(workflowOrder[nextIdx]);
   }
 
-  // Bind every template card for instant in-page YAML inspection
+  function isPlainPrimaryClick(event) {
+    return (
+      event.button === 0 &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey
+    );
+  }
+
+  // Bind every template card & crawlable .yml link for instant in-page YAML inspection
   tplItems.forEach((card) => {
     const filename = card.dataset.workflow;
     if (!filename) {
       return;
     }
     card.addEventListener("click", (event) => {
-      // Avoid double firing if clicking an inner button that bubbles
-      if (event.target.closest("a")) {
+      const anchor = event.target.closest("a");
+      if (anchor) {
+        if (anchor.hasAttribute("data-workflow-link") && isPlainPrimaryClick(event)) {
+          event.preventDefault();
+          openWorkflowModal(filename);
+        }
         return;
       }
       openWorkflowModal(filename);
@@ -565,13 +690,15 @@
   if (modal) {
     modal.addEventListener("close", () => {
       modal.returnValue = "";
+      activeWorkflowKey = null;
+      syncWorkflowQuery(null);
     });
   }
 
   // Optional query deep-link (?workflow=illustrated_slides.yml)
   try {
     const wfParam = new URLSearchParams(location.search).get("workflow");
-    if (wfParam && getWorkflowData(wfParam)) {
+    if (wfParam && workflowOrder.includes(wfParam)) {
       openWorkflowModal(wfParam);
     }
   } catch {}

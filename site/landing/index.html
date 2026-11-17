@@ -1,14 +1,15 @@
 <!doctype html>
-<html lang="zh-CN" data-lang="zh">
+<html lang="zh-CN" data-lang="zh" data-asset-prefix="">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f7fa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#090e14" />
     <script>
       (() => {
-        let params = null;
         try {
-          params = new URLSearchParams(location.search);
+          const params = new URLSearchParams(location.search);
           const qTheme = params.get("theme");
           const scheme = (qTheme === "light" || qTheme === "dark")
             ? qTheme
@@ -16,33 +17,54 @@
           if (scheme === "light" || scheme === "dark") {
             document.querySelector('meta[name="color-scheme"]').content = scheme;
           }
+          const qLang = params.get("lang");
+          const pageLang = document.documentElement.dataset.lang || "zh";
+          if ((qLang === "zh" || qLang === "en") && qLang !== pageLang && location.protocol !== "file:") {
+            params.delete("lang");
+            const qs = params.toString();
+            const target = qLang === "en" ? "en/" : "../";
+            location.replace(target + (qs ? "?" + qs : "") + location.hash);
+          }
         } catch {}
-        let lang = null;
-        try {
-          const q = params ? params.get("lang") : null;
-          if (q === "zh" || q === "en") lang = q;
-          else lang = localStorage.getItem("yanshi-lang");
-        } catch {}
-        if (lang !== "zh" && lang !== "en") {
-          lang = (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
-        }
-        document.documentElement.dataset.lang = lang;
-        document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
       })();
     </script>
-    <title>Yanshi 偃师 · 确定性工作流与智能体多模态内容生产引擎</title>
+    <!-- SEO_HEAD_START -->
+    <title>Yanshi 偃师 · Rust 确定性 DAG 工作流与智能体多模态内容生产引擎</title>
     <meta
       name="description"
-      content="Yanshi (偃师) is a multimodal content-production runtime in Rust built on deterministic DAG workflows and agent-native loops — turning raw sources into editable PPTX, narrated 1080p MP4, PDF, XLSX, MP3, and validated diagrams."
+      content="Yanshi（偃师）是基于 Rust 构建的开源确定性 DAG 工作流与原生智能体多模态内容生产引擎。输入主题、网页、GitHub 仓库、学术 PDF 或音视频，一键生成原生可编辑 OOXML PPTX、1080p 配音讲解视频、16:9 PDF、Excel 实验表、双人播客 MP3 与自校验 D2/Typst/TikZ 架构图。"
     />
-    <meta property="og:title" content="Yanshi 偃师 · Multimodal Content-Production Runtime in Rust" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <link rel="canonical" href="https://yeying-ai.github.io/yanshi/" />
+    <link rel="alternate" hreflang="zh-CN" href="https://yeying-ai.github.io/yanshi/" />
+    <link rel="alternate" hreflang="zh" href="https://yeying-ai.github.io/yanshi/" />
+    <link rel="alternate" hreflang="en" href="https://yeying-ai.github.io/yanshi/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://yeying-ai.github.io/yanshi/en/" />
+    <link rel="sitemap" type="application/xml" title="Sitemap" href="https://yeying-ai.github.io/yanshi/sitemap.xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Yanshi 偃师" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:title" content="Yanshi 偃师 · Rust 确定性 DAG 工作流与智能体多模态内容生产引擎" />
     <meta
       property="og:description"
-      content="Sources in, finished deliverables out: native OOXML .pptx, 16:9 .pdf, narrated .mp4, .mp3, .xlsx, and validated D2/Typst/TikZ diagrams on one inspectable Rust DAG + Agent runtime."
+      content="把原始素材转化为可交付成品：原生可编辑 OOXML .pptx、1080p 配音讲解视频、16:9 .pdf、.xlsx、双人播客 .mp3 与自校验架构图。"
     />
-    <meta property="og:type" content="website" />
     <meta property="og:url" content="https://yeying-ai.github.io/yanshi/" />
-    <meta property="og:image" content="https://yeying-ai.github.io/yanshi/assets/slide-route-illustration.webp" />
+    <meta property="og:image" content="https://yeying-ai.github.io/yanshi/assets/og-card.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Yanshi 偃师 — Rust 确定性 DAG 与多模态智能体内容生产引擎概览" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Yanshi 偃师 · Rust 确定性 DAG 工作流与智能体多模态内容生产引擎" />
+    <meta
+      name="twitter:description"
+      content="输入主题、GitHub 仓库、PDF 或录音，直接生成可编辑 OOXML .pptx、1080p 配音视频、PDF、Excel 与自校验 D2/TikZ 图表。"
+    />
+    <meta name="twitter:image" content="https://yeying-ai.github.io/yanshi/assets/og-card.png" />
+    <meta name="twitter:image:alt" content="Yanshi 偃师 — Rust 确定性 DAG 与多模态智能体内容生产引擎概览" />
+    <!-- SEO_HEAD_END -->
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -90,18 +112,23 @@
             <span data-i18n-zh>五层架构</span>
             <span data-i18n-en>Architecture</span>
           </a>
+          <a href="#faq">
+            <span data-i18n-zh>常见问题</span>
+            <span data-i18n-en>FAQ</span>
+          </a>
         </nav>
 
         <div class="header-actions">
-          <button
-            type="button"
+          <a
             id="lang-toggle"
             class="lang-btn"
+            href="en/"
+            hreflang="en"
             aria-label="Switch language / 切换语言"
           >
             <span data-i18n-zh>EN</span>
             <span data-i18n-en>中文</span>
-          </button>
+          </a>
 
           <button
             type="button"
@@ -489,7 +516,9 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-illustration.webp"
-                  alt="Yanshi slide routed to IllustrationNode showing isometric pipeline bottleneck breaking into smooth zero-copy channel"
+                  alt="Yanshi IllustrationNode 生成的等距 3D 概念插画幻灯片：高并发管道瓶颈突破为零拷贝通道"
+                  data-alt-zh="Yanshi IllustrationNode 生成的等距 3D 概念插画幻灯片：高并发管道瓶颈突破为零拷贝通道"
+                  data-alt-en="Yanshi slide routed to IllustrationNode showing isometric pipeline bottleneck breaking into smooth zero-copy channel"
                   width="1280"
                   height="720"
                   loading="lazy"
@@ -524,7 +553,9 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-diagram.webp"
-                  alt="Yanshi slide routed to FigureNode compiling D2 kernel SQ and CQ ring buffer architecture diagram"
+                  alt="Yanshi FigureNode 编译的 D2 内核 SQ/CQ 环形队列架构拓扑幻灯片"
+                  data-alt-zh="Yanshi FigureNode 编译的 D2 内核 SQ/CQ 环形队列架构拓扑幻灯片"
+                  data-alt-en="Yanshi slide routed to FigureNode compiling D2 kernel SQ and CQ ring buffer architecture diagram"
                   width="1280"
                   height="720"
                   loading="lazy"
@@ -557,7 +588,9 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-structured.webp"
-                  alt="Yanshi slide routed to structured_panel showing syntax-highlighted Rust io_uring code and editable callout cards"
+                  alt="Yanshi 纯 Rust OOXML 写入器生成的原生可编辑 PowerPoint 形状与 Rust io_uring 语法高亮代码幻灯片"
+                  data-alt-zh="Yanshi 纯 Rust OOXML 写入器生成的原生可编辑 PowerPoint 形状与 Rust io_uring 语法高亮代码幻灯片"
+                  data-alt-en="Yanshi slide routed to structured_panel showing syntax-highlighted Rust io_uring code and editable callout cards"
                   width="1280"
                   height="720"
                   loading="lazy"
@@ -925,7 +958,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 1. illustrated_slides -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="illustrated_slides.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">illustrated_slides.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/illustrated_slides.yml" data-workflow-link="illustrated_slides.yml">illustrated_slides.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -947,7 +982,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 2. tech_slides_video -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="tech_slides_video.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">tech_slides_video.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/tech_slides_video.yml" data-workflow-link="tech_slides_video.yml">tech_slides_video.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -970,7 +1007,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 3. slides -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="slides.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">slides.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/slides.yml" data-workflow-link="slides.yml">slides.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -992,7 +1031,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 4. video_overview -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="video_overview.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">video_overview.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/video_overview.yml" data-workflow-link="video_overview.yml">video_overview.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1013,7 +1054,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 5. audio_overview -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="audio_overview.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">audio_overview.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/audio_overview.yml" data-workflow-link="audio_overview.yml">audio_overview.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1033,7 +1076,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 6. repo_architecture -->
             <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="repo_architecture.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">repo_architecture.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/repo_architecture.yml" data-workflow-link="repo_architecture.yml">repo_architecture.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1055,7 +1100,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 7. backend_project_planner -->
             <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="backend_project_planner.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">backend_project_planner.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/backend_project_planner.yml" data-workflow-link="backend_project_planner.yml">backend_project_planner.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1077,7 +1124,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 8. paper_reader -->
             <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="paper_reader.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">paper_reader.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/paper_reader.yml" data-workflow-link="paper_reader.yml">paper_reader.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1099,7 +1148,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 9. video_summarizer -->
             <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="video_summarizer.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">video_summarizer.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/video_summarizer.yml" data-workflow-link="video_summarizer.yml">video_summarizer.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1121,7 +1172,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 10. report -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="report.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">report.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/report.yml" data-workflow-link="report.yml">report.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1143,7 +1196,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 11. infographic -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="infographic.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">infographic.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/infographic.yml" data-workflow-link="infographic.yml">infographic.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1164,7 +1219,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 12. mindmap -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="mindmap.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">mindmap.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/mindmap.yml" data-workflow-link="mindmap.yml">mindmap.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1186,7 +1243,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 13. circuit_diagram -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="circuit_diagram.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">circuit_diagram.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/circuit_diagram.yml" data-workflow-link="circuit_diagram.yml">circuit_diagram.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1207,7 +1266,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 14. flashcards -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="flashcards.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">flashcards.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/flashcards.yml" data-workflow-link="flashcards.yml">flashcards.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1228,7 +1289,9 @@ let result = flow.run().await?;</code></pre>
             <!-- 15. quiz -->
             <article class="tpl-item spotlight-card" data-cat="study" data-workflow="quiz.yml">
               <div class="tpl-top">
-                <button type="button" class="tpl-trigger">quiz.yml</button>
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/quiz.yml" data-workflow-link="quiz.yml">quiz.yml</a>
+                </h3>
                 <span class="tpl-preview-pill">
                   <span data-i18n-zh>查看 YAML</span>
                   <span data-i18n-en>View YAML</span>
@@ -1389,6 +1452,91 @@ let result = flow.run().await?;</code></pre>
           </div>
         </div>
       </section>
+
+      <!-- 6. TECHNICAL FAQ (Native Exclusive <details> Accordion + Schema.org FAQPage) -->
+      <section id="faq" class="section">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-heading-group">
+              <h2 class="section-title">
+                <span data-i18n-zh>常见问题与架构选型解答</span>
+                <span data-i18n-en>Technical FAQ &amp; Architecture Evaluation</span>
+              </h2>
+              <p class="section-desc">
+                <span data-i18n-zh>围绕可编辑产物格式、大模型接入、安全沙箱隔离以及与主流智能体框架的差异说明。</span>
+                <span data-i18n-en>Answers on native editable deliverables, model keys, OS-level sandboxing, and how Yanshi compares to Python agent stacks.</span>
+              </p>
+            </div>
+          </div>
+
+          <div class="faq-list">
+            <details class="faq-item" name="yanshi-faq" open>
+              <summary class="faq-question">
+                <span data-i18n-zh>Yanshi 生成的 .pptx 幻灯片是整页 AI 图片贴片，还是 PowerPoint / Keynote 原生可编辑组件？</span>
+                <span data-i18n-en>Are generated .pptx decks flat AI images or native editable PowerPoint shapes?</span>
+              </summary>
+              <div class="faq-answer">
+                <p>
+                  <span data-i18n-zh>是原生可编辑的 OOXML 演示文稿。Yanshi 内置纯 Rust 编写的 OOXML 写入器，直接输出标准 PowerPoint 形状（<code>&lt;p:sp&gt;</code>）、原生表格（<code>&lt;a:tbl&gt;</code>）、代码卡片与连线，在 PowerPoint、Keynote 或 WPS 中打开即可逐字编辑；同时按每页意图分流融合 D2/Typst/TikZ 矢量架构图与 6 种艺术风格概念插画，并同步导出 <code>16:9 .pdf</code> 与交互式 <code>.html</code>。</span>
+                  <span data-i18n-en>They are real, native OOXML presentations. Yanshi’s pure-Rust OOXML writer emits standard PowerPoint shapes (<code>&lt;p:sp&gt;</code>), native tables (<code>&lt;a:tbl&gt;</code>), code callouts, and connectors that open directly for text and layout editing in PowerPoint or Keynote — combined per-slide with verified D2/Typst/TikZ diagrams and 6 art-directed illustration styles, plus matching <code>16:9 .pdf</code> and <code>.html</code> exports.</span>
+                </p>
+              </div>
+            </details>
+
+            <details class="faq-item" name="yanshi-faq">
+              <summary class="faq-question">
+                <span data-i18n-zh>没有图像生成或语音 TTS API Key 可以运行么？支持哪些大模型服务商？</span>
+                <span data-i18n-en>Can I run workflows without image or TTS API keys, and which LLM providers are supported?</span>
+              </summary>
+              <div class="faq-answer">
+                <p>
+                  <span data-i18n-zh>完全可以。只需配置任一文本大模型 Key 即可开箱运行 <code>slides.yml</code>、<code>report.yml</code>、<code>repo_architecture.yml</code>、<code>backend_project_planner.yml</code>、<code>paper_reader.yml</code>、<code>mindmap.yml</code> 等绝大多数生成器。运行时原生支持 OpenAI、Anthropic Claude、Google Gemini、Moonshot（Kimi）、StepFun，以及任意兼容 OpenAI 接口的服务（如 DeepSeek、Qwen、本地 Ollama）。</span>
+                  <span data-i18n-en>Yes. A single text LLM key runs most Studio generators out of the box — including <code>slides.yml</code>, <code>report.yml</code>, <code>repo_architecture.yml</code>, <code>backend_project_planner.yml</code>, <code>paper_reader.yml</code>, and <code>mindmap.yml</code>. Yanshi natively supports OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, and any OpenAI-compatible endpoint (DeepSeek, Qwen, or local Ollama).</span>
+                </p>
+              </div>
+            </details>
+
+            <details class="faq-item" name="yanshi-faq">
+              <summary class="faq-question">
+                <span data-i18n-zh>Yanshi 与 LangGraph、Dify 或单一 AI PPT 工具有何核心区别？</span>
+                <span data-i18n-en>How does Yanshi differ from LangGraph, Dify, or single-purpose AI slide tools?</span>
+              </summary>
+              <div class="faq-answer">
+                <p>
+                  <span data-i18n-zh>Yanshi 将「确定性并发 DAG 工作流」、「原生 ReAct / Plan-Execute / 多智能体循环」与「运行期动态编译工作流」统一在同一套零运行时依赖耦合的 Rust L0 窄腰内核上：既编译为单一高性能静态二进制（调度与预算护栏开销低于 1ms，内置 44 模型硬性 <code>cost_limit_usd</code> 熔断），又以一等公民磁盘文件句柄（<code>FlowValue::File</code>）打通 PPTX、1080p 配音视频、PDF、Excel 与播客渲染，免除 Python 环境冲突与 Base64 内存膨胀。</span>
+                  <span data-i18n-en>Yanshi unifies deterministic concurrent DAGs, native autonomous agent loops (ReAct, Plan-Execute, Handoff/Blackboard/Debate), and runtime-compiled dynamic workflows on one narrow-waist Rust kernel. You get a single fast binary (&lt; 1ms scheduling overhead, built-in 44-model <code>cost_limit_usd</code> enforcement) and first-class <code>FlowValue::File</code> multimodal renderers (.pptx, 1080p .mp4, .pdf, .xlsx, .mp3) with zero Python dependency drift or Base64 memory bloat.</span>
+                </p>
+              </div>
+            </details>
+
+            <details class="faq-item" name="yanshi-faq">
+              <summary class="faq-question">
+                <span data-i18n-zh>在抓取外部网页、分析陌生代码仓库或运行绘图代码时如何保障宿主机安全？</span>
+                <span data-i18n-en>How does Yanshi isolate untrusted repos, web fetches, and LLM-generated code?</span>
+              </summary>
+              <div class="faq-answer">
+                <p>
+                  <span data-i18n-zh><code>SecurityProfile::Production</code> 采用默认闭锁（fail-closed）策略：宿主机工具自动运行于 macOS <code>sandbox-exec</code> 或 Linux <code>Landlock + seccomp + cgroup v2</code> 操作系统沙箱中；<code>code_exec</code> 绘图代码强制运行在无网络隔离容器（<code>ContainerBackend</code>）内；<code>repo_snapshot</code> 仅静态解析清单与导入树而不执行仓库代码；<code>HttpTool</code> 逐请求绑定 DNS 解析并归一化 IPv6 地址以阻断 DNS 重绑定 SSRF；技能包与插件默认强制校验 Ed25519 数字签名。</span>
+                  <span data-i18n-en>Under <code>SecurityProfile::Production</code>, security is fail-closed by default: shell and renderer subprocesses run inside OS sandboxes (macOS <code>sandbox-exec</code> or Linux <code>Landlock + seccomp + cgroup v2</code>), <code>code_exec</code> requires a zero-network <code>ContainerBackend</code>, <code>repo_snapshot</code> inspects manifests statically without executing code, <code>HttpTool</code> pins DNS per request to block TOCTOU SSRF, and marketplace skills/plugins verify Ed25519 signatures.</span>
+                </p>
+              </div>
+            </details>
+
+            <details class="faq-item" name="yanshi-faq">
+              <summary class="faq-question">
+                <span data-i18n-zh>多阶段长视频或深度报告生成中途失败，恢复执行会重复消耗大模型费用么？</span>
+                <span data-i18n-en>If a long multi-stage video or report run is interrupted, do resumed runs re-bill completed steps?</span>
+              </summary>
+              <div class="faq-answer">
+                <p>
+                  <span data-i18n-zh>不会。开启 <code>--checkpoint</code>（或通过网关与桌面端运行）后，每个节点完成即刻落盘检查点及已累计账单金额与产物 SHA-256 清单。执行 <code>yanshi workflow resume &lt;run_id&gt;</code> 时仅从尚未完成的下游节点继续并发调度，已成功的大模型与生图/配音节点直接复用落盘结果，不重复计费。</span>
+                  <span data-i18n-en>No. With <code>--checkpoint</code> (and automatically on the gateway/Studio), Yanshi persists node outputs, SHA-256 file manifests, and accrued spend after every node. Running <code>yanshi workflow resume &lt;run_id&gt;</code> replays completed upstream outputs from disk and executes only unfinished downstream nodes under the remaining cost budget.</span>
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- IN-PAGE NATIVE <dialog> WORKFLOW YAML INSPECTOR -->
@@ -1396,7 +1544,7 @@ let result = flow.run().await?;</code></pre>
       <div class="wf-modal-header">
         <div class="wf-modal-title-group">
           <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-          <h3 id="wf-modal-title" class="wf-modal-title">examples/generators/illustrated_slides.yml</h3>
+          <h2 id="wf-modal-title" class="wf-modal-title">examples/generators/illustrated_slides.yml</h2>
           <span id="wf-modal-stats" class="wf-modal-stats"></span>
         </div>
 
@@ -1479,12 +1627,17 @@ let result = flow.run().await?;</code></pre>
             <span data-i18n-zh>多模态指南</span>
             <span data-i18n-en>Multimodal Guide</span>
           </a>
+          <a href="#faq">
+            <span data-i18n-zh>常见问题</span>
+            <span data-i18n-en>FAQ</span>
+          </a>
+          <a href="llms.txt">llms.txt</a>
+          <a href="sitemap.xml">Sitemap</a>
           <a href="https://github.com/yeying-ai/yanshi" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
       </div>
     </footer>
 
-    <script src="workflows-data.js" defer></script>
     <script src="app.js" defer></script>
   </body>
 </html>
