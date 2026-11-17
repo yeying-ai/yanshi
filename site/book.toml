@@ -20,6 +20,6 @@ create-missing = false
 command = "python3 repo_links.py"
 
 [output.html]
-site-url = "/yanshi/docs/"
+site-url = "/docs/"
 git-repository-url = "https://github.com/yeying-ai/yanshi"
 edit-url-template = "https://github.com/yeying-ai/yanshi/edit/main/docs/{path}"

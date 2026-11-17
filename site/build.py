@@ -2,12 +2,12 @@
 """Assemble the GitHub Pages site into site/book/.
 
 Layout produced under site/book/:
-  index.html                               -> Chinese landing page (/yanshi/)
-  en/index.html                            -> English landing page (/yanshi/en/)
+  index.html                               -> Chinese landing page (https://yanshi.dev/)
+  en/index.html                            -> English landing page (https://yanshi.dev/en/)
   styles.css, app.js, assets/              -> Shared landing assets + 1200x630 og-card.png
   workflows/*.yml + workflows-data.js      -> Bundled Studio YAML workflows (lazy-loaded)
-  sitemap.xml, robots.txt, llms.txt        -> Search engine & AI crawler discovery manifests
-  docs/                                    -> mdBook manual (/yanshi/docs/)
+  CNAME, sitemap.xml, robots.txt, llms.txt -> Custom domain & search/AI discovery manifests
+  docs/                                    -> mdBook manual (https://yanshi.dev/docs/)
 """
 
 from datetime import datetime, timezone
@@ -21,7 +21,8 @@ import subprocess
 import sys
 from typing import Any
 
-SITE_URL = "https://yeying-ai.github.io/yanshi"
+CUSTOM_DOMAIN = "yanshi.dev"
+SITE_URL = f"https://{CUSTOM_DOMAIN}"
 REPO_URL = "https://github.com/yeying-ai/yanshi"
 
 SITE_DIR = Path(__file__).resolve().parent
@@ -156,6 +157,7 @@ REQUIRED_OUTPUTS = (
   OUT_DIR / "styles.css",
   OUT_DIR / "app.js",
   OUT_DIR / "workflows-data.js",
+  OUT_DIR / "CNAME",
   OUT_DIR / "sitemap.xml",
   OUT_DIR / "robots.txt",
   OUT_DIR / "llms.txt",
@@ -577,8 +579,6 @@ def generate_robots_txt() -> None:
   robots = (
     "User-agent: *\n"
     "Allow: /\n"
-    "Disallow: /yanshi/docs/print.html\n"
-    "Disallow: /yanshi/docs/toc.html\n"
     "Disallow: /docs/print.html\n"
     "Disallow: /docs/toc.html\n"
     "\n"
@@ -652,6 +652,7 @@ def build_site() -> None:
   sitemap_count = generate_sitemap(workflow_files)
   generate_robots_txt()
   generate_llms_txt(workflow_files)
+  (OUT_DIR / "CNAME").write_text(f"{CUSTOM_DOMAIN}\n", encoding="utf-8")
   (OUT_DIR / ".nojekyll").write_text("", encoding="utf-8")
 
   missing = [str(path.relative_to(SITE_DIR)) for path in REQUIRED_OUTPUTS if not path.is_file()]

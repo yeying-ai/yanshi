@@ -2,7 +2,7 @@ name: Docs
 
 # Builds the product landing page (site/landing/) + mdBook manual (site/book.toml,
 # pages in docs/, table of contents in docs/SUMMARY.md) via site/build.py and
-# publishes them to GitHub Pages from main (/yanshi/ and /yanshi/docs/).
+# publishes them to GitHub Pages from main (https://yanshi.dev/ and /docs/).
 #
 # No `paths:` filter on purpose: pages link to source files, and
 # site/repo_links.py fails the build when a linked file no longer exists — so

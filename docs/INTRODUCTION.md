@@ -1,6 +1,6 @@
 # Yanshi Manual
 
-> Looking for the interactive overview, visual routing gallery, and 15-template matrix? Visit the [Yanshi Product Home](https://yeying-ai.github.io/yanshi/).
+> Looking for the interactive overview, visual routing gallery, and 15-template matrix? Visit the [Yanshi Product Home](https://yanshi.dev/).
 
 Yanshi is a multimodal content-production runtime written in Rust. Sources go
 in — an idea, a URL, uploaded files, a recording — and finished deliverables
