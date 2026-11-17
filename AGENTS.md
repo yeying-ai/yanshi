@@ -52,9 +52,15 @@ so the tool tier carries no capability dependencies.
 
 ## What's Implemented
 
-- **Core DAG engine** — async/await, topological sort, concurrent
-  dependency-ready scheduler, Map/While/Conditional control flow, 16+
-  built-in nodes (HTTP, File, Batch, Template, MarkMap, Arxiv, ...).
+- **Core DAG engine & Studio renderers** — async/await, topological sort,
+  concurrent dependency-ready scheduler, Map/While/Conditional control flow,
+  source ingestion (`web_search`, `repo_snapshot`, `pdf_extract`,
+  `video_ingest`, `arxiv`), deterministic Studio renderers (`render_slides` +
+  pure-Rust OOXML `.pptx` writer & `16:9` Typst `.pdf`, `render_video`,
+  `render_audio`, `render_mindmap`, `render_study`, `render_table`,
+  `render_svg`, `render_markdown`, `render_document`), plus capability-backed
+  `figure` (TikZ / Typst / D2 / sandboxed Python) and `illustration`
+  (art-directed conceptual visual generator).
 - **6 LLM providers** (OpenAI, Anthropic, Google, Moonshot, StepFun,
   Mock) with native `tool_calls`/`tool_choice`, multimodal, streaming,
   W3C `traceparent` propagation.
@@ -168,12 +174,8 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-08-08 (V4.1 — regenerated from `CLAUDE.md` +
-`docs/CURRENT_STATUS.md`; the previous version dated 2026-05-03 had
-drifted badly: it described 14 crates instead of the current 25-member
-workspace, called `yanshi-server`/`yanshi-db` empty scaffolds
-(now a 19.5K-LOC gateway and a 9-table/9-repo persistence layer), never
-mentioned `yanshi-harness`/`yanshi-config`/`yanshi-value`/
-`yanshi-graph`/`yanshi-store-spi`/`yanshi-agent-spi`/
-`yanshi-worker`/`yanshi-ui`, and cited a stale "479 tests" figure
-against an actual count in the thousands).
+**Last Updated**: 2026-11-17 (synced with Content Studio Y0–Y10 closure,
+15-template Studio catalogue, `illustration` node, and pure-Rust native OOXML
+`.pptx` / `16:9` Typst `.pdf` slide rendering; earlier V4.1 regeneration on
+2026-08-08 aligned the 25-crate workspace layout with `CLAUDE.md` +
+`docs/CURRENT_STATUS.md`).

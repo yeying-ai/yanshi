@@ -1,8 +1,10 @@
 # Current Project Status
 
-Last updated: 2026-11-04 (direction reset to the Content Studio runtime;
-W / P-LLM2 / X segments closed; the active track is Y — see `RoadMap.md`
-and `TODOs.md`)
+Last updated: 2026-11-17 (Content Studio track **Y0–Y10** closed, plus the
+daily productivity & keynote studio suite — native pure-Rust OOXML `.pptx`
+writer, `16:9` widescreen Typst `.pdf` export, art-directed `illustration`
+node, 15 Studio catalogue workflows, and Pingora production gateway; see
+`RoadMap.md` and `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
 evaluations, roadmap notes, and TODO queues may explain how the project arrived
@@ -34,16 +36,22 @@ shared contracts (enforced by `cargo xtask check-arch`; see
   `yanshi-tools` in T3.3).
 - L1 execution core (the executor): `yanshi-core` runs the L0 `Flow` IR via
   the `FlowExt` trait (`flow.run()`).
-- L2 capability adapters: `yanshi-nodes` (tool-tier), `yanshi-nodes-ai`
-  (capability-backed node adapters, split out of `yanshi-nodes` by the
-  P-A4.0 nodes decomposition), `yanshi-llm`, `yanshi-tools` (builtin tool
+- L2 capability adapters: `yanshi-nodes` (tool-tier + deterministic renderers
+  including `render_slides`, pure-Rust `pptx_writer`, `render_video`,
+  `render_audio`, `render_mindmap`, `render_study`, `render_table`,
+  `render_svg`, `render_markdown`, `render_document`, plus `web_search`,
+  `repo_snapshot`, `pdf_extract`, `video_ingest`), `yanshi-nodes-ai`
+  (capability-backed node adapters: `llm`, `figure`, `illustration`, `asr`,
+  `tts`, `text_to_image`, `image_to_image`, `image_edit`, `image_understand`,
+  `text_to_video`, `mcp`, `rag`), `yanshi-llm`, `yanshi-tools` (builtin tool
   implementations + OS-sandbox backends), `yanshi-tools-ai` (TTS / ASR /
   image / video as `Tool`s), `yanshi-mcp`, `yanshi-rag`, `yanshi-memory`.
 - L3 agent and orchestration: `yanshi-agents`, `yanshi-skills`,
   `yanshi-harness`, `yanshi-config` (shared config-first workflow assembly
   + diagnostics, consumed by both the CLI and server), `yanshi-cli`.
 - L4 operations and productization: `yanshi-tracing`,
-  `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui`.
+  `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui`, plus the
+  standalone Cloudflare Pingora TLS/HTTP2 reverse proxy in `crates/gateway`.
 
 ## Implemented Surfaces
 
@@ -119,32 +127,35 @@ contracts.
 
 ## Active Work
 
-The short-term execution queue remains in `TODOs.md` (maintainer-local,
-gitignored). As of this update every segment through **X** (the 2026-10-07
-evaluation fixes) has closed, and the active track is **Y — Content Studio**,
-derived from `PROJECT_EVALUATION_2026-11-04.md` §7 and specified by
-`RFC_CONTENT_STUDIO.md`:
+The short-term execution queue in `TODOs.md` (maintainer-local, gitignored) is
+currently **empty** — every segment through **X** (2026-10-07 evaluation fixes)
+and **Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`)
+has closed:
 
-- **Y0** — the RFC (done) and this positioning sync.
-- **Y1** — media as a first-class value: modality nodes emit
-  `FlowValue::File`, consumers accept it, artifact registration + download
-  routes, CLI `--output-dir`.
-- **Y2** — cost accounting and resume: streaming `usage`, real token
-  accumulation, modality pricing, run-level `cost_limit_usd`, checkpoint /
-  resume reachable from the CLI and server.
-- **Y3** — renderers: embedded `render_table` / `render_svg` /
-  `render_markdown`; `media-tools` MCP over ffmpeg; `render_document` over
-  pandoc + typst; a `figure` node over TeX Live / typst / mermaid / d2 with a
-  validate → render → feed-back loop, and a `code_exec` Python science backend.
-- **Y4** — three generators end to end (`report`, `mindmap`,
-  `audio_overview`) plus a planner agent and the `content-studio` application.
-- **Y5** — notebook entity (`notebooks` / `sources` / `source_chunks` /
-  `notebook_artifacts`), ingestion as a run, unified citations,
-  `POST /v1/notebooks/{id}/generate`.
-- **Y6 / Y7** — second deliverable batch (slides, flashcards / quiz,
-  infographic, video overview, domain diagrams, more video vendors) and
-  product governance (budget-threshold approvals, a publish action class, the
-  remaining cheap gateway escapes).
+- **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts
+  with DB registration + `/v1/runs/{id}/artifacts` streaming download + CLI
+  `--output-dir`, streaming token `usage`, modality `CostMeter` +
+  `cost_limit_usd`, and DAG checkpoint/resume across CLI and server.
+- **Y3** — embedded pure-Rust renderers (`render_table`, `render_svg`,
+  `render_markdown`, `render_mindmap`, `render_study`, `render_slides` +
+  native OOXML `pptx_writer`), sandboxed media/document renderers
+  (`render_audio`, `render_video`, `render_document` over pandoc + typst),
+  `figure` node (`svg` / `d2` / `tikz` / `typst` / `python` container with
+  domain checks + compile-error feedback loop), and `illustration` node
+  (art-directed prompt refinement, 6 visual style presets, dark/light palette
+  harmonization, bounded concurrent `SlideDeck` / batch generation).
+- **Y4–Y6** — 15 Studio catalogue workflows under `examples/generators/`
+  (`illustrated_slides`, `tech_slides_video`, `slides`, `video_overview`,
+  `report`, `infographic`, `mindmap`, `circuit_diagram`, `audio_overview`,
+  `flashcards`, `quiz`, `repo_architecture`, `backend_project_planner`,
+  `paper_reader`, `video_summarizer`), `examples/applications/content-studio/`,
+  persistent `notebooks` / `sources` / `source_chunks` / `notebook_artifacts`
+  with unified citations and `POST /v1/notebooks/{id}/generate`, plus inline
+  workflow `agent` HITL `ask_user` interrupt/resume in gateway and Studio UI.
+- **Y7–Y10** — cost-budget approvals, `ToolEffect::Publish`, gateway reach
+  ceilings, input precedence fixes, streaming thinking & reply images,
+  Anthropic adaptive thinking + native structured output, and live multimodal
+  provider verification.
 
 Tracks that this product does not need yet (distributed workers, remaining
 multi-replica gaps, coding-session Harness providers, seccomp refinement, MCP

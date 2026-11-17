@@ -38,20 +38,38 @@ yanshi workflow validate path/to/workflow.yml --strict
 
 | Node type | Required | Input-compatible required | Optional |
 | --- | --- | --- | --- |
-| `llm` | - | `prompt` | `model`, `system`, `temperature`, `max_tokens` |
-| `skill_agent`, `agent` | - | `skill`, `message` | `model` |
+| `llm` | - | `prompt` | `model`, `system`, `temperature`, `max_tokens`, `json_schema` |
+| `skill_agent` | - | `skill`, `message` | `model` |
+| `agent` | - | `prompt` / `message`（内联模式）或 `skill` + `message`（技能模式） | `system`, `model`, `tools`（内联支持 `web_search`, `http`）, `interactive`, `max_steps`, `max_questions`, `json_schema` |
+| `multi_agent` | `mode` | `message` | `model`, `agents`, `participants`, `judge`, `initial_agent`, `max_handoffs`, `schedule`, `stop_when`, `answer_from`, `rounds`, `judge_prompt` |
 | `http` | - | `url` | `method`, `headers`, `body` |
-| `file` | - | `operation`（`read` / `write` / `copy` / `move` / `read_bytes`）, `path` | `content`（`write` 时为字符串或 `File` 值；`copy` / `move` 时为来源 `File` 值或路径） |
-| `template` | `template` | - | `output_key`, `output_format` |
+| `web_search` | - | `query` | `provider`, `max_results`, `topic` |
+| `repo_snapshot` | - | `source` | `git_ref`, `subpath`, `max_bytes`, `max_files`, `allowed_paths` |
+| `pdf_extract` | - | `source` | `max_chars`, `max_pages`, `allowed_paths` |
+| `video_ingest` | - | `source` | `prefer_subtitles`, `subtitle_langs`, `max_duration_seconds`, `allowed_paths` |
+| `file` | `allowed_paths` | `operation`（`read` / `write` / `copy` / `move` / `read_bytes`）, `path` | `content`（`write` 时为字符串或 `File` 值；`copy` / `move` 时为来源 `File` 值或路径） |
+| `shell` | `allowed_commands` | `command` | `allowed_paths` |
+| `template` | `template` | - | `output_key`, `output_format`（以及模板引用的任意上下文字段） |
 | `arxiv` | `url` | - | `fetch_source`, `simplify_latex` |
-| `asr` | `model` | `audio_source` | - |
+| `asr` | - | `model`, `audio_source` | `response_format`, `language`, `prompt` |
 | `image_edit` | `model` | `prompt`, `image_source` | `output_format` |
 | `image_to_image` | `model` | `prompt`, `source_image` | `output_format` |
 | `image_understand` | `model` | `text_prompt`, `image_source` | - |
 | `markmap` | - | - | `markdown`, `save_to_file` |
-| `text_to_image` | `model` | `prompt` | `output_format` |
-| `text_to_video` | `model` | `prompt` | `output_format` |
-| `tts` | `model`, `voice` | `input_template` | `output_format` |
+| `text_to_image` | - | `model`, `prompt` | `negative_prompt`, `size`, `output_format` |
+| `text_to_video` | - | `model`, `prompt` | `image`, `aspect_ratio`, `resolution`, `duration_seconds`, `output_format` |
+| `tts` | - | `model`, `voice`, `input_template` | `instructions`, `speed`, `response_format`, `output_format` |
+| `illustration` | - | - | `model`, `prompt_model`, `concept`, `prompt`, `context`, `deck`, `items`, `arch_image`, `arch_title`, `arch_caption`, `style_preset`, `style`, `theme`（亦支持 `input_mapping.palette` 别名避免覆盖工作流级 `theme`）, `size`, `refine_prompt`, `max_images`, `max_concurrent`, `enabled`, `graceful_fallback`, `output_format` |
+| `figure` | - | `language`（`svg` / `d2` / `tikz` / `typst` / `python`） | `model`, `description`, `source`, `max_attempts`, `png`, `png_width`, `d2_theme`, `domain`（`circuit` / `chemistry` / `block`）, `spec` |
+| `render_slides` | - | `deck` | `width`, `progressive`, `section_cards`, `pip_safe_zone`, `takeaway_only_bar`, `export_pptx`（纯 Rust 原生 OOXML `.pptx`）, `export_pdf`（经沙箱 `typst` 直出 `16:9` 宽屏 PDF） |
+| `render_video` | - | `scenes` | `width`, `height`, `burn_subtitles`, `transition`, `step_pause_ms`, `slide_pause_ms`, `pip_video`, `pip_image`, `pip_position`, `pip_scale` |
+| `render_audio` | - | `clips` | `format`, `target_lufs` |
+| `render_mindmap` | - | `tree` | `format` |
+| `render_study` | `kind`（`flashcards` / `quiz`） | `items` | `title` |
+| `render_table` | - | `rows` | `format`（`csv` / `xlsx`）, `columns` |
+| `render_svg` | - | `svg` | `width`, `format`（`png` / `svg`） |
+| `render_markdown` | - | `markdown` | `title`, `format`（`html` / `md`） |
+| `render_document` | `format`（`docx` / `pptx` / `html` / `epub` / `pdf`） | `markdown` | `title`, `toc`, `theme` |
 | `map` | `template` | - | `parallel` |
 | `while` | `condition`, `max_iterations`, `do` | - | `continue_on_error`, `fail_on_exhausted` |
 | `mcp` | `server_command`, `tool_name` | - | `tool_params`, `parameters.timeout_ms`/`parameters.max_retries` (MCP-client-only, see note above) |

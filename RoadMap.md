@@ -1,6 +1,6 @@
 # Yanshi Roadmap
 
-Last updated: 2026-11-04
+Last updated: 2026-11-17
 
 This roadmap is forward-looking only. For implemented behavior and current
 stability boundaries, see:
@@ -38,7 +38,7 @@ already exist:
 | **Sources** | ingest URL / file / recording, chunk, index, persist per notebook | `yanshi-rag` loaders + `KnowledgeBackend`, `asr` node |
 | **Planner** | an agent decides *which* deliverables and with what outline / style — content-level planning | `ReActAgent` + `WorkflowTool` (each generator is a tool) |
 | **Generators** | one hand-authored DAG template per deliverable, typed `inputs`, structured output with citations | `yanshi-config` `FlowDefinitionV2`, `json_schema`, `Map` fan-out |
-| **Renderers** | structured content → file (pdf / pptx / xlsx / png / mp3 / mp4 / diagram) | new `render_*` nodes; external binaries (pandoc + typst, ffmpeg, mermaid-cli / D2) run as sandboxed shell / MCP tools |
+| **Renderers** | structured content → file (pdf / pptx / xlsx / png / mp3 / mp4 / diagram) | embedded pure-Rust renderers (`render_slides` + OOXML `pptx_writer`, `render_table`, `render_svg`, `render_markdown`, `render_mindmap`, `render_study`) + sandboxed external binaries (`pandoc`, `typst`, `ffmpeg`, `d2`, `lualatex`) |
 | **Artifacts** | deliverables stored, listed, downloaded, retained per tenant / notebook | `FlowValue::File` + `run_dir` + `ArtifactRepo` + `/v1/runs/{id}/artifacts` |
 
 Two decisions that follow from this shape:
@@ -50,17 +50,18 @@ Two decisions that follow from this shape:
 - **Media is a first-class value.** Modality nodes emit `FlowValue::File`
   written to the run directory; the state pool holds paths and hashes, never
   base64 blobs.
-- **Figure fidelity comes from the figure tier, not the slide writer**
-  (2026-11-04). Engineering / scientific drawings (circuits, chemical
-  structures, plots, pathways, gene maps) are rendered to vector SVG by a
-  `figure` node with several language backends — TikZ family via TeX Live
-  (`standalone` → `lualatex` → `pdftocairo -svg`), Typst + cetz, Mermaid / D2 /
-  Graphviz, and a sandboxed Python image for data-driven science figures —
-  all behind one validate → render → feed-back loop. The document / slide
-  container stays simple: pandoc (`--reference-doc` for theming; verified to
-  embed SVG as vector in PPTX, 2026-11-04). A programmatic PPTX writer
-  (python-pptx / pptxgenjs) is deferred until a generator needs a layout
-  pandoc cannot express (native charts, free-positioned callouts).
+- **Figure fidelity comes from the figure/illustration tier, and slides emit
+  native OOXML** (updated 2026-11-16). Engineering / scientific drawings
+  (circuits, chemical structures, plots, architecture blocks) are rendered to
+  vector SVG by `figure` (`tikz`, `typst` + cetz, `d2`, and sandboxed `python`
+  via `code_exec`) behind a validate → render → feed-back loop, while
+  conceptual / editorial visuals are produced by `illustration` (art-directed
+  prompt refinement + palette harmonization). Prose documents stay on `pandoc`
+  (`render_document`), whereas slide decks (`slides`, `illustrated_slides`,
+  `tech_slides_video`) use `render_slides`'s pure-Rust OOXML `.pptx` writer
+  (`1920×1080` → `12,192,000 × 6,858,000` EMU, native editable shapes, `<a:tbl>`
+  tables, `<p:cxnSp>` diagrams, code callouts, embedded SVG/PNG/JPEG, speaker
+  notes) and direct `16:9` widescreen PDF export via sandboxed `typst`.
 
 The four execution paradigms (static DAG / native loop / harness / dynamic
 workflow) and the contract kernel remain as described in
@@ -79,9 +80,10 @@ Three access modes, in this priority order:
 3. **Rust SDK** — embedding `Flow`, `AgentRuntime`, `ToolRegistry`,
    `SkillBuilder`, RAG, memory and tracing in applications.
 
-## Active Track — Y: Content Studio
+## Completed Track — Y: Content Studio (closed 2026-11-16)
 
-Tracked task-by-task in `TODOs.md` § Y. Order and acceptance in one line each:
+Tracked task-by-task in `TODOs.md` § Y (Y0–Y10 all `DONE`, plus the 15-template
+Studio catalogue and native OOXML slide upgrade):
 
 | Stage | Goal | Done when |
 |---|---|---|

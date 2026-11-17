@@ -171,7 +171,7 @@ the report template's test.
 | Embed in-process when | Run as an external binary when |
 |---|---|
 | a pure-Rust crate exists with no native build dependency, output is deterministic, and the input is small structured data | the tool is a mature external program (ffmpeg, pandoc, TeX, typst, mermaid, d2), or the input is LLM-authored source code |
-| `render_table` (`csv`, `rust_xlsxwriter`), `render_svg` (`resvg`), `render_markdown` (`pulldown-cmark`, self-contained CSS) | `render_document`, `figure`, the `media-tools` MCP server |
+| `render_table` (`csv`, `rust_xlsxwriter`), `render_svg` (`resvg`), `render_markdown` (`pulldown-cmark`, self-contained CSS), `render_mindmap`, `render_study`, `render_slides` (`resvg` PNG frames + self-contained HTML + pure-Rust OOXML `pptx_writer`) | `render_document` (`pandoc` + `typst`), `render_audio` / `render_video` (`ffmpeg`), `figure` (`lualatex` / `typst` / `d2` / `code_exec`), the `media-tools` MCP server |
 
 External binaries run through the already-built security tiers: the sandboxed
 `shell` tool with a per-renderer command allowlist and paths confined to the
@@ -255,10 +255,18 @@ baked into the image.
 
 ### 5.4 Slides
 
-`slides` is Markdown → pandoc → PPTX with a themed reference doc and figures
-from §5.3 embedded as SVG. A print-quality PDF variant goes through beamer or
-typst-touying with the same figures. A programmatic PPTX writer
-(python-pptx / pptxgenjs) is **not** built; see §8.
+Initially (Y6.1, 2026-11-05), `slides` went through Markdown → `pandoc` → PPTX.
+Once `tech_slides_video` and `illustrated_slides` introduced two-column
+structured cards, syntax-highlighted code blocks with free-positioned callout
+pills & leader lines, `<a:tbl>` tables, and `<p:cxnSp>` diagrams, the §8
+re-evaluation trigger fired (2026-11-16). Rather than adding an external
+`python-pptx` / `pptxgenjs` runtime, `render_slides` gained an embedded
+pure-Rust OOXML `.pptx` writer (`yanshi_nodes::nodes::pptx_writer`, `1920×1080`
+mapped at `1 px = 6350 EMU` to `12,192,000 × 6,858,000` EMU, embedding SVG via
+`asvg:svgBlip` + PNG fallback and native `notesSlides` speaker notes) alongside
+direct `16:9` widescreen PDF handout export via sandboxed `typst`
+(`export_pptx` / `export_pdf`), plus a dedicated `illustration` node in
+`yanshi-nodes-ai` for art-directed conceptual visuals.
 
 ### 5.5 Media
 
@@ -325,7 +333,7 @@ their `Deliverable`.
 | LLM-planned graph structure as the default generation path | a catalogue request cannot be expressed as a template with typed inputs — three such requests logged |
 | Qdrant / vector index per notebook | a notebook's BM25 rebuild measures > 500 ms, or keyword recall fails the Y5.3 citation tests |
 | A serialised BM25 index format | same as above; chunks are the source of truth |
-| Programmatic PPTX writer (python-pptx / pptxgenjs) | a generator needs a layout pandoc cannot express: native charts, free-positioned callouts |
+| External Python/Node PPTX writer (`python-pptx` / `pptxgenjs`) | resolved in pure Rust (2026-11-16): `yanshi_nodes::nodes::pptx_writer` emits native editable OOXML `.pptx` in-process; revisit only if native `<c:chart>` XML spreadsheets are needed |
 | LibreOffice | a user needs DOC / XLS legacy formats pandoc does not write |
 | In-process ffmpeg / image / document libraries | never for media; embedded renderers stay pure-Rust (§5.1) |
 | Distributed workers for generation | a deployment needs more than one execution host |
@@ -340,6 +348,7 @@ their `Deliverable`.
 | 2026-11-04 | Slide path for complex figures | figure tier renders SVG; pandoc embeds it as vector | experiment: `ppt/media/image1.svg` preserved by pandoc 3.13 |
 | 2026-11-04 | Figure backends | TikZ (TeX Live), typst + cetz, mermaid, d2; Python via `code_exec` second | experiments: circuitikz → SVG via `lualatex` + `pdftocairo`; cetz compiles |
 | 2026-11-04 | Index persistence | persist chunks, rebuild BM25 per notebook, cache in-process | chunks are required for citations regardless; "good enough" over a second storage service |
+| 2026-11-16 | Native OOXML slides & art-directed illustrations | pure-Rust `pptx_writer` + `16:9` `typst` PDF in `render_slides`; `illustration` node in `yanshi-nodes-ai` | §8 trigger fired on free-positioned code callouts & structured two-column decks; pure-Rust `zip` + XML avoids Python/Node runtime deps and passes OOXML XSD validation |
 
 ## 10. Compatibility
 
