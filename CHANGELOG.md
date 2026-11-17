@@ -355,11 +355,13 @@ _New entries go here. Will roll into the next tag (likely
 
 - **Bilingual product landing page (`site/landing/`).** Added a zero-dependency,
   light/dark-adaptive bilingual (`中文` / `EN`) product landing page at
-  `/yanshi/` showcasing the interactive five-stage Content Studio pipeline,
-  three-way slide visual routing (`illustration`, `arch_diagram`,
-  `structured_panel`), four execution paradigms, filterable 15-generator
-  catalogue, and five-layer contract architecture; moved the mdBook manual to
-  `/yanshi/docs/` assembled via `site/build.py`.
+  `/yanshi/` featuring animated border-beam highlights, token-level syntax
+  highlighting (YAML, Rust, CLI), an in-page `<dialog>` YAML workflow inspector
+  bundling all 15 `examples/generators/*.yml` templates with extracted DAG node
+  pipelines, the interactive five-stage Content Studio workbench, three-way
+  slide visual routing gallery, four execution paradigms, and five-layer
+  contract architecture; moved the mdBook manual to `/yanshi/docs/` assembled
+  via `site/build.py`.
 - **GitHub Pages manual refresh (`docs/STUDIO_CATALOGUE.md`).** Added a
   dedicated Content Studio & `Yanshi Studio` desktop chapter covering all 15
   generator templates and slide visual routing (`illustration` / `figure` /

@@ -144,6 +144,7 @@
         <div class="container hero-grid">
           <div>
             <p class="origin-note">
+              <span class="origin-dot" aria-hidden="true"></span>
               <span data-i18n-zh>《列子·汤问》偃师造人 · 显式结构组装、可追踪、可断点重放</span>
               <span data-i18n-en>Named after Liezi’s artificer · Explicit, inspectable, replayable structure</span>
             </p>
@@ -163,7 +164,7 @@
             </p>
 
             <div class="cli-quickbox">
-              <code id="hero-cli-cmd"><span class="cli-prompt">$</span>yanshi workflow run examples/generators/illustrated_slides.yml --input subject "Rust Zero-Copy I/O" --output-dir out/slides</code>
+              <code id="hero-cli-cmd" data-hl="bash"><span class="cli-prompt">$</span>yanshi workflow run examples/generators/illustrated_slides.yml --input subject "Rust Zero-Copy I/O" --output-dir out/slides</code>
               <button type="button" class="copy-btn" data-copy-source="hero-cli-cmd">
                 <span data-i18n-zh>复制</span>
                 <span data-i18n-en>Copy</span>
@@ -176,8 +177,8 @@
                 <span data-i18n-en>Read the Manual</span>
               </a>
               <a class="btn-secondary" href="#catalogue">
-                <span data-i18n-zh>浏览 15 套 Studio 模板</span>
-                <span data-i18n-en>Browse 15 Studio Templates</span>
+                <span data-i18n-zh>在线预览 15 套 YAML 模板</span>
+                <span data-i18n-en>Inspect 15 YAML Workflows</span>
               </a>
               <a class="btn-secondary" href="docs/TRIAL_GUIDE.html">
                 <span data-i18n-zh>5 分钟试用指南</span>
@@ -217,10 +218,13 @@
             </div>
           </div>
 
-          <!-- Interactive 5-Stage Content Studio Pipeline Workbench -->
-          <div class="workbench" data-tab-group>
+          <!-- Interactive 5-Stage Content Studio Pipeline Workbench with Flowing Conic Beam -->
+          <div class="beam-box" data-tab-group>
             <div class="workbench-bar">
-              <span class="workbench-title">Content Studio · 5-Stage Pipeline</span>
+              <span class="workbench-title">
+                <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>Content Studio · 5-Stage Pipeline</span>
+              </span>
               <span class="workbench-hint">
                 <span data-i18n-zh>点击阶段检视契约</span>
                 <span data-i18n-en>Select a stage to inspect</span>
@@ -322,14 +326,14 @@
                   <span data-i18n-zh>内置节点直接抓取网页、扫描 GitHub 仓库依赖树（不执行不可信代码）、解析 arXiv 源码包与 PDF 表格，或对音视频自动提取字幕与 ASR 转写。</span>
                   <span data-i18n-en>Ingest web pages with DNS-pinned SSRF protection, snapshot GitHub repos without running untrusted code, parse PDFs/arXiv tarballs, or extract captions + ASR transcripts.</span>
                 </p>
-                <pre class="inspector-code"><code>- id: ingest_repo
+                <pre class="inspector-code"><code data-hl="yaml">- id: ingest_repo
   type: repo_snapshot
-  config:
+  parameters:
     max_files: 180
     include_imports: true
 - id: ingest_paper
   type: pdf_extract
-  config:
+  parameters:
     extract_tables: true</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">web_search</span>
@@ -354,11 +358,11 @@
                   <span data-i18n-zh>LLM 只负责内容大纲、视觉分流决策与未知约束提问（<code>ask_user</code>），绝不把控底层执行流；CLI、Web Studio 与桌面端均可原地挂起并恢复。</span>
                   <span data-i18n-en>The LLM plans structure, visual routing, and clarifying questions via <code>ask_user</code> while deterministic DAG templates govern execution, cost, and retries.</span>
                 </p>
-                <pre class="inspector-code"><code>- id: clarify_scope
+                <pre class="inspector-code"><code data-hl="yaml">- id: clarify_scope
   type: agent
-  run_if: "${inputs.interactive == true}"
-  config:
-    tools: [ask_user]
+  run_if: "{{ interactive }}"
+  parameters:
+    tools: ["ask_user"]
     max_iterations: 4
     system_prompt: "Confirm scale, audience, and constraints before drafting."</code></pre>
                 <div class="inspector-tags">
@@ -382,17 +386,17 @@
                   <span data-i18n-zh>通过依赖就绪调度器并发生成各章节、双人播客台词、6 种艺术风格概念插画与 D2/Typst/TikZ 矢量图；编译器报错自动回传修复。</span>
                   <span data-i18n-en>Fan out across slides, chapters, voice tracks, art-directed illustrations, and D2/Typst/TikZ diagrams concurrently — feeding compiler diagnostics back automatically.</span>
                 </p>
-                <pre class="inspector-code"><code>- id: build_visuals
+                <pre class="inspector-code"><code data-hl="yaml">- id: build_visuals
   type: map
-  config:
+  parameters:
     concurrency: 4
     body:
       - id: art_panel
         type: illustration
-        run_if: "${item.visual_kind == 'illustration'}"
+        run_if: "{{ item.visual_kind == 'illustration' }}"
       - id: arch_svg
         type: figure
-        run_if: "${item.visual_kind == 'arch_diagram'}"</code></pre>
+        run_if: "{{ item.visual_kind == 'arch_diagram' }}"</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">JsonSchema Guard</span>
                   <span class="chip">Chunk Citations</span>
@@ -414,12 +418,12 @@
                   <span data-i18n-zh>原生 Rust 直接写出可编辑 PowerPoint 形状/表格（<code>.pptx</code>）与数值型 Excel（<code>.xlsx</code>），配合沙箱隔离的 Typst、Pandoc、FFmpeg 合成 <code>16:9 .pdf</code> 与 <code>1080p .mp4</code>。</span>
                   <span data-i18n-en>Pure-Rust writers emit editable PowerPoint shapes/tables (<code>.pptx</code>) and typed Excel sheets (<code>.xlsx</code>), paired with sandboxed Typst, Pandoc, and FFmpeg muxing.</span>
                 </p>
-                <pre class="inspector-code"><code>- id: deck_bundle
+                <pre class="inspector-code"><code data-hl="yaml">- id: deck_bundle
   type: render_slides
-  config:
+  parameters:
     export_pptx: true   # Pure-Rust native editable OOXML
     export_pdf: true    # 16:9 Typst vector deck
-    theme: "${inputs.slide_theme}"</code></pre>
+    theme: "{{ slide_theme }}"</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">render_slides (.pptx/.pdf)</span>
                   <span class="chip">render_video (.mp4)</span>
@@ -442,7 +446,7 @@
                   <span data-i18n-zh>所有媒体产物均以一等公民 <code>FlowValue::File</code> 落盘并附带 SHA-256 清单，支持 <code>--checkpoint</code> 从最后一个成功节点秒级恢复，不重复计费。</span>
                   <span data-i18n-en>Deliverables travel through the graph as typed <code>FlowValue::File</code> handles with SHA-256 manifests — inspect inline in Studio or resume interrupted runs without re-billing.</span>
                 </p>
-                <pre class="inspector-code"><code># Resume an interrupted multi-stage video run from last completed node:
+                <pre class="inspector-code"><code data-hl="bash"># Resume an interrupted multi-stage video run from last completed node:
 yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
   --output-dir out/lecture</code></pre>
                 <div class="inspector-tags">
@@ -481,7 +485,7 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
           </div>
 
           <div class="router-grid">
-            <article class="route-panel">
+            <article class="route-panel spotlight-card">
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-illustration.webp"
@@ -516,7 +520,7 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
               </div>
             </article>
 
-            <article class="route-panel">
+            <article class="route-panel spotlight-card">
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-diagram.webp"
@@ -549,7 +553,7 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
               </div>
             </article>
 
-            <article class="route-panel">
+            <article class="route-panel spotlight-card">
               <figure class="route-figure">
                 <img
                   src="assets/slide-route-structured.webp"
@@ -685,34 +689,39 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
                 </div>
                 <div class="code-frame">
                   <div class="code-frame-bar">
-                    <span>examples/generators/paper_reader.yml</span>
+                    <span class="code-bar-left">
+                      <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                      <span class="code-lang-pill">YAML</span>
+                      <span>examples/generators/paper_reader.yml</span>
+                    </span>
                     <button type="button" class="copy-btn" data-copy-source="code-dag">
                       <span data-i18n-zh>复制</span>
                       <span data-i18n-en>Copy</span>
                     </button>
                   </div>
-                  <pre><code id="code-dag">name: paper_reader
+                  <pre><code id="code-dag" data-hl="yaml"># Validate statically, cap spend, and export numeric Excel sheets
+name: paper_reader
 cost_limit_usd: 1.50
 nodes:
   - id: extract
     type: pdf_extract
-    config:
-      source: "${inputs.source}"
+    parameters:
+      source: "{{ source }}"
       extract_tables: true
 
   - id: bilingual_digest
     type: llm
-    dependencies: [extract]
-    config:
-      model: gpt-4o
+    dependencies: ["extract"]
+    parameters:
+      model: "gpt-4o"
       response_format: json_schema
       prompt: "Synthesize key contributions and benchmarks..."
 
   - id: export_excel
     type: render_table
-    dependencies: [bilingual_digest]
-    config:
-      format: xlsx</code></pre>
+    dependencies: ["bilingual_digest"]
+    parameters:
+      format: "xlsx"</code></pre>
                 </div>
               </div>
             </div>
@@ -750,18 +759,22 @@ nodes:
                 </div>
                 <div class="code-frame">
                   <div class="code-frame-bar">
-                    <span>CLI · Multi-Deliverable Studio Planner Skill</span>
+                    <span class="code-bar-left">
+                      <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                      <span class="code-lang-pill">CLI</span>
+                      <span>Multi-Deliverable Studio Planner Skill</span>
+                    </span>
                     <button type="button" class="copy-btn" data-copy-source="code-agent">
                       <span data-i18n-zh>复制</span>
                       <span data-i18n-en>Copy</span>
                     </button>
                   </div>
-                  <pre><code id="code-agent"># Planner agent inspects the source, selects matching DAG generators,
+                  <pre><code id="code-agent" data-hl="bash"># Planner agent inspects the source, selects matching DAG generators,
 # invokes WorkflowTools in parallel, and verifies output artifacts:
 yanshi skill run examples/applications/content-studio \
-  --input url=https://arxiv.org/abs/1706.03762 \
-  --input want=report,mindmap,audio_overview \
-  --output-dir out/studio-bundle</code></pre>
+  --input url="https://arxiv.org/abs/1706.03762" \
+  --input want="report,mindmap,audio_overview" \
+  --output-dir "out/studio-bundle"</code></pre>
                 </div>
               </div>
             </div>
@@ -795,13 +808,17 @@ yanshi skill run examples/applications/content-studio \
                 </div>
                 <div class="code-frame">
                   <div class="code-frame-bar">
-                    <span>yanshi-agents/src/dynamic/</span>
+                    <span class="code-bar-left">
+                      <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                      <span class="code-lang-pill">Rust</span>
+                      <span>yanshi-agents/src/dynamic/</span>
+                    </span>
                     <button type="button" class="copy-btn" data-copy-source="code-dynamic">
                       <span data-i18n-zh>复制</span>
                       <span data-i18n-en>Copy</span>
                     </button>
                   </div>
-                  <pre><code id="code-dynamic">use yanshi_agents::dynamic::{compile_plan_to_flow, DynamicWorkflowAgent};
+                  <pre><code id="code-dynamic" data-hl="rust">use yanshi_agents::dynamic::{compile_plan_to_flow, DynamicWorkflowAgent};
 use yanshi_core::FlowExt;
 
 let plan = planner_agent.author_plan(&amp;task, &amp;allowed_tools).await?;
@@ -842,17 +859,22 @@ let outputs = flow.run().await?;</code></pre>
                 </div>
                 <div class="code-frame">
                   <div class="code-frame-bar">
-                    <span>Rust Embedded Flow + SecurityProfile</span>
+                    <span class="code-bar-left">
+                      <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                      <span class="code-lang-pill">Rust</span>
+                      <span>Embedded Flow + SecurityProfile</span>
+                    </span>
                     <button type="button" class="copy-btn" data-copy-source="code-sdk">
                       <span data-i18n-zh>复制</span>
                       <span data-i18n-en>Copy</span>
                     </button>
                   </div>
-                  <pre><code id="code-sdk">use std::sync::Arc;
+                  <pre><code id="code-sdk" data-hl="rust">use std::sync::Arc;
 use yanshi_core::{flow::{Flow, GraphNode, NodeType}, FlowExt};
 use yanshi_nodes_ai::nodes::llm::LlmNode;
 use yanshi_tool::SecurityProfile;
 
+// Production fail-closed defaults: OS sandbox &amp; Ed25519 signature verification
 let profile = SecurityProfile::Production;
 let mut flow = Flow::new();
 flow.add_node(GraphNode::standard("summarize", Arc::new(LlmNode::default())));
@@ -864,7 +886,7 @@ let result = flow.run().await?;</code></pre>
         </div>
       </section>
 
-      <!-- 4. 15 BUILT-IN STUDIO GENERATORS MATRIX -->
+      <!-- 4. 15 BUILT-IN STUDIO GENERATORS MATRIX (IN-PAGE YAML PREVIEW) -->
       <section id="catalogue" class="section">
         <div class="container">
           <div class="section-header">
@@ -874,8 +896,8 @@ let result = flow.run().await?;</code></pre>
                 <span data-i18n-en>15 Built-in Content Studio Generator Workflows</span>
               </h2>
               <p class="section-desc">
-                <span data-i18n-zh>全部模板位于 <code>examples/generators/</code>，均通过严格模式 Schema 校验，可在 CLI、Web Studio（<code>/ui/app</code> 与 <code>/ui/studio</code>）及桌面端一键运行。</span>
-                <span data-i18n-en>Every workflow in <code>examples/generators/</code> passes <code>workflow validate --strict</code> and runs identically in the CLI, Web Studio, HTTP API, and Desktop app.</span>
+                <span data-i18n-zh>点击任意模板卡片即可<strong>直接在页内展开完整语法高亮 YAML 源码、DAG 节点拓扑与运行命令</strong>，无需跳出当前页面。</span>
+                <span data-i18n-en>Select any template card below to <strong>inspect its full syntax-highlighted YAML source, DAG node topology, and CLI command right on this page</strong>.</span>
               </p>
             </div>
 
@@ -901,236 +923,326 @@ let result = flow.run().await?;</code></pre>
 
           <div class="catalogue-grid">
             <!-- 1. illustrated_slides -->
-            <article class="tpl-item" data-cat="media">
+            <article class="tpl-item spotlight-card" data-cat="media" data-workflow="illustrated_slides.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/illustrated_slides.yml" target="_blank" rel="noopener noreferrer">illustrated_slides.yml</a>
+                <button type="button" class="tpl-trigger">illustrated_slides.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>联网检索考证 + 三路智能视觉路由（6 种概念插画预设、D2 架构图、原生可编辑表格/代码框）。</span>
                 <span data-i18n-en>Web-grounded keynote deck routing slides across 6 art-directed illustration styles, D2 diagrams, and native OOXML shapes.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.pptx</span>
-                <span class="ext-badge">16:9 .pdf</span>
-                <span class="ext-badge">.html</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pptx</span>
+                  <span class="ext-badge">16:9 .pdf</span>
+                  <span class="ext-badge">.html</span>
+                </div>
               </div>
             </article>
 
             <!-- 2. tech_slides_video -->
-            <article class="tpl-item" data-cat="media">
+            <article class="tpl-item spotlight-card" data-cat="media" data-workflow="tech_slides_video.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/tech_slides_video.yml" target="_blank" rel="noopener noreferrer">tech_slides_video.yml</a>
+                <button type="button" class="tpl-trigger">tech_slides_video.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>渐进式分步动画与毫秒级语音配音对齐，支持聚光灯高亮框与画中画主讲人视频合成。</span>
                 <span data-i18n-en>Step-by-step progressive slide builds synced millisecond-accurately to TTS narration, spotlight rings, and optional PiP presenter.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">1080p .mp4</span>
-                <span class="ext-badge">.srt / .vtt</span>
-                <span class="ext-badge">.pptx</span>
-                <span class="ext-badge">.pdf</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">1080p .mp4</span>
+                  <span class="ext-badge">.srt / .vtt</span>
+                  <span class="ext-badge">.pptx</span>
+                  <span class="ext-badge">.pdf</span>
+                </div>
               </div>
             </article>
 
             <!-- 3. slides -->
-            <article class="tpl-item" data-cat="media">
+            <article class="tpl-item spotlight-card" data-cat="media" data-workflow="slides.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/slides.yml" target="_blank" rel="noopener noreferrer">slides.yml</a>
+                <button type="button" class="tpl-trigger">slides.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>基于指定资料源生成的结构化幻灯片，内置自修复矢量图（零生图 Key 亦可开箱运行，按需开启插画）。</span>
                 <span data-i18n-en>Source-grounded presentation with self-repairing vector diagrams; works with zero image API keys out of the box.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.pptx</span>
-                <span class="ext-badge">16:9 .pdf</span>
-                <span class="ext-badge">.html</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pptx</span>
+                  <span class="ext-badge">16:9 .pdf</span>
+                  <span class="ext-badge">.html</span>
+                </div>
               </div>
             </article>
 
             <!-- 4. video_overview -->
-            <article class="tpl-item" data-cat="media">
+            <article class="tpl-item spotlight-card" data-cat="media" data-workflow="video_overview.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/video_overview.yml" target="_blank" rel="noopener noreferrer">video_overview.yml</a>
+                <button type="button" class="tpl-trigger">video_overview.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>多幕分镜并行插画或动态视频片段（<code>text_to_video</code>）生成，自动配音并混流字幕轨道。</span>
                 <span data-i18n-en>Parallel multi-scene visual generation (stills or optional motion clips) muxed with per-scene voiceover and subtitles.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.mp4</span>
-                <span class="ext-badge">.srt</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.mp4</span>
+                  <span class="ext-badge">.srt</span>
+                </div>
               </div>
             </article>
 
             <!-- 5. audio_overview -->
-            <article class="tpl-item" data-cat="media">
+            <article class="tpl-item spotlight-card" data-cat="media" data-workflow="audio_overview.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/audio_overview.yml" target="_blank" rel="noopener noreferrer">audio_overview.yml</a>
+                <button type="button" class="tpl-trigger">audio_overview.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>双人对话式深度播客脚本，双声线并行合成并通过 EBU R128 广播级响度标准化输出。</span>
                 <span data-i18n-en>Two-speaker conversational deep-dive voiced in parallel and loudness-normalized to EBU R128 via <code>render_audio</code>.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.mp3</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.mp3</span>
+                </div>
               </div>
             </article>
 
             <!-- 6. repo_architecture -->
-            <article class="tpl-item" data-cat="eng">
+            <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="repo_architecture.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/repo_architecture.yml" target="_blank" rel="noopener noreferrer">repo_architecture.yml</a>
+                <button type="button" class="tpl-trigger">repo_architecture.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>静态扫描本地目录或远程 GitHub 仓库结构与内部依赖图，输出 D2 系统架构图与模块剖析手册。</span>
                 <span data-i18n-en>Scans repository manifests and internal imports safely without executing code, producing verified D2 architecture diagrams and PDF dossier.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.svg / .png</span>
-                <span class="ext-badge">.pdf</span>
-                <span class="ext-badge">.html</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.svg / .png</span>
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">.html</span>
+                </div>
               </div>
             </article>
 
             <!-- 7. backend_project_planner -->
-            <article class="tpl-item" data-cat="eng">
+            <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="backend_project_planner.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/backend_project_planner.yml" target="_blank" rel="noopener noreferrer">backend_project_planner.yml</a>
+                <button type="button" class="tpl-trigger">backend_project_planner.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>支持交互式 <code>ask_user</code> 需求澄清，一次性生成架构图、UML 类图/时序图、ER 图、PostgreSQL DDL 与完整设计书。</span>
                 <span data-i18n-en>Interactive HITL clarification followed by system architecture, UML class/sequence, ER diagrams, PostgreSQL <code>.sql</code> DDL, and spec PDF.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">6x .svg</span>
-                <span class="ext-badge">.sql</span>
-                <span class="ext-badge">.pdf</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">6x .svg</span>
+                  <span class="ext-badge">.sql</span>
+                  <span class="ext-badge">.pdf</span>
+                </div>
               </div>
             </article>
 
             <!-- 8. paper_reader -->
-            <article class="tpl-item" data-cat="eng">
+            <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="paper_reader.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/paper_reader.yml" target="_blank" rel="noopener noreferrer">paper_reader.yml</a>
+                <button type="button" class="tpl-trigger">paper_reader.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>精读 arXiv 或本地论文 PDF，提取数值实验对比表导出为 Excel，并生成双语导读手册、方法图与思维导图。</span>
                 <span data-i18n-en>Extracts experimental benchmark tables into typed Excel workbooks alongside a bilingual digest PDF, method diagram, and mindmap.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.pdf</span>
-                <span class="ext-badge">.xlsx / .csv</span>
-                <span class="ext-badge">.svg</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">.xlsx / .csv</span>
+                  <span class="ext-badge">.svg</span>
+                </div>
               </div>
             </article>
 
             <!-- 9. video_summarizer -->
-            <article class="tpl-item" data-cat="eng">
+            <article class="tpl-item spotlight-card" data-cat="eng" data-workflow="video_summarizer.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/video_summarizer.yml" target="_blank" rel="noopener noreferrer">video_summarizer.yml</a>
+                <button type="button" class="tpl-trigger">video_summarizer.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>优先提取原生字幕，缺失时自动回退 FFmpeg 抽音 + ASR 语音识别，输出带时间戳纪要、双语字幕与导图。</span>
                 <span data-i18n-en>Prefers native captions with automatic fallback to FFmpeg audio extraction + ASR, emitting timestamped notes, <code>.srt</code>, and mindmap.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.pdf / .html</span>
-                <span class="ext-badge">.srt</span>
-                <span class="ext-badge">.svg</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pdf / .html</span>
+                  <span class="ext-badge">.srt</span>
+                  <span class="ext-badge">.svg</span>
+                </div>
               </div>
             </article>
 
             <!-- 10. report -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="report.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/report.yml" target="_blank" rel="noopener noreferrer">report.yml</a>
+                <button type="button" class="tpl-trigger">report.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>按大纲分节并行撰写深度研究报告，每处论据绑定原文分块脚注引用并排版为出版级 PDF。</span>
                 <span data-i18n-en>Parallel section drafting with verbatim source quotes and chunk-level footnote citations, typeset cleanly into HTML and PDF.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.pdf</span>
-                <span class="ext-badge">.html</span>
-                <span class="ext-badge">.md</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">.html</span>
+                  <span class="ext-badge">.md</span>
+                </div>
               </div>
             </article>
 
             <!-- 11. infographic -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="infographic.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/infographic.yml" target="_blank" rel="noopener noreferrer">infographic.yml</a>
+                <button type="button" class="tpl-trigger">infographic.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>提炼核心指标与对比洞察，经由确定性 Tera SVG 海报引擎渲染高清矢量信息图与 PNG。</span>
                 <span data-i18n-en>Extracts schema-checked headline metrics and renders crisp deterministic SVG and high-DPI PNG posters.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.svg</span>
-                <span class="ext-badge">.png</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.svg</span>
+                  <span class="ext-badge">.png</span>
+                </div>
               </div>
             </article>
 
             <!-- 12. mindmap -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="mindmap.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/mindmap.yml" target="_blank" rel="noopener noreferrer">mindmap.yml</a>
+                <button type="button" class="tpl-trigger">mindmap.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>抽取多层知识树结构，同时导出静态矢量导图与可离线折叠交互的 HTML 脑图。</span>
                 <span data-i18n-en>Hierarchical knowledge tree rendered simultaneously as vector SVG, PNG, and interactive collapsible HTML.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.svg</span>
-                <span class="ext-badge">.png</span>
-                <span class="ext-badge">.html</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.svg</span>
+                  <span class="ext-badge">.png</span>
+                  <span class="ext-badge">.html</span>
+                </div>
               </div>
             </article>
 
             <!-- 13. circuit_diagram -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="circuit_diagram.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/circuit_diagram.yml" target="_blank" rel="noopener noreferrer">circuit_diagram.yml</a>
+                <button type="button" class="tpl-trigger">circuit_diagram.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>先抽取类型化元器件清单校验连接拓扑，再调用 <code>circuitikz</code> + <code>lualatex</code> 编译精准电路原理图。</span>
                 <span data-i18n-en>Extracts a typed parts list first, validates every component ID, and compiles publication-grade <code>circuitikz</code> schematics.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.svg</span>
-                <span class="ext-badge">.png</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.svg</span>
+                  <span class="ext-badge">.png</span>
+                </div>
               </div>
             </article>
 
             <!-- 14. flashcards -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="flashcards.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/flashcards.yml" target="_blank" rel="noopener noreferrer">flashcards.yml</a>
+                <button type="button" class="tpl-trigger">flashcards.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>将技术文档或教材转化为单文件离线可翻转记忆闪卡与结构化 JSON 题集。</span>
                 <span data-i18n-en>Turns source material into a self-contained offline flip-card study deck and structured JSON dataset.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.html</span>
-                <span class="ext-badge">.json</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.html</span>
+                  <span class="ext-badge">.json</span>
+                </div>
               </div>
             </article>
 
             <!-- 15. quiz -->
-            <article class="tpl-item" data-cat="study">
+            <article class="tpl-item spotlight-card" data-cat="study" data-workflow="quiz.yml">
               <div class="tpl-top">
-                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/quiz.yml" target="_blank" rel="noopener noreferrer">quiz.yml</a>
+                <button type="button" class="tpl-trigger">quiz.yml</button>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
               </div>
               <p class="tpl-desc">
                 <span data-i18n-zh>生成带即时判分、答案解析与原文溯源的交互式自测题页。</span>
                 <span data-i18n-en>Self-grading multiple-choice assessment page with instant answer rationales and score tracking.</span>
               </p>
-              <div class="tpl-outputs">
-                <span class="ext-badge">.html</span>
-                <span class="ext-badge">.json</span>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.html</span>
+                  <span class="ext-badge">.json</span>
+                </div>
               </div>
             </article>
           </div>
@@ -1239,7 +1351,7 @@ let result = flow.run().await?;</code></pre>
 
           <!-- Three Ways to Run -->
           <div class="surfaces-grid">
-            <div class="surface-box">
+            <div class="surface-box spotlight-card">
               <h3>
                 <span data-i18n-zh>CLI 命令行与批处理流水线</span>
                 <span data-i18n-en>CLI &amp; Checkpointed Automation</span>
@@ -1248,10 +1360,10 @@ let result = flow.run().await?;</code></pre>
                 <span data-i18n-zh>一行命令完成工作流严格校验、执行、断点续跑与终端 TUI 轨迹重放（<code>trace replay</code>）。</span>
                 <span data-i18n-en>Validate, execute, checkpoint-resume, and inspect runs interactively in the terminal TUI with <code>yanshi trace replay</code>.</span>
               </p>
-              <pre class="surface-cmd"><code>cargo install --path yanshi-cli</code></pre>
+              <pre class="surface-cmd"><code data-hl="bash">cargo install --path yanshi-cli</code></pre>
             </div>
 
-            <div class="surface-box">
+            <div class="surface-box spotlight-card">
               <h3>
                 <span data-i18n-zh>Web Studio 可视化画布与网关</span>
                 <span data-i18n-en>Web Studio &amp; Axum Gateway</span>
@@ -1260,10 +1372,10 @@ let result = flow.run().await?;</code></pre>
                 <span data-i18n-zh>启动 <code>yanshi-server</code> 即可访问 <code>/ui/app</code> 模板运行台与 <code>/ui/studio</code> 节点断点画布，内联预览幻灯片与音视频。</span>
                 <span data-i18n-en>Launch <code>yanshi-server</code> for <code>/ui/app</code> template forms and <code>/ui/studio</code> DAG debugging with per-node breakpoints and inline media preview.</span>
               </p>
-              <pre class="surface-cmd"><code>cargo run -p yanshi-server</code></pre>
+              <pre class="surface-cmd"><code data-hl="bash">cargo run --package yanshi-server</code></pre>
             </div>
 
-            <div class="surface-box">
+            <div class="surface-box spotlight-card">
               <h3>
                 <span data-i18n-zh>Yanshi Studio 原生桌面应用</span>
                 <span data-i18n-en>Yanshi Studio Desktop App</span>
@@ -1272,12 +1384,76 @@ let result = flow.run().await?;</code></pre>
                 <span data-i18n-zh>基于 Tauri v2 内嵌本地 Rust 执行引擎，无需安装 PostgreSQL 或外部服务端，支持离线 <code>ask_user</code> 交互与一键安装至 <code>/Applications</code>。</span>
                 <span data-i18n-en>Standalone Tauri v2 app embedding the local Rust engine — zero Postgres or external server process required.</span>
               </p>
-              <pre class="surface-cmd"><code>./scripts/install_desktop.sh --open</code></pre>
+              <pre class="surface-cmd"><code data-hl="bash">./scripts/install_desktop.sh --open</code></pre>
             </div>
           </div>
         </div>
       </section>
     </main>
+
+    <!-- IN-PAGE NATIVE <dialog> WORKFLOW YAML INSPECTOR -->
+    <dialog id="workflow-modal" class="wf-dialog" closedby="any" aria-labelledby="wf-modal-title">
+      <div class="wf-modal-header">
+        <div class="wf-modal-title-group">
+          <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <h3 id="wf-modal-title" class="wf-modal-title">examples/generators/illustrated_slides.yml</h3>
+          <span id="wf-modal-stats" class="wf-modal-stats"></span>
+        </div>
+
+        <div class="wf-modal-actions">
+          <button type="button" id="wf-prev-btn" class="wf-btn" aria-label="Previous workflow / 上一个模板">
+            ‹
+          </button>
+          <button type="button" id="wf-next-btn" class="wf-btn" aria-label="Next workflow / 下一个模板">
+            ›
+          </button>
+          <button type="button" id="wf-copy-yaml" class="wf-btn">
+            <span data-i18n-zh>复制 YAML</span>
+            <span data-i18n-en>Copy YAML</span>
+          </button>
+          <a id="wf-download-link" class="wf-btn" href="workflows/illustrated_slides.yml" download="illustrated_slides.yml">
+            <span data-i18n-zh>下载 .yml</span>
+            <span data-i18n-en>Download</span>
+          </a>
+          <a
+            id="wf-github-link"
+            class="wf-btn"
+            href="https://github.com/yeying-ai/yanshi/tree/main/examples/generators"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub
+          </a>
+          <form method="dialog" style="margin: 0;">
+            <button type="submit" class="wf-btn wf-btn--close" autofocus aria-label="Close / 关闭">
+              ×
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <div class="wf-dag-bar" aria-label="Workflow DAG Node Pipeline">
+        <span class="wf-dag-label">
+          <span data-i18n-zh>DAG 节点流</span>
+          <span data-i18n-en>DAG Nodes</span>
+        </span>
+        <div id="wf-dag-nodes" class="wf-dag-nodes"></div>
+      </div>
+
+      <div class="wf-cli-strip">
+        <code id="wf-modal-cli"></code>
+        <button type="button" id="wf-copy-cli" class="copy-btn">
+          <span data-i18n-zh>复制命令</span>
+          <span data-i18n-en>Copy CLI</span>
+        </button>
+      </div>
+
+      <div id="wf-code-scroll" class="wf-code-scroll" tabindex="0" aria-label="YAML workflow source code">
+        <table class="wf-code-table">
+          <tbody id="wf-code-tbody"></tbody>
+        </table>
+      </div>
+    </dialog>
 
     <footer class="site-footer">
       <div class="container footer-inner">
@@ -1308,6 +1484,7 @@ let result = flow.run().await?;</code></pre>
       </div>
     </footer>
 
+    <script src="workflows-data.js" defer></script>
     <script src="app.js" defer></script>
   </body>
 </html>
