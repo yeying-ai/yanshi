@@ -2,10 +2,10 @@
 //! with `--input` facts and `--output-dir`, under a scripted mock model.
 //!
 //! The mock serves planner and generator calls from one queue, in call
-//! order: the planner's first turn (tool calls, no reply text consumed),
-//! each generator's model calls (workflow tools run one after another),
-//! then the planner's final answer. `YANSHI_MOCK_TOOL_CALLS` has one
-//! entry per model call: the planner's batch first, `[]` for the rest.
+//! order: the planner's first turn (native tool calls; its placeholder reply
+//! text is unused), each generator's model calls (workflow tools run one
+//! after another), then the planner's final answer. `YANSHI_MOCK_TOOL_CALLS`
+//! and `YANSHI_MOCK_RESPONSES` advance together one entry per model call.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -42,6 +42,9 @@ fn run_studio(want: &str, calls: Vec<Value>, replies: Vec<String>) -> (TempDir, 
   fs::create_dir_all(work.path().join("home/.yanshi")).expect("dir");
   fs::write(work.path().join("home/.yanshi/models.yml"), registry()).expect("registry");
   let model_calls = replies.len();
+  let mut all_replies = Vec::with_capacity(1 + model_calls);
+  all_replies.push("(unused — native tool call)".to_string());
+  all_replies.extend(replies);
   let mut tool_calls = vec![Value::Array(calls)];
   tool_calls.extend((0..model_calls).map(|_| json!([])));
   let out = work.path().join("out");
@@ -53,7 +56,7 @@ fn run_studio(want: &str, calls: Vec<Value>, replies: Vec<String>) -> (TempDir, 
       work.path().join("home/.yanshi/models.yml"),
     )
     .env("YANSHI_TRACE_DIR", work.path().join("traces"))
-    .env("YANSHI_MOCK_RESPONSES", json!(replies).to_string())
+    .env("YANSHI_MOCK_RESPONSES", json!(all_replies).to_string())
     .env(
       "YANSHI_MOCK_TOOL_CALLS",
       Value::Array(tool_calls).to_string(),

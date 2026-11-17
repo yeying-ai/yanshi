@@ -33,4 +33,12 @@ ignore = [
   # bump; would need dropping the mysql feature at the source (unclear
   # what currently causes sqlx to unify it in) or waiting on upstream.
   "RUSTSEC-2023-0071",
+  # libsqlite3-sys 0.30.1 (pulled in by sqlx-sqlite 0.8.6 via yanshi-memory):
+  # CVE-2026-119375 reads uninitialized page-cache bytes only when opening an
+  # untrusted database file paired with a crafted sibling `-wal` of mismatched
+  # page size. Yanshi only opens its own local session/preference SQLite files,
+  # never user-supplied `.db` + `-wal` pairs, and upstream sqlx (both 0.8.6 and
+  # 0.9.0, which caps `<0.38.0`) does not yet allow `libsqlite3-sys >= 0.39.0`.
+  # Re-evaluate and drop once sqlx ships a release allowing `>= 0.39.0`.
+  "RUSTSEC-2026-0459",
 ]

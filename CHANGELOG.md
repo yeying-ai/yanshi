@@ -111,6 +111,13 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **CI `cargo-audit` and `content-studio` CLI integration test.** Bumped
+  `openssl` (`0.10.73` → `0.10.82`) and `quinn-udp` (`0.5.14` → `0.5.16`) to
+  clear nine new RustSec advisories, documented the upstream-blocked `sqlx`
+  `libsqlite3-sys` advisory (`RUSTSEC-2026-0459`, local untrusted `-wal`
+  vector not reachable in `yanshi-memory`), and aligned
+  `content_studio_cli_tests`'s `YANSHI_MOCK_RESPONSES` queue with the
+  single-init `MockProvider` lifecycle after `4c6dab0`.
 - **Tauri desktop (`Yanshi Studio`) parity with gateway Studio.** The
   zero-Postgres local engine now serves `GET /v1/runs/{id}/questions` and
   `POST /v1/runs/{id}/questions/{question_id}` via `LocalRunQuestionHandler`
