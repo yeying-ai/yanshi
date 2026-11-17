@@ -45,6 +45,9 @@ cargo tauri dev
 
 # 打包原生安装包（.dmg / .app / .msi / .AppImage）
 cargo tauri build
+
+# macOS 一键构建并安装到 /Applications/Yanshi Studio.app（已构建过可加 --skip-build）
+../scripts/install_desktop.sh
 ```
 
 仅编译校验或运行桌面端内置引擎单步调试测试：

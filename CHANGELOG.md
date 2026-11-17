@@ -118,7 +118,8 @@ _New entries go here. Will roll into the next tag (likely
   pause on `ask_user` prompts offline, seeds `YANSHI_PRICING_TABLE` from
   the bundled `config/pricing.prod.yml` when no user pricing table is
   configured, and registers the `illustration` node and native OOXML
-  `export_pptx` defaults in the Studio DAG editor.
+  `export_pptx` defaults in the Studio DAG editor; `scripts/install_desktop.sh`
+  stages and installs `Yanshi Studio.app` into `/Applications` on macOS.
 - **Anthropic structured output on current Claude models.** A `JsonSchema`
   response format was emulated with a forced tool call, which Opus 5.5,
   Sonnet 5.5 and Fable 5.1 reject with a 400. Claude 4.5 and later now get
