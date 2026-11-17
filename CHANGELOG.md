@@ -353,6 +353,15 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Chinese README (`README_zh.md`) & refreshed `README.md` / crate metadata.**
+  Added a full Simplified Chinese `README_zh.md` with bidirectional language
+  switching, refreshed `README.md` to cover all 15 Content Studio workflows,
+  three-way slide visual routing, the five-layer L0–L4 crate table, and current
+  `RetryPolicy` / `ResourceLimits` / OS-sandbox surfaces (removing stale
+  pre-W5.3 `StateMonitor` / `ErrorContext` snippets and the leftover mock
+  `translations/` stubs), and aligned `[workspace.package]` `repository`
+  (`https://github.com/yeying-ai/yanshi`) and `homepage` (`https://yanshi.dev`)
+  in `Cargo.toml`.
 - **Bilingual product landing page (`site/landing/`).** Added a zero-dependency,
   light/dark-adaptive bilingual product landing page with dedicated crawlable
   routes at `https://yanshi.dev/` (`zh-CN`) and `https://yanshi.dev/en/` (`en`),

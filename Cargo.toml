@@ -48,8 +48,8 @@ resolver = "2"
 edition = "2024"
 license = "MIT"
 authors = ["yuxuetr", "Yanshi Contributors"]
-repository = "https://github.com/yuxuetr/yanshi"
-homepage = "https://github.com/yuxuetr/yanshi"
+repository = "https://github.com/yeying-ai/yanshi"
+homepage = "https://yanshi.dev"
 
 # Shared dependency versions for a handful of workspace-wide deps that had
 # drifted (version splits, inconsistent TLS backends). Every consuming
