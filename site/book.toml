@@ -1,6 +1,7 @@
-# Yanshi manual. Build locally with `mdbook build site` (output in
-# site/book/) or preview with `mdbook serve site`; CI publishes it to GitHub
-# Pages via .github/workflows/docs.yml.
+# Yanshi manual + landing site. Build the full GitHub Pages bundle locally with
+# `python3 site/build.py` (landing page in site/book/, manual in
+# site/book/docs/) or preview the manual alone with `mdbook serve site`; CI
+# publishes site/book/ via .github/workflows/docs.yml.
 
 [book]
 title = "Yanshi Manual"
@@ -11,7 +12,7 @@ language = "en"
 src = "../docs"
 
 [build]
-build-dir = "book"
+build-dir = "book/docs"
 # A typo in SUMMARY.md must fail the build, not silently create an empty page.
 create-missing = false
 
@@ -19,6 +20,6 @@ create-missing = false
 command = "python3 repo_links.py"
 
 [output.html]
-site-url = "/yanshi/"
+site-url = "/yanshi/docs/"
 git-repository-url = "https://github.com/yeying-ai/yanshi"
 edit-url-template = "https://github.com/yeying-ai/yanshi/edit/main/docs/{path}"

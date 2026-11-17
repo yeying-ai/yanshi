@@ -1,7 +1,8 @@
 name: Docs
 
-# Builds the mdBook manual (site/book.toml, pages in docs/, table of contents
-# in docs/SUMMARY.md) and publishes it to GitHub Pages from main.
+# Builds the product landing page (site/landing/) + mdBook manual (site/book.toml,
+# pages in docs/, table of contents in docs/SUMMARY.md) via site/build.py and
+# publishes them to GitHub Pages from main (/yanshi/ and /yanshi/docs/).
 #
 # No `paths:` filter on purpose: pages link to source files, and
 # site/repo_links.py fails the build when a linked file no longer exists — so
@@ -37,8 +38,8 @@ jobs:
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Build manual
-        run: mdbook build site
+      - name: Build landing page and manual
+        run: python3 site/build.py
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

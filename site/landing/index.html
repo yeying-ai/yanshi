@@ -1,0 +1,1313 @@
+<!doctype html>
+<html lang="zh-CN" data-lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      (() => {
+        let params = null;
+        try {
+          params = new URLSearchParams(location.search);
+          const qTheme = params.get("theme");
+          const scheme = (qTheme === "light" || qTheme === "dark")
+            ? qTheme
+            : localStorage.getItem("yanshi-color-scheme");
+          if (scheme === "light" || scheme === "dark") {
+            document.querySelector('meta[name="color-scheme"]').content = scheme;
+          }
+        } catch {}
+        let lang = null;
+        try {
+          const q = params ? params.get("lang") : null;
+          if (q === "zh" || q === "en") lang = q;
+          else lang = localStorage.getItem("yanshi-lang");
+        } catch {}
+        if (lang !== "zh" && lang !== "en") {
+          lang = (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+        }
+        document.documentElement.dataset.lang = lang;
+        document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+      })();
+    </script>
+    <title>Yanshi 偃师 · 确定性工作流与智能体多模态内容生产引擎</title>
+    <meta
+      name="description"
+      content="Yanshi (偃师) is a multimodal content-production runtime in Rust built on deterministic DAG workflows and agent-native loops — turning raw sources into editable PPTX, narrated 1080p MP4, PDF, XLSX, MP3, and validated diagrams."
+    />
+    <meta property="og:title" content="Yanshi 偃师 · Multimodal Content-Production Runtime in Rust" />
+    <meta
+      property="og:description"
+      content="Sources in, finished deliverables out: native OOXML .pptx, 16:9 .pdf, narrated .mp4, .mp3, .xlsx, and validated D2/Typst/TikZ diagrams on one inspectable Rust DAG + Agent runtime."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://yeying-ai.github.io/yanshi/" />
+    <meta property="og:image" content="https://yeying-ai.github.io/yanshi/assets/slide-route-illustration.webp" />
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">
+      <span data-i18n-zh>跳至主要内容</span>
+      <span data-i18n-en>Skip to main content</span>
+    </a>
+
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="./">
+          <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+            <defs>
+              <linearGradient id="brand-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#0f6e66" />
+                <stop offset="100%" stop-color="#1752a8" />
+              </linearGradient>
+            </defs>
+            <rect width="64" height="64" rx="12" fill="url(#brand-grad)" />
+            <path
+              d="M32 14 L50 32 L32 50 L14 32 Z M32 23 L23 32 L32 41 L41 32 Z"
+              fill="#ffffff"
+              fill-rule="evenodd"
+            />
+          </svg>
+          <span>Yanshi</span>
+          <span class="brand-hanzi">偃师</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary">
+          <a href="#visual-routing">
+            <span data-i18n-zh>三路视觉路由</span>
+            <span data-i18n-en>Visual Routing</span>
+          </a>
+          <a href="#paradigms">
+            <span data-i18n-zh>四种执行范式</span>
+            <span data-i18n-en>Paradigms</span>
+          </a>
+          <a href="#catalogue">
+            <span data-i18n-zh>15 套生成器</span>
+            <span data-i18n-en>15 Generators</span>
+          </a>
+          <a href="#architecture">
+            <span data-i18n-zh>五层架构</span>
+            <span data-i18n-en>Architecture</span>
+          </a>
+        </nav>
+
+        <div class="header-actions">
+          <button
+            type="button"
+            id="lang-toggle"
+            class="lang-btn"
+            aria-label="Switch language / 切换语言"
+          >
+            <span data-i18n-zh>EN</span>
+            <span data-i18n-en>中文</span>
+          </button>
+
+          <button
+            type="button"
+            id="theme-toggle"
+            class="icon-btn"
+            aria-label="Toggle color theme / 切换亮暗主题"
+          >
+            <svg class="theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </svg>
+            <svg class="theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
+
+          <a class="header-doc-link" href="docs/">
+            <span data-i18n-zh>文档手册</span>
+            <span data-i18n-en>Docs</span>
+          </a>
+
+          <a
+            class="header-gh-link"
+            href="https://github.com/yeying-ai/yanshi"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.92.58.11.79-.25.79-.56v-2.02c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+            </svg>
+            <span class="header-gh-text">GitHub</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <!-- 1. HERO + INTERACTIVE 5-STAGE STUDIO WORKBENCH -->
+      <section class="hero">
+        <div class="container hero-grid">
+          <div>
+            <p class="origin-note">
+              <span data-i18n-zh>《列子·汤问》偃师造人 · 显式结构组装、可追踪、可断点重放</span>
+              <span data-i18n-en>Named after Liezi’s artificer · Explicit, inspectable, replayable structure</span>
+            </p>
+
+            <h1 class="hero-title">
+              <span data-i18n-zh>把原始素材转化为可交付成品的 Rust 多模态内容生产引擎</span>
+              <span data-i18n-en>Turn raw sources into finished deliverables on one Rust runtime</span>
+            </h1>
+
+            <p class="hero-lead">
+              <span data-i18n-zh>
+                输入一个主题、网页链接、GitHub 仓库、学术 PDF 或音视频录音，通过确定性 DAG 工作流与原生智能体循环，直接产出原生可编辑 OOXML <code>.pptx</code>、<code>16:9 .pdf</code>、<code>1080p</code> 配音讲解视频、双人播客 <code>.mp3</code>、实验数据表 <code>.xlsx</code> 与自校验架构图。
+              </span>
+              <span data-i18n-en>
+                Feed an idea, URL, GitHub repository, academic PDF, or recording into deterministic DAG pipelines and agent-native loops. Emit native editable OOXML <code>.pptx</code>, <code>16:9 .pdf</code>, narrated <code>1080p .mp4</code>, normalized <code>.mp3</code>, <code>.xlsx</code> workbooks, and verified vector diagrams.
+              </span>
+            </p>
+
+            <div class="cli-quickbox">
+              <code id="hero-cli-cmd"><span class="cli-prompt">$</span>yanshi workflow run examples/generators/illustrated_slides.yml --input subject "Rust Zero-Copy I/O" --output-dir out/slides</code>
+              <button type="button" class="copy-btn" data-copy-source="hero-cli-cmd">
+                <span data-i18n-zh>复制</span>
+                <span data-i18n-en>Copy</span>
+              </button>
+            </div>
+
+            <div class="hero-ctas">
+              <a class="btn-primary" href="docs/">
+                <span data-i18n-zh>阅读在线手册</span>
+                <span data-i18n-en>Read the Manual</span>
+              </a>
+              <a class="btn-secondary" href="#catalogue">
+                <span data-i18n-zh>浏览 15 套 Studio 模板</span>
+                <span data-i18n-en>Browse 15 Studio Templates</span>
+              </a>
+              <a class="btn-secondary" href="docs/TRIAL_GUIDE.html">
+                <span data-i18n-zh>5 分钟试用指南</span>
+                <span data-i18n-en>5-Min Trial Guide</span>
+              </a>
+            </div>
+
+            <div class="fact-strip">
+              <div class="fact-cell">
+                <span class="fact-value">23 + 1</span>
+                <span class="fact-label">
+                  <span data-i18n-zh>Rust Crates 与 Studio UI</span>
+                  <span data-i18n-en>Rust Crates + Studio UI</span>
+                </span>
+              </div>
+              <div class="fact-cell">
+                <span class="fact-value">15</span>
+                <span class="fact-label">
+                  <span data-i18n-zh>开箱即用多模态生成器</span>
+                  <span data-i18n-en>Built-in Generators</span>
+                </span>
+              </div>
+              <div class="fact-cell">
+                <span class="fact-value">6 LLM</span>
+                <span class="fact-label">
+                  <span data-i18n-zh>OpenAI / Anthropic / Gemini 等</span>
+                  <span data-i18n-en>Multi-Provider Native Tools</span>
+                </span>
+              </div>
+              <div class="fact-cell">
+                <span class="fact-value">&lt; 1ms</span>
+                <span class="fact-label">
+                  <span data-i18n-zh>调度与预算护栏开销</span>
+                  <span data-i18n-en>Scheduler &amp; Guard Overhead</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive 5-Stage Content Studio Pipeline Workbench -->
+          <div class="workbench" data-tab-group>
+            <div class="workbench-bar">
+              <span class="workbench-title">Content Studio · 5-Stage Pipeline</span>
+              <span class="workbench-hint">
+                <span data-i18n-zh>点击阶段检视契约</span>
+                <span data-i18n-en>Select a stage to inspect</span>
+              </span>
+            </div>
+
+            <div class="stage-rail" role="tablist" aria-label="Content Studio Five Stages">
+              <button
+                type="button"
+                role="tab"
+                id="stage-tab-1"
+                data-panel="stage-panel-1"
+                aria-selected="true"
+                tabindex="0"
+                class="stage-node"
+              >
+                <span class="stage-num">01</span>
+                <span class="stage-name">
+                  <span data-i18n-zh>多源采集</span>
+                  <span data-i18n-en>Sources</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                id="stage-tab-2"
+                data-panel="stage-panel-2"
+                aria-selected="false"
+                tabindex="-1"
+                class="stage-node"
+              >
+                <span class="stage-num">02</span>
+                <span class="stage-name">
+                  <span data-i18n-zh>内容规划</span>
+                  <span data-i18n-en>Planner</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                id="stage-tab-3"
+                data-panel="stage-panel-3"
+                aria-selected="false"
+                tabindex="-1"
+                class="stage-node"
+              >
+                <span class="stage-num">03</span>
+                <span class="stage-name">
+                  <span data-i18n-zh>并行生成</span>
+                  <span data-i18n-en>Generators</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                id="stage-tab-4"
+                data-panel="stage-panel-4"
+                aria-selected="false"
+                tabindex="-1"
+                class="stage-node"
+              >
+                <span class="stage-num">04</span>
+                <span class="stage-name">
+                  <span data-i18n-zh>确定渲染</span>
+                  <span data-i18n-en>Renderers</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                id="stage-tab-5"
+                data-panel="stage-panel-5"
+                aria-selected="false"
+                tabindex="-1"
+                class="stage-node"
+              >
+                <span class="stage-num">05</span>
+                <span class="stage-name">
+                  <span data-i18n-zh>成品交付</span>
+                  <span data-i18n-en>Artifacts</span>
+                </span>
+              </button>
+            </div>
+
+            <div role="tabpanel" id="stage-panel-1" aria-labelledby="stage-tab-1">
+              <div class="stage-inspector">
+                <div class="inspector-head">
+                  <h2 class="inspector-title">
+                    <span data-i18n-zh>01 · 安全受控的多模态信源摄取</span>
+                    <span data-i18n-en>01 · Sandboxed Multimodal Source Ingestion</span>
+                  </h2>
+                  <span class="inspector-contract">SSRF-Pinned + Typed Chunks</span>
+                </div>
+                <p class="inspector-desc">
+                  <span data-i18n-zh>内置节点直接抓取网页、扫描 GitHub 仓库依赖树（不执行不可信代码）、解析 arXiv 源码包与 PDF 表格，或对音视频自动提取字幕与 ASR 转写。</span>
+                  <span data-i18n-en>Ingest web pages with DNS-pinned SSRF protection, snapshot GitHub repos without running untrusted code, parse PDFs/arXiv tarballs, or extract captions + ASR transcripts.</span>
+                </p>
+                <pre class="inspector-code"><code>- id: ingest_repo
+  type: repo_snapshot
+  config:
+    max_files: 180
+    include_imports: true
+- id: ingest_paper
+  type: pdf_extract
+  config:
+    extract_tables: true</code></pre>
+                <div class="inspector-tags">
+                  <span class="chip">web_search</span>
+                  <span class="chip">repo_snapshot</span>
+                  <span class="chip">pdf_extract</span>
+                  <span class="chip">arxiv</span>
+                  <span class="chip">video_ingest + asr</span>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="stage-panel-2" aria-labelledby="stage-tab-2" hidden="until-found">
+              <div class="stage-inspector">
+                <div class="inspector-head">
+                  <h2 class="inspector-title">
+                    <span data-i18n-zh>02 · 内容级大纲规划与人机澄清（HITL）</span>
+                    <span data-i18n-en>02 · Content Planning &amp; Interactive HITL</span>
+                  </h2>
+                  <span class="inspector-contract">AgentInterrupt::AskUser</span>
+                </div>
+                <p class="inspector-desc">
+                  <span data-i18n-zh>LLM 只负责内容大纲、视觉分流决策与未知约束提问（<code>ask_user</code>），绝不把控底层执行流；CLI、Web Studio 与桌面端均可原地挂起并恢复。</span>
+                  <span data-i18n-en>The LLM plans structure, visual routing, and clarifying questions via <code>ask_user</code> while deterministic DAG templates govern execution, cost, and retries.</span>
+                </p>
+                <pre class="inspector-code"><code>- id: clarify_scope
+  type: agent
+  run_if: "${inputs.interactive == true}"
+  config:
+    tools: [ask_user]
+    max_iterations: 4
+    system_prompt: "Confirm scale, audience, and constraints before drafting."</code></pre>
+                <div class="inspector-tags">
+                  <span class="chip">ask_user HITL</span>
+                  <span class="chip">Content-Studio Skill</span>
+                  <span class="chip">cost_limit_usd</span>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="stage-panel-3" aria-labelledby="stage-tab-3" hidden="until-found">
+              <div class="stage-inspector">
+                <div class="inspector-head">
+                  <h2 class="inspector-title">
+                    <span data-i18n-zh>03 · Schema 校验并行生成与自修复图表</span>
+                    <span data-i18n-en>03 · Schema-Validated Map Fan-Out &amp; Self-Repair</span>
+                  </h2>
+                  <span class="inspector-contract">map + figure + illustration</span>
+                </div>
+                <p class="inspector-desc">
+                  <span data-i18n-zh>通过依赖就绪调度器并发生成各章节、双人播客台词、6 种艺术风格概念插画与 D2/Typst/TikZ 矢量图；编译器报错自动回传修复。</span>
+                  <span data-i18n-en>Fan out across slides, chapters, voice tracks, art-directed illustrations, and D2/Typst/TikZ diagrams concurrently — feeding compiler diagnostics back automatically.</span>
+                </p>
+                <pre class="inspector-code"><code>- id: build_visuals
+  type: map
+  config:
+    concurrency: 4
+    body:
+      - id: art_panel
+        type: illustration
+        run_if: "${item.visual_kind == 'illustration'}"
+      - id: arch_svg
+        type: figure
+        run_if: "${item.visual_kind == 'arch_diagram'}"</code></pre>
+                <div class="inspector-tags">
+                  <span class="chip">JsonSchema Guard</span>
+                  <span class="chip">Chunk Citations</span>
+                  <span class="chip">Compiler Feedback Loop</span>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="stage-panel-4" aria-labelledby="stage-tab-4" hidden="until-found">
+              <div class="stage-inspector">
+                <div class="inspector-head">
+                  <h2 class="inspector-title">
+                    <span data-i18n-zh>04 · 纯 Rust 内置写入器 + OS 沙箱排版合成</span>
+                    <span data-i18n-en>04 · Pure-Rust Writers &amp; OS-Sandboxed Renderers</span>
+                  </h2>
+                  <span class="inspector-contract">Native OOXML + OS Sandbox</span>
+                </div>
+                <p class="inspector-desc">
+                  <span data-i18n-zh>原生 Rust 直接写出可编辑 PowerPoint 形状/表格（<code>.pptx</code>）与数值型 Excel（<code>.xlsx</code>），配合沙箱隔离的 Typst、Pandoc、FFmpeg 合成 <code>16:9 .pdf</code> 与 <code>1080p .mp4</code>。</span>
+                  <span data-i18n-en>Pure-Rust writers emit editable PowerPoint shapes/tables (<code>.pptx</code>) and typed Excel sheets (<code>.xlsx</code>), paired with sandboxed Typst, Pandoc, and FFmpeg muxing.</span>
+                </p>
+                <pre class="inspector-code"><code>- id: deck_bundle
+  type: render_slides
+  config:
+    export_pptx: true   # Pure-Rust native editable OOXML
+    export_pdf: true    # 16:9 Typst vector deck
+    theme: "${inputs.slide_theme}"</code></pre>
+                <div class="inspector-tags">
+                  <span class="chip">render_slides (.pptx/.pdf)</span>
+                  <span class="chip">render_video (.mp4)</span>
+                  <span class="chip">render_audio (EBU R128 .mp3)</span>
+                  <span class="chip">render_table (.xlsx)</span>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="stage-panel-5" aria-labelledby="stage-tab-5" hidden="until-found">
+              <div class="stage-inspector">
+                <div class="inspector-head">
+                  <h2 class="inspector-title">
+                    <span data-i18n-zh>05 · 零 Base64 膨胀的磁盘产物与断点续跑</span>
+                    <span data-i18n-en>05 · Zero-Base64 File Artifacts &amp; Checkpoints</span>
+                  </h2>
+                  <span class="inspector-contract">FlowValue::File + SHA-256</span>
+                </div>
+                <p class="inspector-desc">
+                  <span data-i18n-zh>所有媒体产物均以一等公民 <code>FlowValue::File</code> 落盘并附带 SHA-256 清单，支持 <code>--checkpoint</code> 从最后一个成功节点秒级恢复，不重复计费。</span>
+                  <span data-i18n-en>Deliverables travel through the graph as typed <code>FlowValue::File</code> handles with SHA-256 manifests — inspect inline in Studio or resume interrupted runs without re-billing.</span>
+                </p>
+                <pre class="inspector-code"><code># Resume an interrupted multi-stage video run from last completed node:
+yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
+  --output-dir out/lecture</code></pre>
+                <div class="inspector-tags">
+                  <span class="chip">--output-dir</span>
+                  <span class="chip">/v1/runs/{id}/artifacts</span>
+                  <span class="chip">workflow resume</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. SIGNATURE SHOWCASE: 3-WAY SLIDE VISUAL ROUTER -->
+      <section id="visual-routing" class="section">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-heading-group">
+              <h2 class="section-title">
+                <span data-i18n-zh>三路智能幻灯片视觉路由：拒绝整页贴图与文字堆砌</span>
+                <span data-i18n-en>Three-Way Slide Visual Routing: Beyond Flat AI Image Decks</span>
+              </h2>
+              <p class="section-desc">
+                <span data-i18n-zh>
+                  下方三张实拍产物来自同一套 Yanshi 演示流水线。规划器根据每页语义自动分流至最匹配的视觉引擎，最终合并导出为可二次编辑的原生 OOXML <code>.pptx</code>、<code>16:9 .pdf</code> 与交互式 <code>.html</code>。
+                </span>
+                <span data-i18n-en>
+                  All three slides below were produced in a single Yanshi run. Each slide is routed by intent to the right visual engine and compiled together into native editable OOXML <code>.pptx</code>, <code>16:9 .pdf</code>, and interactive <code>.html</code>.
+                </span>
+              </p>
+            </div>
+            <a class="btn-secondary" href="docs/STUDIO_CATALOGUE.html#slide-visual-routing--art-direction-presets">
+              <span data-i18n-zh>查看视觉路由文档</span>
+              <span data-i18n-en>Visual Routing Spec</span>
+            </a>
+          </div>
+
+          <div class="router-grid">
+            <article class="route-panel">
+              <figure class="route-figure">
+                <img
+                  src="assets/slide-route-illustration.webp"
+                  alt="Yanshi slide routed to IllustrationNode showing isometric pipeline bottleneck breaking into smooth zero-copy channel"
+                  width="1280"
+                  height="720"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </figure>
+              <div class="route-body">
+                <div class="route-meta">
+                  <span class="route-kind">Route 01 · illustration</span>
+                  <span class="route-engine">IllustrationNode</span>
+                </div>
+                <h3 class="route-title">
+                  <span data-i18n-zh>艺术指导概念插图（6 种风格预设）</span>
+                  <span data-i18n-en>Art-Directed Conceptual Illustration</span>
+                </h3>
+                <p class="route-text">
+                  <span data-i18n-zh>针对封面、痛点隐喻与总结页，自动锁定深浅画布底色并注入反乱码文字护栏，由美术总监提示词精修器生成高辨识度主题视觉。</span>
+                  <span data-i18n-en>Cover, analogy, and takeaway slides run through LLM art-director prompt refinement with canvas palette harmonization and strict anti-garbled-text guardrails.</span>
+                </p>
+                <div class="preset-list">
+                  <span class="chip">editorial_tech</span>
+                  <span class="chip">isometric_3d</span>
+                  <span class="chip">flat_vector</span>
+                  <span class="chip">blueprint_schematic</span>
+                  <span class="chip">scientific_diagram</span>
+                  <span class="chip">cinematic_keynote</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="route-panel">
+              <figure class="route-figure">
+                <img
+                  src="assets/slide-route-diagram.webp"
+                  alt="Yanshi slide routed to FigureNode compiling D2 kernel SQ and CQ ring buffer architecture diagram"
+                  width="1280"
+                  height="720"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </figure>
+              <div class="route-body">
+                <div class="route-meta">
+                  <span class="route-kind">Route 02 · arch_diagram</span>
+                  <span class="route-engine">D2 · Typst · TikZ</span>
+                </div>
+                <h3 class="route-title">
+                  <span data-i18n-zh>自校验拓扑与架构矢量图</span>
+                  <span data-i18n-en>Verified Vector Topology &amp; Schematics</span>
+                </h3>
+                <p class="route-text">
+                  <span data-i18n-zh>系统架构、状态机与数据流页直接编译为精确的 D2、Typst、TikZ 或容器隔离 Python 图表，语法异常自动触发编译器诊断闭环修复。</span>
+                  <span data-i18n-en>System topologies, state machines, and dataflows compile cleanly via D2, Typst, TikZ, or isolated Python — automatically repairing syntax or layout errors before export.</span>
+                </p>
+                <div class="preset-list">
+                  <span class="chip">language: d2</span>
+                  <span class="chip">typst</span>
+                  <span class="chip">tikz / circuitikz</span>
+                  <span class="chip">container python</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="route-panel">
+              <figure class="route-figure">
+                <img
+                  src="assets/slide-route-structured.webp"
+                  alt="Yanshi slide routed to structured_panel showing syntax-highlighted Rust io_uring code and editable callout cards"
+                  width="1280"
+                  height="720"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </figure>
+              <div class="route-body">
+                <div class="route-meta">
+                  <span class="route-kind">Route 03 · structured_panel</span>
+                  <span class="route-engine">Pure-Rust OOXML</span>
+                </div>
+                <h3 class="route-title">
+                  <span data-i18n-zh>原生可编辑组件、代码窗与对比表</span>
+                  <span data-i18n-en>Native Editable Shapes, Tables &amp; Code</span>
+                </h3>
+                <p class="route-text">
+                  <span data-i18n-zh>代码剖析、基准指标与清单页由纯 Rust 引擎直接生成原生 PowerPoint 形状（<code>&lt;p:sp&gt;</code>）、表格（<code>&lt;a:tbl&gt;</code>）与连线，打开 PowerPoint / Keynote 即可逐字修改。</span>
+                  <span data-i18n-en>Code walkthroughs, benchmarks, and checklists emit real PowerPoint shapes (<code>&lt;p:sp&gt;</code>), <code>&lt;a:tbl&gt;</code> tables, and connectors — 100% editable in PowerPoint or Keynote.</span>
+                </p>
+                <div class="preset-list">
+                  <span class="chip">editable .pptx</span>
+                  <span class="chip">16:9 .pdf</span>
+                  <span class="chip">1080p narrated .mp4</span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. FOUR EXECUTION PARADIGMS TABS -->
+      <section id="paradigms" class="section">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-heading-group">
+              <h2 class="section-title">
+                <span data-i18n-zh>同一窄腰内核上的四种执行范式</span>
+                <span data-i18n-en>Four Execution Paradigms Sharing One Narrow-Waist Kernel</span>
+              </h2>
+              <p class="section-desc">
+                <span data-i18n-zh>
+                  从完全静态编排的确定性 DAG，到每步自主决策的智能体循环，再到「一次规划、编译为并行 DAG 执行」的动态工作流，共享同一套工具注册表（<code>ToolRegistry</code>）与安全治理壳（<code>yanshi-harness</code>）。
+                </span>
+                <span data-i18n-en>
+                  Span the full binding-time spectrum — from fixed production DAGs to autonomous agent loops and runtime-compiled flows — sharing one <code>ToolRegistry</code>, checkpoint format, and security harness.
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <div class="tabs-shell" data-tab-group>
+            <div class="tablist" role="tablist" aria-label="Execution Paradigms">
+              <button
+                type="button"
+                role="tab"
+                id="p-tab-dag"
+                data-panel="p-panel-dag"
+                aria-selected="true"
+                tabindex="0"
+              >
+                <span data-i18n-zh>1. 静态确定性 DAG (YAML)</span>
+                <span data-i18n-en>1. Static DAG (YAML)</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="p-tab-agent"
+                data-panel="p-panel-agent"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                <span data-i18n-zh>2. 原生智能体与 HITL</span>
+                <span data-i18n-en>2. Native Agent &amp; HITL</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="p-tab-dynamic"
+                data-panel="p-panel-dynamic"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                <span data-i18n-zh>3. 动态编译工作流</span>
+                <span data-i18n-en>3. Dynamic Workflow</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="p-tab-sdk"
+                data-panel="p-panel-sdk"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                <span data-i18n-zh>4. Rust SDK 与 Harness 治理</span>
+                <span data-i18n-en>4. Rust SDK &amp; Harness</span>
+              </button>
+            </div>
+
+            <!-- Panel 1: Static DAG -->
+            <div role="tabpanel" id="p-panel-dag" aria-labelledby="p-tab-dag">
+              <div class="tabpanel-body">
+                <div class="paradigm-summary">
+                  <h3>
+                    <span data-i18n-zh>声明式并发 DAG：成本可控、严格校验、断点续跑</span>
+                    <span data-i18n-en>Deterministic DAG: Explicit I/O, Cost Caps &amp; Checkpoints</span>
+                  </h3>
+                  <p>
+                    <span data-i18n-zh>适用于可复现的内容生产线、批处理与数据管道。运行前通过 <code>yanshi workflow validate --strict</code> 静态检查表达式与节点契约。</span>
+                    <span data-i18n-en>Built for repeatable Studio pipelines, RAG indexing, and batch automation. Validate expressions and node schemas statically before spending a token.</span>
+                  </p>
+                  <ul class="paradigm-points">
+                    <li>
+                      <span data-i18n-zh>依赖就绪并发调度器 + <code>map</code> / <code>while</code> / <code>run_if</code> 控制流</span>
+                      <span data-i18n-en>Dependency-ready concurrent scheduler with <code>map</code>, <code>while</code>, and <code>run_if</code></span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh>内置 44 模型计费表与 <code>cost_limit_usd</code> 实时熔断保护</span>
+                      <span data-i18n-en>Built-in 44-model pricing ledger with hard <code>cost_limit_usd</code> enforcement</span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh>通过 <code>AgentNode</code> 在任意 DAG 节点内嵌入自主智能体</span>
+                      <span data-i18n-en>Embed an autonomous agent inside any DAG step via <code>AgentNode</code></span>
+                    </li>
+                  </ul>
+                  <a href="docs/WORKFLOW_SCHEMA.html">
+                    <span data-i18n-zh>查阅 Workflow Schema 手册</span>
+                    <span data-i18n-en>Read Workflow Schema Guide</span>
+                  </a>
+                </div>
+                <div class="code-frame">
+                  <div class="code-frame-bar">
+                    <span>examples/generators/paper_reader.yml</span>
+                    <button type="button" class="copy-btn" data-copy-source="code-dag">
+                      <span data-i18n-zh>复制</span>
+                      <span data-i18n-en>Copy</span>
+                    </button>
+                  </div>
+                  <pre><code id="code-dag">name: paper_reader
+cost_limit_usd: 1.50
+nodes:
+  - id: extract
+    type: pdf_extract
+    config:
+      source: "${inputs.source}"
+      extract_tables: true
+
+  - id: bilingual_digest
+    type: llm
+    dependencies: [extract]
+    config:
+      model: gpt-4o
+      response_format: json_schema
+      prompt: "Synthesize key contributions and benchmarks..."
+
+  - id: export_excel
+    type: render_table
+    dependencies: [bilingual_digest]
+    config:
+      format: xlsx</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 2: Native Agent -->
+            <div role="tabpanel" id="p-panel-agent" aria-labelledby="p-tab-agent" hidden="until-found">
+              <div class="tabpanel-body">
+                <div class="paradigm-summary">
+                  <h3>
+                    <span data-i18n-zh>原生智能体循环：ReAct、Plan-Execute、多智能体协作</span>
+                    <span data-i18n-en>Agent-Native Loops: ReAct, Plan-Execute &amp; Supervisors</span>
+                  </h3>
+                  <p>
+                    <span data-i18n-zh>结构化记录每一步观察、规划、工具调用、反思与停止原因（<code>AgentStopReason</code>），并可将任意确定性 DAG 封装为 <code>WorkflowTool</code> 供智能体按需调用。</span>
+                    <span data-i18n-en>Every observe, plan, tool call, reflection, and verification step is typed and traceable — and any DAG workflow can be exposed to the agent as a <code>WorkflowTool</code>.</span>
+                  </p>
+                  <ul class="paradigm-points">
+                    <li>
+                      <span data-i18n-zh>支持 Handoff、Blackboard、Debate 三种多智能体协同编排器</span>
+                      <span data-i18n-en>Multi-agent Handoff, Blackboard, and Debate supervisors</span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh>原生 MCP 工具接入与 Ed25519 签名校验的 <code>SKILL.md</code> 技能包</span>
+                      <span data-i18n-en>First-class MCP client and Ed25519-verified <code>SKILL.md</code> packages</span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh><code>ask_user</code> 跨 CLI、HTTP SSE 与 Tauri 桌面端一致挂起与恢复</span>
+                      <span data-i18n-en>Unified <code>ask_user</code> interrupt/resume across CLI, HTTP SSE, and Tauri</span>
+                    </li>
+                  </ul>
+                  <a href="docs/AGENT_RUNTIME.html">
+                    <span data-i18n-zh>查阅 Agent Runtime 手册</span>
+                    <span data-i18n-en>Read Agent Runtime Guide</span>
+                  </a>
+                </div>
+                <div class="code-frame">
+                  <div class="code-frame-bar">
+                    <span>CLI · Multi-Deliverable Studio Planner Skill</span>
+                    <button type="button" class="copy-btn" data-copy-source="code-agent">
+                      <span data-i18n-zh>复制</span>
+                      <span data-i18n-en>Copy</span>
+                    </button>
+                  </div>
+                  <pre><code id="code-agent"># Planner agent inspects the source, selects matching DAG generators,
+# invokes WorkflowTools in parallel, and verifies output artifacts:
+yanshi skill run examples/applications/content-studio \
+  --input url=https://arxiv.org/abs/1706.03762 \
+  --input want=report,mindmap,audio_overview \
+  --output-dir out/studio-bundle</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 3: Dynamic Workflow -->
+            <div role="tabpanel" id="p-panel-dynamic" aria-labelledby="p-tab-dynamic" hidden="until-found">
+              <div class="tabpanel-body">
+                <div class="paradigm-summary">
+                  <h3>
+                    <span data-i18n-zh>动态工作流：兼具智能体灵活性与 DAG 确定性回放</span>
+                    <span data-i18n-en>Dynamic Workflow: Plan Once, Execute as a Parallel Flow</span>
+                  </h3>
+                  <p>
+                    <span data-i18n-zh>由 <code>DynamicWorkflowAgent</code> 在运行期生成拓扑计划，经白名单校验后编译为标准 <code>yanshi_core::Flow</code> 并行执行——只需一次规划开销，后续全程可回放、可设断点。</span>
+                    <span data-i18n-en><code>DynamicWorkflowAgent</code> authors a bounded execution plan at runtime and compiles it via <code>compile_plan_to_flow</code> into an inspectable, parallel <code>Flow</code>.</span>
+                  </p>
+                  <ul class="paradigm-points">
+                    <li>
+                      <span data-i18n-zh>消除长链路 ReAct 每步重复消耗上下文 Token 的膨胀问题</span>
+                      <span data-i18n-en>Eliminates per-step context bloat on multi-branch tasks</span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh>编译前强制验证节点白名单、有向无环拓扑与最大步数上限</span>
+                      <span data-i18n-en>Enforces node allowlists, acyclicity, and step budgets before execution</span>
+                    </li>
+                  </ul>
+                  <a href="docs/ARCHITECTURE.html#four-execution-paradigms--mental-model">
+                    <span data-i18n-zh>查阅四范式架构详解</span>
+                    <span data-i18n-en>Read Four-Paradigm Architecture</span>
+                  </a>
+                </div>
+                <div class="code-frame">
+                  <div class="code-frame-bar">
+                    <span>yanshi-agents/src/dynamic/</span>
+                    <button type="button" class="copy-btn" data-copy-source="code-dynamic">
+                      <span data-i18n-zh>复制</span>
+                      <span data-i18n-en>Copy</span>
+                    </button>
+                  </div>
+                  <pre><code id="code-dynamic">use yanshi_agents::dynamic::{compile_plan_to_flow, DynamicWorkflowAgent};
+use yanshi_core::FlowExt;
+
+let plan = planner_agent.author_plan(&amp;task, &amp;allowed_tools).await?;
+let flow = compile_plan_to_flow(&amp;plan, &amp;registry)?;
+
+// Executes on the standard concurrent scheduler with full tracing &amp; checkpoints:
+let outputs = flow.run().await?;</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 4: Rust SDK & Harness -->
+            <div role="tabpanel" id="p-panel-sdk" aria-labelledby="p-tab-sdk" hidden="until-found">
+              <div class="tabpanel-body">
+                <div class="paradigm-summary">
+                  <h3>
+                    <span data-i18n-zh>类型安全 Rust SDK 与生产级沙箱默认闭锁</span>
+                    <span data-i18n-en>Type-Safe Rust SDK &amp; Fail-Closed Production Security</span>
+                  </h3>
+                  <p>
+                    <span data-i18n-zh>既可作为独立网关/CLI 使用，也可按需引入分层 Crate 嵌入自有 Rust 服务。<code>SecurityProfile::Production</code> 默认开启 OS 沙箱并拒绝未签名插件与非回环裸绑。</span>
+                    <span data-i18n-en>Embed only the crates you need. Under <code>SecurityProfile::Production</code>, macOS <code>sandbox-exec</code> / Linux Landlock+seccomp+cgroup v2 and Ed25519 signature checks are enforced fail-closed.</span>
+                  </p>
+                  <ul class="paradigm-points">
+                    <li>
+                      <span data-i18n-zh><code>code_exec</code> 强制运行于零网络隔离容器（<code>ContainerBackend</code>）</span>
+                      <span data-i18n-en><code>code_exec</code> enforces zero-network <code>ContainerBackend</code> isolation</span>
+                    </li>
+                    <li>
+                      <span data-i18n-zh><code>HttpTool</code> 逐请求固定 DNS 解析并归一化 IPv6，封堵 DNS 重绑定 SSRF</span>
+                      <span data-i18n-en>Per-request DNS pinning in <code>HttpTool</code> closes TOCTOU SSRF gaps</span>
+                    </li>
+                  </ul>
+                  <a href="docs/SECURITY_PROFILES.html">
+                    <span data-i18n-zh>查阅安全策略与沙箱文档</span>
+                    <span data-i18n-en>Read Security Profiles Guide</span>
+                  </a>
+                </div>
+                <div class="code-frame">
+                  <div class="code-frame-bar">
+                    <span>Rust Embedded Flow + SecurityProfile</span>
+                    <button type="button" class="copy-btn" data-copy-source="code-sdk">
+                      <span data-i18n-zh>复制</span>
+                      <span data-i18n-en>Copy</span>
+                    </button>
+                  </div>
+                  <pre><code id="code-sdk">use std::sync::Arc;
+use yanshi_core::{flow::{Flow, GraphNode, NodeType}, FlowExt};
+use yanshi_nodes_ai::nodes::llm::LlmNode;
+use yanshi_tool::SecurityProfile;
+
+let profile = SecurityProfile::Production;
+let mut flow = Flow::new();
+flow.add_node(GraphNode::standard("summarize", Arc::new(LlmNode::default())));
+let result = flow.run().await?;</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. 15 BUILT-IN STUDIO GENERATORS MATRIX -->
+      <section id="catalogue" class="section">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-heading-group">
+              <h2 class="section-title">
+                <span data-i18n-zh>15 套开箱即用 Content Studio 生成器模板</span>
+                <span data-i18n-en>15 Built-in Content Studio Generator Workflows</span>
+              </h2>
+              <p class="section-desc">
+                <span data-i18n-zh>全部模板位于 <code>examples/generators/</code>，均通过严格模式 Schema 校验，可在 CLI、Web Studio（<code>/ui/app</code> 与 <code>/ui/studio</code>）及桌面端一键运行。</span>
+                <span data-i18n-en>Every workflow in <code>examples/generators/</code> passes <code>workflow validate --strict</code> and runs identically in the CLI, Web Studio, HTTP API, and Desktop app.</span>
+              </p>
+            </div>
+
+            <div class="filter-bar" role="group" aria-label="Filter templates by category">
+              <button type="button" class="filter-btn" data-filter="all" aria-pressed="true">
+                <span data-i18n-zh>全部 (15)</span>
+                <span data-i18n-en>All (15)</span>
+              </button>
+              <button type="button" class="filter-btn" data-filter="media" aria-pressed="false">
+                <span data-i18n-zh>演示与视听 (5)</span>
+                <span data-i18n-en>Slides &amp; Media (5)</span>
+              </button>
+              <button type="button" class="filter-btn" data-filter="eng" aria-pressed="false">
+                <span data-i18n-zh>研发与科研 (4)</span>
+                <span data-i18n-en>Engineering &amp; Research (4)</span>
+              </button>
+              <button type="button" class="filter-btn" data-filter="study" aria-pressed="false">
+                <span data-i18n-zh>研报与学习包 (6)</span>
+                <span data-i18n-en>Reports &amp; Study (6)</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="catalogue-grid">
+            <!-- 1. illustrated_slides -->
+            <article class="tpl-item" data-cat="media">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/illustrated_slides.yml" target="_blank" rel="noopener noreferrer">illustrated_slides.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>联网检索考证 + 三路智能视觉路由（6 种概念插画预设、D2 架构图、原生可编辑表格/代码框）。</span>
+                <span data-i18n-en>Web-grounded keynote deck routing slides across 6 art-directed illustration styles, D2 diagrams, and native OOXML shapes.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.pptx</span>
+                <span class="ext-badge">16:9 .pdf</span>
+                <span class="ext-badge">.html</span>
+              </div>
+            </article>
+
+            <!-- 2. tech_slides_video -->
+            <article class="tpl-item" data-cat="media">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/tech_slides_video.yml" target="_blank" rel="noopener noreferrer">tech_slides_video.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>渐进式分步动画与毫秒级语音配音对齐，支持聚光灯高亮框与画中画主讲人视频合成。</span>
+                <span data-i18n-en>Step-by-step progressive slide builds synced millisecond-accurately to TTS narration, spotlight rings, and optional PiP presenter.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">1080p .mp4</span>
+                <span class="ext-badge">.srt / .vtt</span>
+                <span class="ext-badge">.pptx</span>
+                <span class="ext-badge">.pdf</span>
+              </div>
+            </article>
+
+            <!-- 3. slides -->
+            <article class="tpl-item" data-cat="media">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/slides.yml" target="_blank" rel="noopener noreferrer">slides.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>基于指定资料源生成的结构化幻灯片，内置自修复矢量图（零生图 Key 亦可开箱运行，按需开启插画）。</span>
+                <span data-i18n-en>Source-grounded presentation with self-repairing vector diagrams; works with zero image API keys out of the box.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.pptx</span>
+                <span class="ext-badge">16:9 .pdf</span>
+                <span class="ext-badge">.html</span>
+              </div>
+            </article>
+
+            <!-- 4. video_overview -->
+            <article class="tpl-item" data-cat="media">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/video_overview.yml" target="_blank" rel="noopener noreferrer">video_overview.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>多幕分镜并行插画或动态视频片段（<code>text_to_video</code>）生成，自动配音并混流字幕轨道。</span>
+                <span data-i18n-en>Parallel multi-scene visual generation (stills or optional motion clips) muxed with per-scene voiceover and subtitles.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.mp4</span>
+                <span class="ext-badge">.srt</span>
+              </div>
+            </article>
+
+            <!-- 5. audio_overview -->
+            <article class="tpl-item" data-cat="media">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/audio_overview.yml" target="_blank" rel="noopener noreferrer">audio_overview.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>双人对话式深度播客脚本，双声线并行合成并通过 EBU R128 广播级响度标准化输出。</span>
+                <span data-i18n-en>Two-speaker conversational deep-dive voiced in parallel and loudness-normalized to EBU R128 via <code>render_audio</code>.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.mp3</span>
+              </div>
+            </article>
+
+            <!-- 6. repo_architecture -->
+            <article class="tpl-item" data-cat="eng">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/repo_architecture.yml" target="_blank" rel="noopener noreferrer">repo_architecture.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>静态扫描本地目录或远程 GitHub 仓库结构与内部依赖图，输出 D2 系统架构图与模块剖析手册。</span>
+                <span data-i18n-en>Scans repository manifests and internal imports safely without executing code, producing verified D2 architecture diagrams and PDF dossier.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.svg / .png</span>
+                <span class="ext-badge">.pdf</span>
+                <span class="ext-badge">.html</span>
+              </div>
+            </article>
+
+            <!-- 7. backend_project_planner -->
+            <article class="tpl-item" data-cat="eng">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/backend_project_planner.yml" target="_blank" rel="noopener noreferrer">backend_project_planner.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>支持交互式 <code>ask_user</code> 需求澄清，一次性生成架构图、UML 类图/时序图、ER 图、PostgreSQL DDL 与完整设计书。</span>
+                <span data-i18n-en>Interactive HITL clarification followed by system architecture, UML class/sequence, ER diagrams, PostgreSQL <code>.sql</code> DDL, and spec PDF.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">6x .svg</span>
+                <span class="ext-badge">.sql</span>
+                <span class="ext-badge">.pdf</span>
+              </div>
+            </article>
+
+            <!-- 8. paper_reader -->
+            <article class="tpl-item" data-cat="eng">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/paper_reader.yml" target="_blank" rel="noopener noreferrer">paper_reader.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>精读 arXiv 或本地论文 PDF，提取数值实验对比表导出为 Excel，并生成双语导读手册、方法图与思维导图。</span>
+                <span data-i18n-en>Extracts experimental benchmark tables into typed Excel workbooks alongside a bilingual digest PDF, method diagram, and mindmap.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.pdf</span>
+                <span class="ext-badge">.xlsx / .csv</span>
+                <span class="ext-badge">.svg</span>
+              </div>
+            </article>
+
+            <!-- 9. video_summarizer -->
+            <article class="tpl-item" data-cat="eng">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/video_summarizer.yml" target="_blank" rel="noopener noreferrer">video_summarizer.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>优先提取原生字幕，缺失时自动回退 FFmpeg 抽音 + ASR 语音识别，输出带时间戳纪要、双语字幕与导图。</span>
+                <span data-i18n-en>Prefers native captions with automatic fallback to FFmpeg audio extraction + ASR, emitting timestamped notes, <code>.srt</code>, and mindmap.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.pdf / .html</span>
+                <span class="ext-badge">.srt</span>
+                <span class="ext-badge">.svg</span>
+              </div>
+            </article>
+
+            <!-- 10. report -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/report.yml" target="_blank" rel="noopener noreferrer">report.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>按大纲分节并行撰写深度研究报告，每处论据绑定原文分块脚注引用并排版为出版级 PDF。</span>
+                <span data-i18n-en>Parallel section drafting with verbatim source quotes and chunk-level footnote citations, typeset cleanly into HTML and PDF.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.pdf</span>
+                <span class="ext-badge">.html</span>
+                <span class="ext-badge">.md</span>
+              </div>
+            </article>
+
+            <!-- 11. infographic -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/infographic.yml" target="_blank" rel="noopener noreferrer">infographic.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>提炼核心指标与对比洞察，经由确定性 Tera SVG 海报引擎渲染高清矢量信息图与 PNG。</span>
+                <span data-i18n-en>Extracts schema-checked headline metrics and renders crisp deterministic SVG and high-DPI PNG posters.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.svg</span>
+                <span class="ext-badge">.png</span>
+              </div>
+            </article>
+
+            <!-- 12. mindmap -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/mindmap.yml" target="_blank" rel="noopener noreferrer">mindmap.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>抽取多层知识树结构，同时导出静态矢量导图与可离线折叠交互的 HTML 脑图。</span>
+                <span data-i18n-en>Hierarchical knowledge tree rendered simultaneously as vector SVG, PNG, and interactive collapsible HTML.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.svg</span>
+                <span class="ext-badge">.png</span>
+                <span class="ext-badge">.html</span>
+              </div>
+            </article>
+
+            <!-- 13. circuit_diagram -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/circuit_diagram.yml" target="_blank" rel="noopener noreferrer">circuit_diagram.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>先抽取类型化元器件清单校验连接拓扑，再调用 <code>circuitikz</code> + <code>lualatex</code> 编译精准电路原理图。</span>
+                <span data-i18n-en>Extracts a typed parts list first, validates every component ID, and compiles publication-grade <code>circuitikz</code> schematics.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.svg</span>
+                <span class="ext-badge">.png</span>
+              </div>
+            </article>
+
+            <!-- 14. flashcards -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/flashcards.yml" target="_blank" rel="noopener noreferrer">flashcards.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>将技术文档或教材转化为单文件离线可翻转记忆闪卡与结构化 JSON 题集。</span>
+                <span data-i18n-en>Turns source material into a self-contained offline flip-card study deck and structured JSON dataset.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.html</span>
+                <span class="ext-badge">.json</span>
+              </div>
+            </article>
+
+            <!-- 15. quiz -->
+            <article class="tpl-item" data-cat="study">
+              <div class="tpl-top">
+                <a class="tpl-file" href="https://github.com/yeying-ai/yanshi/blob/main/examples/generators/quiz.yml" target="_blank" rel="noopener noreferrer">quiz.yml</a>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>生成带即时判分、答案解析与原文溯源的交互式自测题页。</span>
+                <span data-i18n-en>Self-grading multiple-choice assessment page with instant answer rationales and score tracking.</span>
+              </p>
+              <div class="tpl-outputs">
+                <span class="ext-badge">.html</span>
+                <span class="ext-badge">.json</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. FIVE-LAYER NARROW-WAIST ARCHITECTURE + THREE SURFACES -->
+      <section id="architecture" class="section">
+        <div class="container">
+          <div class="section-header">
+            <div class="section-heading-group">
+              <h2 class="section-title">
+                <span data-i18n-zh>五层窄腰契约架构：八条依赖铁律由编译器门禁守护</span>
+                <span data-i18n-en>Five-Layer Architecture Enforced by Eight Dependency Laws</span>
+              </h2>
+              <p class="section-desc">
+                <span data-i18n-zh>
+                  各运行时从不互相耦合，只依赖 L0 纯类型窄腰内核；工具层与能力层严格分离，每次提交由 <code>cargo xtask check-arch</code> 静态审计。
+                </span>
+                <span data-i18n-en>
+                  Runtimes never depend on each other — only on the zero-logic L0 contract kernel, guarded continuously in CI by <code>cargo xtask check-arch</code>.
+                </span>
+              </p>
+            </div>
+            <a class="btn-secondary" href="docs/ARCHITECTURE.html">
+              <span data-i18n-zh>架构全景文档</span>
+              <span data-i18n-en>Architecture Docs</span>
+            </a>
+          </div>
+
+          <div class="arch-stack" style="margin-bottom: 40px;">
+            <div class="arch-layer">
+              <span class="layer-id">L4 · Operations</span>
+              <span class="layer-role">
+                <span data-i18n-zh>可观测性、网关、分布式 Worker 与 Studio UI</span>
+                <span data-i18n-en>Gateway, Tracing, Distributed Worker &amp; Web/Desktop UI</span>
+              </span>
+              <div class="layer-crates">
+                <span class="chip">yanshi-server</span>
+                <span class="chip">yanshi-worker (gRPC)</span>
+                <span class="chip">yanshi-db (Postgres)</span>
+                <span class="chip">yanshi-tracing (OTLP)</span>
+                <span class="chip">yanshi-ui (React + Tauri)</span>
+              </div>
+            </div>
+
+            <div class="arch-layer">
+              <span class="layer-id">L3 · Orchestration</span>
+              <span class="layer-role">
+                <span data-i18n-zh>智能体运行时、技能体系、安全治理壳与 YAML 装配</span>
+                <span data-i18n-en>Agent Runtimes, Skills, Governance Harness &amp; Config CLI</span>
+              </span>
+              <div class="layer-crates">
+                <span class="chip">yanshi-agents</span>
+                <span class="chip">yanshi-skills</span>
+                <span class="chip">yanshi-harness</span>
+                <span class="chip">yanshi-config</span>
+                <span class="chip">yanshi-cli</span>
+              </div>
+            </div>
+
+            <div class="arch-layer">
+              <span class="layer-id">L2 · Capabilities</span>
+              <span class="layer-role">
+                <span data-i18n-zh>工具阶渲染节点、多模态 AI 节点、MCP、RAG 与记忆</span>
+                <span data-i18n-en>Deterministic Renderers, AI Nodes, LLM, OS Sandbox, MCP &amp; RAG</span>
+              </span>
+              <div class="layer-crates">
+                <span class="chip">yanshi-nodes</span>
+                <span class="chip">yanshi-nodes-ai</span>
+                <span class="chip">yanshi-llm</span>
+                <span class="chip">yanshi-tools</span>
+                <span class="chip">yanshi-mcp</span>
+                <span class="chip">yanshi-rag</span>
+                <span class="chip">yanshi-memory</span>
+              </div>
+            </div>
+
+            <div class="arch-layer">
+              <span class="layer-id">L1 · Execution Core</span>
+              <span class="layer-role">
+                <span data-i18n-zh>并发就绪调度器、重试超时控制、资源限额与检查点</span>
+                <span data-i18n-en>Concurrent Scheduler, Checkpointing, Retry &amp; Resource Limits</span>
+              </span>
+              <div class="layer-crates">
+                <span class="chip">yanshi-core (FlowExt::run)</span>
+              </div>
+            </div>
+
+            <div class="arch-layer arch-layer--kernel">
+              <span class="layer-id">L0 · Contract Kernel</span>
+              <span class="layer-role">
+                <span data-i18n-zh>纯契约窄腰核心（零运行时逻辑，隔离重型依赖）</span>
+                <span data-i18n-en>Narrow-Waist Contract Kernel (Shared Types Only, Zero Logic)</span>
+              </span>
+              <div class="layer-crates">
+                <span class="chip">yanshi-value</span>
+                <span class="chip">yanshi-graph</span>
+                <span class="chip">yanshi-tool</span>
+                <span class="chip">yanshi-agent-spi</span>
+                <span class="chip">yanshi-store-spi</span>
+                <span class="chip">yanshi-async-util</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Three Ways to Run -->
+          <div class="surfaces-grid">
+            <div class="surface-box">
+              <h3>
+                <span data-i18n-zh>CLI 命令行与批处理流水线</span>
+                <span data-i18n-en>CLI &amp; Checkpointed Automation</span>
+              </h3>
+              <p>
+                <span data-i18n-zh>一行命令完成工作流严格校验、执行、断点续跑与终端 TUI 轨迹重放（<code>trace replay</code>）。</span>
+                <span data-i18n-en>Validate, execute, checkpoint-resume, and inspect runs interactively in the terminal TUI with <code>yanshi trace replay</code>.</span>
+              </p>
+              <pre class="surface-cmd"><code>cargo install --path yanshi-cli</code></pre>
+            </div>
+
+            <div class="surface-box">
+              <h3>
+                <span data-i18n-zh>Web Studio 可视化画布与网关</span>
+                <span data-i18n-en>Web Studio &amp; Axum Gateway</span>
+              </h3>
+              <p>
+                <span data-i18n-zh>启动 <code>yanshi-server</code> 即可访问 <code>/ui/app</code> 模板运行台与 <code>/ui/studio</code> 节点断点画布，内联预览幻灯片与音视频。</span>
+                <span data-i18n-en>Launch <code>yanshi-server</code> for <code>/ui/app</code> template forms and <code>/ui/studio</code> DAG debugging with per-node breakpoints and inline media preview.</span>
+              </p>
+              <pre class="surface-cmd"><code>cargo run -p yanshi-server</code></pre>
+            </div>
+
+            <div class="surface-box">
+              <h3>
+                <span data-i18n-zh>Yanshi Studio 原生桌面应用</span>
+                <span data-i18n-en>Yanshi Studio Desktop App</span>
+              </h3>
+              <p>
+                <span data-i18n-zh>基于 Tauri v2 内嵌本地 Rust 执行引擎，无需安装 PostgreSQL 或外部服务端，支持离线 <code>ask_user</code> 交互与一键安装至 <code>/Applications</code>。</span>
+                <span data-i18n-en>Standalone Tauri v2 app embedding the local Rust engine — zero Postgres or external server process required.</span>
+              </p>
+              <pre class="surface-cmd"><code>./scripts/install_desktop.sh --open</code></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div>
+          <strong>Yanshi 偃师</strong> ·
+          <span data-i18n-zh>MIT 开源许可 · 由 Rust 构建</span>
+          <span data-i18n-en>MIT Licensed · Built in Rust</span>
+        </div>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="docs/">
+            <span data-i18n-zh>在线文档手册</span>
+            <span data-i18n-en>Manual</span>
+          </a>
+          <a href="docs/STUDIO_CATALOGUE.html">
+            <span data-i18n-zh>Studio 模板目录</span>
+            <span data-i18n-en>Studio Catalogue</span>
+          </a>
+          <a href="docs/WEB_UI.html">
+            <span data-i18n-zh>Web 与桌面端指南</span>
+            <span data-i18n-en>Web &amp; Desktop UI</span>
+          </a>
+          <a href="docs/MULTIMODAL_GUIDE.html">
+            <span data-i18n-zh>多模态指南</span>
+            <span data-i18n-en>Multimodal Guide</span>
+          </a>
+          <a href="https://github.com/yeying-ai/yanshi" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

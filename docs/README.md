@@ -7,9 +7,11 @@ phase reports, old TODO trackers, implementation summaries, and stale backups
 have been removed from the active docs tree so this directory stays focused on
 working references.
 
-The curated manual built from this directory is published at
-<https://yeying-ai.github.io/yanshi/> (table of contents:
-[SUMMARY.md](SUMMARY.md); build locally with `mdbook build site`).
+The product landing page is published at <https://yeying-ai.github.io/yanshi/>
+and the curated manual built from this directory is published at
+<https://yeying-ai.github.io/yanshi/docs/> (table of contents:
+[SUMMARY.md](SUMMARY.md); build the full site locally with `python3 site/build.py`
+or just the manual with `mdbook build site`).
 
 ## Start Here
 

@@ -2,7 +2,8 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yeying-ai.github.io/yanshi/)
+[![Website](https://img.shields.io/badge/website-yanshi-0f6e66.svg)](https://yeying-ai.github.io/yanshi/)
+[![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yeying-ai.github.io/yanshi/docs/)
 
 > **A multimodal content-production runtime in Rust: sources in (an idea, a URL, files, a recording), finished deliverables out (reports, mind maps, audio overviews, slides, quizzes, infographics, videos, domain diagrams) — built on deterministic DAG workflows, agent-native loops, Skills, MCP tools, memory, tracing and checkpointed recovery.**
 
@@ -369,7 +370,7 @@ cargo check --workspace
 ## 📚 Documentation
 
 ### Core Documentation
-- **[Docs Index](docs/README.md)** & **[Online Manual](https://yeying-ai.github.io/yanshi/)**: Current documentation entry points.
+- **[Product Website](https://yeying-ai.github.io/yanshi/)**, **[Online Manual](https://yeying-ai.github.io/yanshi/docs/)**, & **[Docs Index](docs/README.md)**: Current website and documentation entry points.
 - **[Content Studio Catalogue & Desktop](docs/STUDIO_CATALOGUE.md)**: Guide to the 15 built-in generators, slide visual routing, Web Studio, and `Yanshi Studio` desktop app.
 - **[RoadMap](RoadMap.md)**: Current direction — the Content Studio runtime (track Y) — plus deferred tracks with their re-evaluate conditions.
 - **[Content Studio RFC](docs/RFC_CONTENT_STUDIO.md)**: Five-stage model, artifact and `Deliverable` / `Citation` contracts, notebook entity, renderer strategy, decision log.
