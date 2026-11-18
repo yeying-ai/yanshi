@@ -75,6 +75,7 @@ pub async fn execute(
       model: model.clone(),
       prompt,
       source_url,
+      reference_urls: Vec::new(),
       source_weight: strength.unwrap_or(0.7),
       size: Some(size.clone()),
       n: Some(1),

@@ -358,15 +358,26 @@ impl Image2ImageProvider for GoogleMediaProvider {
 
   async fn transform(&self, request: Image2ImageRequest) -> Result<ImageGenerationResponse> {
     let (mime_type, b64_data) = resolve_source_image(&self.client, &request.source_url).await?;
-    let parts = vec![
-      json!({
+    let mut parts = Vec::with_capacity(2 + request.reference_urls.len());
+    parts.push(json!({
+      "inlineData": {
+        "mimeType": mime_type,
+        "data": b64_data,
+      }
+    }));
+    for ref_url in &request.reference_urls {
+      if ref_url.trim().is_empty() {
+        continue;
+      }
+      let (ref_mime, ref_b64) = resolve_source_image(&self.client, ref_url).await?;
+      parts.push(json!({
         "inlineData": {
-          "mimeType": mime_type,
-          "data": b64_data,
+          "mimeType": ref_mime,
+          "data": ref_b64,
         }
-      }),
-      json!({"text": request.prompt}),
-    ];
+      }));
+    }
+    parts.push(json!({"text": request.prompt}));
     let generation_config = image_generation_config(request.size.as_deref());
     let out_parts = self
       .generate_content_parts(&request.model, parts, generation_config)
@@ -886,5 +897,80 @@ mod tests {
       Some(24)
     );
     assert_eq!(parse_google_retry_delay_secs("{}"), None);
+  }
+
+  #[tokio::test]
+  async fn image2image_sends_source_and_multiple_reference_images_in_order() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.expect("accept");
+      let mut buf = vec![0u8; 16384];
+      let n = stream.read(&mut buf).await.expect("read");
+      let req_text = String::from_utf8_lossy(&buf[..n]).to_string();
+      let body_start = req_text.find("\r\n\r\n").expect("headers") + 4;
+      let payload: Value = serde_json::from_str(&req_text[body_start..]).expect("json");
+      let parts = payload["contents"][0]["parts"].as_array().expect("parts");
+      assert_eq!(parts.len(), 4);
+      assert_eq!(parts[0]["inlineData"]["data"], "c291cmNl");
+      assert_eq!(parts[1]["inlineData"]["data"], "cmVmMQ==");
+      assert_eq!(parts[2]["inlineData"]["data"], "cmVmMg==");
+      assert_eq!(parts[3]["text"], "Episode 3 rooftop scene");
+
+      let resp_body = json!({
+        "candidates": [{
+          "content": {
+            "parts": [{
+              "inlineData": { "mimeType": "image/png", "data": "b3V0" }
+            }]
+          }
+        }]
+      })
+      .to_string();
+      let http_resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        resp_body.len(),
+        resp_body
+      );
+      stream
+        .write_all(http_resp.as_bytes())
+        .await
+        .expect("write response");
+    });
+
+    let no_proxy_client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("test client");
+    let provider =
+      GoogleMediaProvider::with_client(no_proxy_client, "test-key", Some(format!("http://{addr}")))
+        .expect("provider");
+
+    let out = provider
+      .transform(Image2ImageRequest {
+        model: "gemini-3.1-flash-image".to_string(),
+        prompt: "Episode 3 rooftop scene".to_string(),
+        source_url: "data:image/png;base64,c291cmNl".to_string(),
+        reference_urls: vec![
+          "data:image/png;base64,cmVmMQ==".to_string(),
+          "data:image/jpeg;base64,cmVmMg==".to_string(),
+        ],
+        source_weight: 0.85,
+        size: Some("16:9".to_string()),
+        n: Some(1),
+        response_format: None,
+        seed: None,
+        steps: None,
+        cfg_scale: None,
+      })
+      .await
+      .expect("transform");
+
+    assert_eq!(out.images.len(), 1);
+    assert_eq!(out.images[0].b64_json.as_deref(), Some("b3V0"));
+    server.await.expect("server join");
   }
 }

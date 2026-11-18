@@ -18,6 +18,11 @@ pub struct Image2ImageRequest {
   pub prompt: String,
   /// Source image — URL or `data:` URI.
   pub source_url: String,
+  /// Optional additional reference images (URLs or `data:` URIs) for
+  /// multi-reference character/location consistency on providers that
+  /// accept multiple visual inputs (e.g. Google Gemini image models).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub reference_urls: Vec<String>,
   /// Weight of the source image in the (0.0, 1.0] range. Higher
   /// values keep the output closer to the source.
   pub source_weight: f32,

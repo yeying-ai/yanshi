@@ -107,6 +107,7 @@ impl Tool for Image2ImageTool {
       model: model.to_string(),
       prompt,
       source_url,
+      reference_urls: Vec::new(),
       source_weight: params["source_weight"]
         .as_f64()
         .map(|n| n as f32)

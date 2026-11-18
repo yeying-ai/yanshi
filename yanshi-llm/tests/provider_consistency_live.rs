@@ -2498,6 +2498,7 @@ async fn live_image2image(
     model: model.to_string(),
     prompt: "Turn this photo into a watercolour painting".to_string(),
     source_url: LIVE_SOURCE_IMAGE.to_string(),
+    reference_urls: Vec::new(),
     source_weight: 0.6,
     size: None,
     n: Some(1),

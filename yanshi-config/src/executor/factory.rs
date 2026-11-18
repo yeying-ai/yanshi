@@ -266,18 +266,60 @@ pub fn create_graph_node(node_def: &NodeDefinitionV2) -> Result<GraphNode> {
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "image_to_image" => {
-      let model = get_string_param_optional(&node_def.parameters, "model");
-      let prompt = get_string_param_optional(&node_def.parameters, "prompt");
-      let source_image = get_string_param_optional(&node_def.parameters, "source_image");
-      let node = ImageToImageNode::new(&node_def.id, &model, &prompt, &source_image)
-        .with_output_format(get_output_format(&node_def.parameters)?);
+      let params = &node_def.parameters;
+      let model = get_string_param_optional(params, "model");
+      let prompt = get_string_param_optional(params, "prompt");
+      let source_image = get_string_param_optional(params, "source_image");
+      let mut node = ImageToImageNode::new(&node_def.id, &model, &prompt, &source_image)
+        .with_output_format(get_output_format(params)?);
+      let size = get_string_param_optional(params, "size");
+      if !size.is_empty() {
+        node = node.with_size(size);
+      }
+      if let Some(weight) = params.get("source_weight").and_then(|v| v.as_f64()) {
+        node = node.with_source_weight(weight as f32);
+      }
+      if let Some(seed) = params.get("seed").and_then(|v| v.as_i64()) {
+        node = node.with_seed(i32::try_from(seed).unwrap_or(0));
+      }
+      if let Some(refs) = params.get("reference_images").and_then(|v| v.as_sequence()) {
+        let parsed: Vec<String> = refs
+          .iter()
+          .filter_map(|v| v.as_str().map(ToString::to_string))
+          .collect();
+        if !parsed.is_empty() {
+          node = node.with_reference_images(parsed);
+        }
+      }
       Ok(NodeType::Standard(Arc::new(node)))
     }
     "image_understand" => {
-      let model = get_string_param_optional(&node_def.parameters, "model");
-      let text_prompt = get_string_param_optional(&node_def.parameters, "text_prompt");
-      let image_source = get_string_param_optional(&node_def.parameters, "image_source");
-      let node = ImageUnderstandNode::new(&node_def.id, &model, &text_prompt, &image_source);
+      let params = &node_def.parameters;
+      let model = get_string_param_optional(params, "model");
+      let text_prompt = get_string_param_optional(params, "text_prompt");
+      let image_source = get_string_param_optional(params, "image_source");
+      let mut node = ImageUnderstandNode::new(&node_def.id, &model, &text_prompt, &image_source);
+      let reference_image = get_string_param_optional(params, "reference_image");
+      if !reference_image.is_empty() {
+        node = node.with_reference_image(reference_image);
+      }
+      let system = {
+        let s = get_string_param_optional(params, "system");
+        if s.is_empty() {
+          get_string_param_optional(params, "system_message")
+        } else {
+          s
+        }
+      };
+      if !system.is_empty() {
+        node = node.with_system_message(system);
+      }
+      if let Some(temp) = params.get("temperature").and_then(|v| v.as_f64()) {
+        node = node.with_temperature(temp as f32);
+      }
+      if let Some(max_tokens) = params.get("max_tokens").and_then(|v| v.as_u64()) {
+        node = node.with_max_tokens(u32::try_from(max_tokens).unwrap_or(u32::MAX));
+      }
       Ok(NodeType::Standard(Arc::new(node)))
     }
     // Y3.1: in-process renderers; all inputs are read at execute time.

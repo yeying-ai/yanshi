@@ -11,48 +11,77 @@ pub fn flow_value_to_string(value: &FlowValue) -> String {
   }
 }
 
-pub async fn load_data_uri_from_source(
-  source: &str,
-  inputs: &yanshi_core::async_node::AsyncNodeInputs,
-) -> Result<String, YanshiError> {
-  if let Some(value) = inputs.get(source) {
-    return match value {
-      FlowValue::Json(Value::String(s)) => Ok(s.clone()), // Assume it's already a data URI or URL
-      FlowValue::File { path, .. } => {
-        let data = tokio::fs::read(path)
-          .await
-          .map_err(|e| YanshiError::NodeInputError {
-            message: format!("Failed to read file at {:?}: {}", path, e),
-          })?;
-        let mime_type = mime_guess::from_path(path).first_or_octet_stream();
-        Ok(format!(
-          "data:{};base64,{}",
-          mime_type,
-          STANDARD.encode(data)
-        ))
-      }
-      FlowValue::Url { url, .. } => Ok(url.clone()),
-      _ => Err(YanshiError::NodeInputError {
-        message: format!("Unsupported FlowValue type for source '{}'", source),
-      }),
-    };
-  }
-
-  if source.starts_with("http") || source.starts_with("data:") {
-    return Ok(source.to_string());
-  }
-
-  let data = tokio::fs::read(source)
+async fn read_file_as_data_uri(path: &std::path::Path) -> Result<String, YanshiError> {
+  let data = tokio::fs::read(path)
     .await
     .map_err(|e| YanshiError::NodeInputError {
-      message: format!("Failed to read file at {}: {}", source, e),
+      message: format!("Failed to read file at {:?}: {}", path, e),
     })?;
-  let mime_type = mime_guess::from_path(source).first_or_octet_stream();
+  let mime_type = mime_guess::from_path(path).first_or_octet_stream();
   Ok(format!(
     "data:{};base64,{}",
     mime_type,
     STANDARD.encode(data)
   ))
+}
+
+pub async fn load_data_uri_from_str(source: &str) -> Result<String, YanshiError> {
+  let trimmed = source.trim();
+  if trimmed.starts_with("http://")
+    || trimmed.starts_with("https://")
+    || trimmed.starts_with("data:")
+  {
+    return Ok(trimmed.to_string());
+  }
+  read_file_as_data_uri(std::path::Path::new(trimmed)).await
+}
+
+pub async fn load_data_uri_from_flow_value(
+  value: &FlowValue,
+  label: &str,
+) -> Result<String, YanshiError> {
+  match value {
+    FlowValue::Json(Value::String(s)) => load_data_uri_from_str(s).await,
+    FlowValue::File { path, .. } => read_file_as_data_uri(path).await,
+    FlowValue::Url { url, .. } => Ok(url.clone()),
+    FlowValue::Json(Value::Object(obj)) => {
+      if let Some(path_str) = obj
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+      {
+        return read_file_as_data_uri(std::path::Path::new(path_str.trim())).await;
+      }
+      if let Some(url_str) = obj
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+      {
+        return Ok(url_str.trim().to_string());
+      }
+      Err(YanshiError::NodeInputError {
+        message: format!(
+          "Unsupported JSON object for source '{}': expected 'path' or 'url' field",
+          label
+        ),
+      })
+    }
+    _ => Err(YanshiError::NodeInputError {
+      message: format!("Unsupported FlowValue type for source '{}'", label),
+    }),
+  }
+}
+
+pub async fn load_data_uri_from_source(
+  source: &str,
+  inputs: &yanshi_core::async_node::AsyncNodeInputs,
+) -> Result<String, YanshiError> {
+  if !source.is_empty()
+    && let Some(value) = inputs.get(source)
+  {
+    return load_data_uri_from_flow_value(value, source).await;
+  }
+  load_data_uri_from_str(source).await
 }
 
 pub async fn load_bytes_from_source(

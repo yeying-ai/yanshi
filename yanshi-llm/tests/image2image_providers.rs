@@ -23,6 +23,7 @@ fn request(model: &str) -> Image2ImageRequest {
     model: model.to_string(),
     prompt: "make it a watercolour".to_string(),
     source_url: format!("data:image/png;base64,{PNG_1X1}"),
+    reference_urls: Vec::new(),
     source_weight: 0.5,
     size: Some("1024x1024".to_string()),
     n: None,
