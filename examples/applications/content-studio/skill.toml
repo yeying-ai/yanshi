@@ -15,7 +15,7 @@
 [skill]
 name        = "content-studio"
 version     = "0.1.0"
-description = "Turn a source into the deliverables you ask for: report, mind map, audio overview, slides, flashcards, quiz, infographic, video overview"
+description = "Turn a source into the deliverables you ask for: report, mind map, audio overview, slides, flashcards, quiz, infographic, video overview, illustrated slides, tech keynote video, or multi-agent debate podcast"
 
 [persona]
 language = "en"
@@ -32,15 +32,19 @@ Tools, one per deliverable kind:
 - `quiz`: a self-checking multiple-choice quiz (.html, questions as JSON)
 - `infographic`: headline numbers and key points on one page (.svg, .png)
 - `video_overview`: a narrated, illustrated explainer video (.mp4 + .srt)
+- `illustrated_slides`: an AI-illustrated + D2 diagram keynote deck (.html, .pptx, .pdf)
+- `tech_slides_video`: a 1080p step-animated narrated keynote lecture video (.mp4, .pptx, .pdf)
+- `debate_podcast_show`: a three-voice multi-agent roundtable debate radio show (.mp3, .pdf)
 
 Rules:
 1. Call each wanted tool exactly once, all in your first turn. Pass the
    source as `url` (or as `text` when no URL was given).
 2. Choose the parameters from the request: `focus` (what to concentrate
    on), and `sections` (3-6) for a report, `depth` (2-4) for a mind map,
-   `minutes` (2-5) and `language` for audio, `slides` (4-10) for a
-   deck, `count` for flashcards (5-30) or a quiz (3-20), `scene_count`
-   (4-10) and `language` for a video. Keep defaults otherwise.
+   `minutes` (2-5) and `language` for audio, `slides` / `slide_count`
+   (4-10) for decks, `count` for flashcards (5-30) or a quiz (3-20),
+   `scene_count` (4-10) and `language` for a video, or `turn_count`
+   (8-18) for a debate podcast. Keep defaults otherwise.
 3. Never write the content yourself. The tools do that.
 4. When the tools have returned, answer with one line per deliverable:
    its kind, its title, and the file names it produced. If a tool
@@ -91,6 +95,21 @@ description = "Draw an infographic of the source: headline numbers, key points a
 name        = "video_overview"
 path        = "../../generators/video_overview.yml"
 description = "Make a narrated explainer video of the source: illustrated scenes, voice-over and subtitles, as .mp4"
+
+[[workflows]]
+name        = "illustrated_slides"
+path        = "../../generators/illustrated_slides.yml"
+description = "Build an AI-illustrated and D2-diagrammed keynote slide deck of the source as interactive .html, native OOXML .pptx, and 16:9 .pdf"
+
+[[workflows]]
+name        = "tech_slides_video"
+path        = "../../generators/tech_slides_video.yml"
+description = "Produce a 1080p step-animated narrated technical lecture video of the source (.mp4 + .srt + .vtt) with matching .pptx and .pdf"
+
+[[workflows]]
+name        = "debate_podcast_show"
+path        = "../../generators/debate_podcast_show.yml"
+description = "Run a multi-agent adversarial roundtable debate on the source and master a three-voice .mp3 radio episode plus .pdf briefing"
 
 [memory]
 type          = "session"

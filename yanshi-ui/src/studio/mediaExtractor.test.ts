@@ -72,7 +72,7 @@ describe('inspectYamlLocally', () => {
   it('computes levels, edges, and sub_nodes for tech_slides_video preset', () => {
     const res = inspectYamlLocally(TECH_SLIDES_VIDEO_YAML);
     expect(res.valid).toBe(true);
-    expect(res.nodes.length).toBe(19);
+    expect(res.nodes.length).toBe(20);
     expect(res.nodes.some((n) => n.id === 'illustrate' && n.type === 'illustration')).toBe(true);
     expect(res.inputs.some((i) => i.name === 'topic')).toBe(true);
     expect(res.inputs.some((i) => i.name === 'presenter_mode')).toBe(true);

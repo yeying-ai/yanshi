@@ -44,7 +44,10 @@ export type GeneratorKind =
   | 'flashcards'
   | 'quiz'
   | 'infographic'
-  | 'video_overview';
+  | 'video_overview'
+  | 'illustrated_slides'
+  | 'tech_slides_video'
+  | 'debate_podcast_show';
 
 export interface GeneratorParamField {
   key: string;
@@ -275,9 +278,118 @@ export const STUDIO_GENERATORS: ReadonlyArray<StudioGeneratorSpec> = [
       },
     ],
   },
+  {
+    kind: 'illustrated_slides',
+    title: 'AI 插图与架构图幻灯片',
+    deliverableBadge: 'HTML · PPTX · PDF',
+    summary: '结合笔记本分块规划大纲、编译 D2 架构图与艺术指导插画，输出原生 OOXML 可编辑 PPTX 与 16:9 讲义 PDF。',
+    fields: [
+      {
+        key: 'focus',
+        label: '演示切入角度',
+        type: 'text',
+        defaultValue: '核心原理、架构机制与关键结论',
+      },
+      {
+        key: 'slide_count',
+        label: '幻灯片页数 (4–10)',
+        type: 'number',
+        defaultValue: 6,
+        min: 3,
+        max: 10,
+      },
+      {
+        key: 'enable_illustrations',
+        label: '调用 AI 插画节点生成定制配图',
+        type: 'checkbox',
+        defaultValue: true,
+      },
+      {
+        key: 'image_model',
+        label: '文生图模型名',
+        type: 'text',
+        defaultValue: 'gemini-3.1-flash-image',
+      },
+    ],
+  },
+  {
+    kind: 'tech_slides_video',
+    title: '1080p 演播级技术精讲视频',
+    deliverableBadge: 'MP4 · PPTX · PDF',
+    summary: '围绕笔记本资料编排双栏渐进动画幻灯片与视线引导口播稿，合成毫秒级卡点 1080p 讲课视频与同步课件。',
+    fields: [
+      {
+        key: 'focus',
+        label: '精讲聚焦主线',
+        type: 'text',
+        defaultValue: '底层机制、关键数据与工程最佳实践',
+      },
+      {
+        key: 'slide_count',
+        label: '正片章节页数 (4–10)',
+        type: 'number',
+        defaultValue: 6,
+        min: 3,
+        max: 10,
+      },
+      {
+        key: 'tts_model',
+        label: 'TTS 语音模型名',
+        type: 'text',
+        defaultValue: 'gemini-2.5-flash-preview-tts',
+      },
+      {
+        key: 'image_model',
+        label: '文生图模型名',
+        type: 'text',
+        defaultValue: 'gemini-3.1-flash-image',
+      },
+    ],
+  },
+  {
+    kind: 'debate_podcast_show',
+    title: '三声线多智能体圆桌辩论电台',
+    deliverableBadge: 'MP3 · 思辨特刊 PDF',
+    summary: '正方开拓派、反方审慎派与金牌主持人基于笔记本资料多轮真刀真枪辩论，混音输出广播级三声线播客与特刊 PDF。',
+    fields: [
+      {
+        key: 'focus',
+        label: '圆桌核心辩题',
+        type: 'text',
+        defaultValue: '围绕笔记本资料中的核心命题与潜在权衡展开正反交锋',
+      },
+      {
+        key: 'turn_count',
+        label: '电台对话轮次数 (8–18)',
+        type: 'number',
+        defaultValue: 12,
+        min: 8,
+        max: 18,
+      },
+      {
+        key: 'tts_model',
+        label: 'TTS 语音模型名',
+        type: 'text',
+        defaultValue: 'gemini-2.5-flash-preview-tts',
+      },
+      {
+        key: 'enable_cover_art',
+        label: '生成单集概念封面插画',
+        type: 'checkbox',
+        defaultValue: true,
+      },
+    ],
+  },
 ];
 
-type SourceIngestTab = 'text' | 'url' | 'file';
+type SourceIngestTab = 'text' | 'url' | 'file' | 'recording';
+
+const SOURCE_INGEST_TABS: ReadonlyArray<{ id: SourceIngestTab; label: string }> = [
+  { id: 'text', label: '粘贴文本' },
+  { id: 'url', label: '网页 URL' },
+  { id: 'file', label: '上传文档' },
+  { id: 'recording', label: '上传录音' },
+];
 
 /** Extract optional `:id` from `/ui/notebooks/:id`. */
 export function notebookIdFromPath(pathname: string): string | null {
@@ -390,7 +502,16 @@ export function NotebookWorkspacePage({
   const [sourceTextDraft, setSourceTextDraft] = useState<string>('');
   const [sourceUrlDraft, setSourceUrlDraft] = useState<string>('');
   const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
+  const [selectedRecordingFile, setSelectedRecordingFile] = useState<File | null>(null);
+  const [recordingModelDraft, setRecordingModelDraft] = useState<string>('gemini-2.5-flash-asr');
+  const [recordingLangDraft, setRecordingLangDraft] = useState<string>('');
   const [ingestBusy, setIngestBusy] = useState<boolean>(false);
+  const sourceTabRefs = useRef<Record<SourceIngestTab, HTMLButtonElement | null>>({
+    text: null,
+    url: null,
+    file: null,
+    recording: null,
+  });
 
   // BM25 search state
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -710,9 +831,9 @@ export function NotebookWorkspacePage({
           url: urlTrimmed,
           ...(sourceTitleDraft.trim() ? { title: sourceTitleDraft.trim() } : {}),
         };
-      } else {
+      } else if (ingestTab === 'file') {
         if (!selectedUploadFile) {
-          throw new Error('请选择一个 .txt、.md 或 .html 文件。');
+          throw new Error('请选择一个 .pdf、.txt、.md 或 .html 文档文件。');
         }
         const buffer = await selectedUploadFile.arrayBuffer();
         const contentBase64 = encodeBytesToBase64(new Uint8Array(buffer));
@@ -720,6 +841,21 @@ export function NotebookWorkspacePage({
           kind: 'file',
           filename: selectedUploadFile.name,
           content_base64: contentBase64,
+          ...(sourceTitleDraft.trim() ? { title: sourceTitleDraft.trim() } : {}),
+        };
+      } else {
+        if (!selectedRecordingFile) {
+          throw new Error('请选择一个 .mp3、.wav、.m4a、.ogg 或 .webm 录音文件。');
+        }
+        const buffer = await selectedRecordingFile.arrayBuffer();
+        const contentBase64 = encodeBytesToBase64(new Uint8Array(buffer));
+        bodyPayload = {
+          kind: 'recording',
+          filename: selectedRecordingFile.name,
+          content_base64: contentBase64,
+          ...(sourceTitleDraft.trim() ? { title: sourceTitleDraft.trim() } : {}),
+          ...(recordingModelDraft.trim() ? { model: recordingModelDraft.trim() } : {}),
+          ...(recordingLangDraft.trim() ? { language: recordingLangDraft.trim() } : {}),
         };
       }
 
@@ -747,6 +883,7 @@ export function NotebookWorkspacePage({
       if (ingestTab === 'text') setSourceTextDraft('');
       if (ingestTab === 'url') setSourceUrlDraft('');
       if (ingestTab === 'file') setSelectedUploadFile(null);
+      if (ingestTab === 'recording') setSelectedRecordingFile(null);
       setNoticeBanner(`来源「${created.title}」已提交后台分块与索引构建。`);
     } catch (err) {
       setErrorBanner(formatApiError(err));
@@ -907,7 +1044,7 @@ export function NotebookWorkspacePage({
       <StudioSubpageHeader
         eyebrow="Yanshi Content Studio"
         title="多源内容笔记本工作台"
-        subtitle="汇集网页、文档与笔记分块构建本地 BM25 知识索引，一键驱动 8 套溯源多模态生成器"
+        subtitle="汇集网页、PDF 文档、笔记与语音录音构建本地 BM25 知识索引，一键驱动 11 套溯源多模态生成器"
         activeSection="notebooks"
         actions={
           <div className="nb-header-controls">
@@ -1024,34 +1161,55 @@ export function NotebookWorkspacePage({
               </span>
             </div>
 
-            <div className="nb-tabs" role="tablist" aria-label="资料导入方式">
-              <button
-                type="button"
-                role="tab"
-                id="nb-tab-text"
-                aria-selected={ingestTab === 'text'}
-                onClick={() => setIngestTab('text')}
-              >
-                粘贴文本
-              </button>
-              <button
-                type="button"
-                role="tab"
-                id="nb-tab-url"
-                aria-selected={ingestTab === 'url'}
-                onClick={() => setIngestTab('url')}
-              >
-                网页 URL
-              </button>
-              <button
-                type="button"
-                role="tab"
-                id="nb-tab-file"
-                aria-selected={ingestTab === 'file'}
-                onClick={() => setIngestTab('file')}
-              >
-                上传文档
-              </button>
+            <div
+              className="nb-tabs"
+              role="tablist"
+              aria-label="资料导入方式"
+              onKeyDown={(ev) => {
+                const idx = SOURCE_INGEST_TABS.findIndex((t) => t.id === ingestTab);
+                if (idx < 0) return;
+                let nextIdx = -1;
+                if (ev.key === 'ArrowRight') {
+                  nextIdx = (idx + 1) % SOURCE_INGEST_TABS.length;
+                } else if (ev.key === 'ArrowLeft') {
+                  nextIdx = (idx - 1 + SOURCE_INGEST_TABS.length) % SOURCE_INGEST_TABS.length;
+                } else if (ev.key === 'Home') {
+                  nextIdx = 0;
+                } else if (ev.key === 'End') {
+                  nextIdx = SOURCE_INGEST_TABS.length - 1;
+                }
+                if (nextIdx >= 0) {
+                  ev.preventDefault();
+                  const nextTab = SOURCE_INGEST_TABS[nextIdx]!.id;
+                  setIngestTab(nextTab);
+                  const btn = sourceTabRefs.current[nextTab];
+                  btn?.focus();
+                  btn?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                }
+              }}
+            >
+              {SOURCE_INGEST_TABS.map((tab) => {
+                const selected = ingestTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    ref={(el) => {
+                      sourceTabRefs.current[tab.id] = el;
+                    }}
+                    type="button"
+                    role="tab"
+                    id={`nb-tab-${tab.id}`}
+                    tabIndex={selected ? 0 : -1}
+                    aria-selected={selected}
+                    onClick={(ev) => {
+                      setIngestTab(tab.id);
+                      ev.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
             </div>
 
             <form
@@ -1122,13 +1280,64 @@ export function NotebookWorkspacePage({
               <div role="tabpanel" aria-labelledby="nb-tab-file" hidden={ingestTab !== 'file'}>
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
-                    <label htmlFor="nb-src-file">选择本地文档（支持 .md / .txt / .html，≤10MB）</label>
+                    <label htmlFor="nb-src-file">
+                      选择本地文档（支持 .pdf / .md / .txt / .html，≤10MB）
+                    </label>
                     <input
                       id="nb-src-file"
                       name="file"
                       type="file"
-                      accept=".txt,.md,.markdown,.html,.htm,text/plain,text/markdown,text/html"
+                      accept=".pdf,.txt,.md,.markdown,.html,.htm,application/pdf,text/plain,text/markdown,text/html"
                       onChange={(ev) => setSelectedUploadFile(ev.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div
+                role="tabpanel"
+                aria-labelledby="nb-tab-recording"
+                hidden={ingestTab !== 'recording'}
+              >
+                <div className="nb-tabpanel-inner">
+                  <div className="nb-field">
+                    <label htmlFor="nb-src-recording">
+                      选择会议或访谈录音（支持 .mp3 / .wav / .m4a / .ogg / .webm，≤10MB）
+                    </label>
+                    <input
+                      id="nb-src-recording"
+                      name="recording"
+                      type="file"
+                      accept=".mp3,.wav,.m4a,.ogg,.flac,.webm,.aac,audio/*"
+                      onChange={(ev) => setSelectedRecordingFile(ev.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <div className="nb-field">
+                    <label htmlFor="nb-src-asr-model">ASR 语音转写模型（可选）</label>
+                    <input
+                      id="nb-src-asr-model"
+                      name="asr_model"
+                      type="text"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      placeholder="例如 gemini-2.5-flash-asr / whisper-1（留空读 YANSHI_ASR_MODEL）"
+                      value={recordingModelDraft}
+                      onChange={(ev) => setRecordingModelDraft(ev.target.value)}
+                    />
+                  </div>
+                  <div className="nb-field">
+                    <label htmlFor="nb-src-asr-lang">语种提示（可选，如 zh / en）</label>
+                    <input
+                      id="nb-src-asr-lang"
+                      name="asr_language"
+                      type="text"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      placeholder="留空自动识别语种"
+                      value={recordingLangDraft}
+                      onChange={(ev) => setRecordingLangDraft(ev.target.value)}
                     />
                   </div>
                 </div>

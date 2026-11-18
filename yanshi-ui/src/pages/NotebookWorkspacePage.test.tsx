@@ -69,15 +69,18 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(audioItem.kind).toBe('audio');
   });
 
-  it('keeps all 8 Studio generator field keys aligned with compiled-in YAML inputs', () => {
+  it('keeps all 11 Studio generator field keys aligned with compiled-in YAML inputs', () => {
     expect(STUDIO_GENERATORS.map((g) => g.kind).sort()).toEqual([
       'audio_overview',
+      'debate_podcast_show',
       'flashcards',
+      'illustrated_slides',
       'infographic',
       'mindmap',
       'quiz',
       'report',
       'slides',
+      'tech_slides_video',
       'video_overview',
     ]);
 
@@ -154,13 +157,15 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(arts.artifacts).toHaveLength(1);
   });
 
-  it('renders 3-column NotebookWorkspacePage SSR markup with search and 8 generators', () => {
+  it('renders 3-column NotebookWorkspacePage SSR markup with PDF/Recording tabs, search, and 11 generators', () => {
     const html = renderToStaticMarkup(
       <NotebookWorkspacePage apiToken="" onTokenChange={() => {}} />,
     );
     expect(html).toContain('data-testid="notebook-workspace-page"');
     expect(html).toContain('<search>');
     expect(html).toContain('role="tablist"');
+    expect(html).toContain('id="nb-tab-recording"');
+    expect(html).toContain('accept=".pdf,');
     for (const spec of STUDIO_GENERATORS) {
       expect(html).toContain(`data-testid="generator-card-${spec.kind}"`);
     }

@@ -48,6 +48,18 @@ inputs:
   export_pdf:
     description: "导出 16:9 宽屏高清排版讲义 (.pdf)"
     default: true
+  url:
+    description: "可选参考网页链接（带 SSRF 防护抓取；由 Content Studio / Notebook 调用时自动注入或留空）"
+    default: ""
+  text:
+    description: "可选补充原始资料正文（当 url 为空时使用）"
+    default: ""
+  focus:
+    description: "可选聚焦切入角度（在 Notebook 模式下覆盖或细化演讲主线）"
+    default: ""
+  chunks:
+    description: "Notebook 已入库资料分块列表：[{chunk_id, source_id, content}]"
+    default: []
 
 nodes:
   - id: options
@@ -56,6 +68,7 @@ nodes:
       output_format: json
       template: |
         {
+          "has_url": {{ url != "" }},
           "do_search": {{ enable_web_search }},
           "slide_theme": {{ slide_theme | json_encode() }},
           "d2_theme": {% if slide_theme == "dark" %}"200"{% else %}"0"{% endif %},
@@ -65,10 +78,22 @@ nodes:
           "image_size": {{ image_size | json_encode() }}
         }
 
+  - id: fetch_page
+    type: http
+    dependencies: ["options"]
+    run_if: "{{ nodes.options.outputs.has_url }}"
+
+  - id: source_grounding
+    type: template
+    input_mapping:
+      page: "{{ nodes.fetch_page.outputs.body }}"
+    parameters:
+      template: "{% if chunks | length > 0 %}{% for c in chunks %}[{{ c.chunk_id }}] {{ c.content }}\n\n{% endfor %}{% elif page is defined and page %}{{ page | striptags | truncate(length=24000) }}{% elif text != \"\" %}{{ text | truncate(length=24000) }}{% endif %}"
+
   - id: search_query
     type: template
     parameters:
-      template: "{{ subject }} 核心原理 架构设计 关键指标 最佳实践"
+      template: "{% if focus != \"\" %}{{ focus }}{% else %}{{ subject }}{% endif %} 核心原理 架构设计 关键指标 最佳实践"
 
   - id: research
     type: web_search
@@ -81,12 +106,13 @@ nodes:
 
   - id: outline_prompt
     type: template
-    dependencies: ["options"]
+    dependencies: ["options", "source_grounding"]
     input_mapping:
       search_notes: "{{ nodes.research.outputs.markdown }}"
+      notebook_notes: "{{ nodes.source_grounding.outputs.output }}"
     parameters:
       template: |
-        你是一位兼具系统深度与视觉审美力的首席演讲策划师。请围绕主题「{{ subject }}」，面向「{{ audience }}」，按照「{{ narration_style }}」的讲解方式，规划一份共 {{ slide_count }} 页的精品 PPT 大纲。
+        你是一位兼具系统深度与视觉审美力的首席演讲策划师。请围绕{% if notebook_notes | trim != "" %}下方提供的核心源资料{% if focus != "" %}（聚焦方向：{{ focus }}）{% endif %}{% else %}主题「{% if focus != "" %}{{ focus }}{% else %}{{ subject }}{% endif %}」{% endif %}，面向「{{ audience }}」，按照「{{ narration_style }}」的讲解方式，规划一份共 {{ slide_count }} 页的精品 PPT 大纲。
 
         大纲规划要求：
         1. 叙事弧线清晰：第 1 页破题立意与痛点引入，中间页层层递进拆解核心架构/机制/工程权衡，最后 1 页给出落地最佳实践总结。
@@ -94,9 +120,12 @@ nodes:
            - `"illustration"`：适合概念隐喻、开篇引入、场景故事或总结升华页（预计安排 2-3 页），需提供精确的英文纯视觉画面描述 `illustration_prompt`（严禁出现任何文字、字母、标语）；
            - `"arch_diagram"`：全套课件安排恰好 1 页最核心的系统架构或数据流机制页，由 D2 编译器绘制高精度工程矢量架构图；
            - `"structured_panel"`：其余硬核拆解页使用双栏工程可视化对照（代码批注、对比矩阵表格、内存布局或思维导图）。
-        3. 充分利用以下联网检索到的背景资料与真实技术细节支撑论点：
+        3. 充分利用以下源资料与检索背景支撑论点：
 
-        {{ search_notes | default(value="（已启用离线领域知识模式）") | truncate(length=14000) }}
+        {% if notebook_notes | trim != "" %}【核心源资料 / Notebook 原文分块】
+        {{ notebook_notes | truncate(length=18000) }}
+
+        {% endif %}{{ search_notes | default(value="（已启用离线领域知识模式）") | truncate(length=14000) }}
 
   - id: plan_outline
     type: llm
@@ -158,13 +187,14 @@ nodes:
 
   - id: expand_prompt
     type: template
-    dependencies: ["plan_outline"]
+    dependencies: ["plan_outline", "source_grounding"]
     input_mapping:
       outline: "{{ nodes.plan_outline.outputs.output }}"
       search_notes: "{{ nodes.research.outputs.markdown }}"
+      notebook_notes: "{{ nodes.source_grounding.outputs.output }}"
     parameters:
       template: |
-        请基于以下已确认的 PPT 大纲与检索资料，将每一章扩写为完整、可直接渲染的结构化幻灯片内容（目标听众：{{ audience }}；讲解方式：{{ narration_style }}；配色主题：{{ slide_theme }}）。
+        请基于以下已确认的 PPT 大纲与参考资料，将每一章扩写为完整、可直接渲染的结构化幻灯片内容（目标听众：{{ audience }}；讲解方式：{{ narration_style }}；配色主题：{{ slide_theme }}）。
 
         填充规范（极其重要）：
         1. 保持与大纲完全一致的页数与章节顺序，每页必须包含：
@@ -183,7 +213,10 @@ nodes:
         已确认大纲 JSON：
         {{ outline | json_encode() }}
 
-        参考检索资料：
+        {% if notebook_notes | trim != "" %}核心源资料 / Notebook 原文分块：
+        {{ notebook_notes | truncate(length=14000) }}
+
+        {% endif %}参考检索资料：
         {{ search_notes | default(value="（已启用离线领域知识模式）") | truncate(length=10000) }}
 
   - id: expand_slides

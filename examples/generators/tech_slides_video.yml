@@ -108,6 +108,18 @@ inputs:
   export_pdf:
     description: "导出高清排版讲义 (.pdf)"
     default: true
+  url:
+    description: "可选参考网页链接（带 SSRF 防护抓取；由 Content Studio / Notebook 调用时自动注入或留空）"
+    default: ""
+  text:
+    description: "可选补充原始资料正文（当 url 为空时使用）"
+    default: ""
+  focus:
+    description: "可选聚焦讲解主线（在 Notebook 模式下细化讲解切入点）"
+    default: ""
+  chunks:
+    description: "Notebook 已入库资料分块列表：[{chunk_id, source_id, content}]"
+    default: []
 
 nodes:
   - id: mode_flags
@@ -116,6 +128,7 @@ nodes:
       output_format: json
       template: |
         {
+          "has_url": {{ url != "" }},
           "do_search": {{ enable_web_search }},
           "has_repo": {{ source_repo != "" }},
           "has_pdf": {{ source_pdf != "" }},
@@ -140,10 +153,15 @@ nodes:
           "pdf": {{ export_pdf }}
         }
 
+  - id: fetch_page
+    type: http
+    dependencies: ["mode_flags"]
+    run_if: "{{ nodes.mode_flags.outputs.has_url }}"
+
   - id: search_query
     type: template
     parameters:
-      template: "{{ topic }} 底层原理 核心机制 内存模型 工程最佳实践"
+      template: "{% if focus != \"\" %}{{ focus }}{% else %}{{ topic }}{% endif %} 底层原理 核心机制 内存模型 工程最佳实践"
 
   - id: research
     type: web_search
@@ -176,11 +194,26 @@ nodes:
     type: template
     dependencies: ["mode_flags"]
     input_mapping:
+      page_body: "{{ nodes.fetch_page.outputs.body }}"
       web_md: "{{ nodes.research.outputs.markdown }}"
       repo_md: "{{ nodes.repo_scan.outputs.markdown }}"
       pdf_md: "{{ nodes.pdf_scan.outputs.markdown }}"
     parameters:
       template: |
+        {% if chunks | length > 0 %}
+        【Notebook 已入库资料分块】
+        {% for c in chunks %}[{{ c.chunk_id }}] {{ c.content }}
+
+        {% endfor %}
+        {% endif %}
+        {% if page_body is defined and page_body %}
+        【抓取网页正文】
+        {{ page_body | striptags | truncate(length=14000) }}
+        {% endif %}
+        {% if text != "" %}
+        【输入源文本】
+        {{ text | truncate(length=14000) }}
+        {% endif %}
         {% if source_text != "" %}
         【用户补充参考资料】
         {{ source_text | truncate(length=10000) }}
@@ -228,7 +261,7 @@ nodes:
       ref_pack: "{{ nodes.grounded_context.outputs.output }}"
     parameters:
       template: |
-        你是一位享誉业界的资深系统架构师与技术 Keynote 主讲人。请围绕主题「{{ topic }}」，面向「{{ audience }}」，以「{{ narration_style }}」风格，设计一套共 {{ slide_count }} 页幻灯片的演播级技术精讲课件（语言：{{ spoken_language }}，配色主题：{{ slide_theme }}）。
+        你是一位享誉业界的资深系统架构师与技术 Keynote 主讲人。请围绕{% if chunks | length > 0 or text != "" or url != "" %}下方提供的核心源资料{% if focus != "" %}（聚焦主线：{{ focus }}）{% endif %}{% else %}主题「{% if focus != "" %}{{ focus }}{% else %}{{ topic }}{% endif %}」{% endif %}，面向「{{ audience }}」，以「{{ narration_style }}」风格，设计一套共 {{ slide_count }} 页幻灯片的演播级技术精讲课件（语言：{{ spoken_language }}，配色主题：{{ slide_theme }}）。
 
         核心设计准则（极其重要，直接决定声画卡点与视觉表现）：
         1. **工程级双栏可视化面板（拒绝空洞口号）**：

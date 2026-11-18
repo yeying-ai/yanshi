@@ -10,7 +10,7 @@ describe('inspectYamlLocally', () => {
     const res = inspectYamlLocally(TECH_SLIDES_VIDEO_YAML);
     expect(res.valid).toBe(true);
     expect(res.name).toBe('tech_slides_video');
-    expect(res.nodes.length).toBe(19);
+    expect(res.nodes.length).toBe(20);
     expect(res.nodes.some((n) => n.id === 'illustrate' && n.type === 'illustration')).toBe(true);
     expect(res.inputs.find((i) => i.name === 'slide_count')?.kind).toBe('number');
     expect(res.inputs.find((i) => i.name === 'step_pause_ms')?.kind).toBe('number');

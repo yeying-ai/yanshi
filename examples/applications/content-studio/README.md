@@ -6,7 +6,9 @@ from a closed menu of generators, and each generator is a hand-written
 workflow template.
 
 ```
-yanshi skill run → planner (ReAct) → report / mindmap / audio_overview / slides / flashcards / quiz / infographic / video_overview tools
+yanshi skill run → planner (ReAct) → 11 source-grounded generator tools
+  (report / mindmap / audio_overview / slides / flashcards / quiz / infographic /
+   video_overview / illustrated_slides / tech_slides_video / debate_podcast_show)
                                         │  (WorkflowTool over examples/generators/*.yml)
                                         └→ files → --output-dir/<tool>/<node>/<file>
 ```

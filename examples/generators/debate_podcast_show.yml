@@ -30,6 +30,15 @@ inputs:
   url:
     description: "可选背景参考网页链接（带 SSRF 防护抓取）"
     default: ""
+  text:
+    description: "可选源文本资料（由 Content Studio / Notebook 调用时传入或直接粘贴）"
+    default: ""
+  focus:
+    description: "可选交锋焦点切入角度（在 Notebook 模式下覆盖或细化核心辩题）"
+    default: ""
+  chunks:
+    description: "Notebook 已入库资料分块列表：[{chunk_id, source_id, content}]"
+    default: []
   source_text:
     description: "可选补充背景材料或案例纪要"
     default: ""
@@ -93,7 +102,7 @@ nodes:
   - id: search_query
     type: template
     parameters:
-      template: "{{ motion_topic }} 核心争议 真实案例 数据对比 深度评论"
+      template: "{% if focus != \"\" %}{{ focus }}{% else %}{{ motion_topic }}{% endif %} 核心争议 真实案例 数据对比 深度评论"
 
   - id: background_search
     type: web_search
@@ -113,13 +122,23 @@ nodes:
     parameters:
       template: |
         【圆桌思想交锋电台 · 辩题卷宗】
-        - 核心辩题：{{ motion_topic }}
+        - 核心辩题：{% if focus != "" %}{{ focus }}{% else %}{{ motion_topic }}{% endif %}
         - 正方立场（`pro_advocate`）：{{ pro_position }}
         - 反方立场（`con_challenger`）：{{ con_position }}
         - 表达语言：{{ language }}
 
         请正反双方严格站在各自立场展开 2 轮针锋相对的硬核辩论（第 1 轮立论举证，第 2 轮直接拆解对方上一轮漏洞并深化推演），最后由 `moderator` 主持人兼终审评委完整复盘双方攻防交锋并给出结构化分界裁决。
 
+        {% if chunks | length > 0 %}
+        Notebook 核心源资料分块：
+        {% for c in chunks %}[{{ c.chunk_id }}] {{ c.content }}
+
+        {% endfor %}
+        {% endif %}
+        {% if text != "" %}
+        输入源文本资料：
+        {{ text | truncate(length=14000) }}
+        {% endif %}
         {% if source_text != "" %}
         补充背景资料：
         {{ source_text | truncate(length=10000) }}

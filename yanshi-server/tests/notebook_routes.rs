@@ -22,6 +22,34 @@ async fn state() -> Option<AppState> {
   Some(AppState::new(db))
 }
 
+fn minimal_pdf_bytes(line: &str) -> Vec<u8> {
+  let stream = format!("BT /F1 12 Tf 72 720 Td ({line}) Tj ET");
+  let obj1 = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+  let obj2 = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+  let obj3 = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n";
+  let obj4 = format!(
+    "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+    stream.len(),
+    stream
+  );
+  let obj5 = "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+  let mut pdf = String::from("%PDF-1.4\n");
+  let mut offsets = Vec::with_capacity(5);
+  for obj in [obj1, obj2, obj3, obj4.as_str(), obj5] {
+    offsets.push(pdf.len());
+    pdf.push_str(obj);
+  }
+  let xref_offset = pdf.len();
+  pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+  for off in offsets {
+    pdf.push_str(&format!("{off:010} 00000 n \n"));
+  }
+  pdf.push_str(&format!(
+    "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+  ));
+  pdf.into_bytes()
+}
+
 async fn call(
   state: &AppState,
   method: &str,
@@ -136,10 +164,53 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     Some(json!({"kind": "recording"})),
   )
   .await;
-  assert_eq!(code, StatusCode::BAD_REQUEST);
+  assert_eq!(code, StatusCode::BAD_REQUEST, "empty recording payload");
+
+  // PDF upload and audio recording (transcribed via mock-asr).
+  let pdf_bytes = minimal_pdf_bytes("Perigean king tides peak when the moon is closest.");
+  let (code, pdf_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "perigean.pdf",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(&pdf_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{pdf_src}");
+
+  let dir = std::env::temp_dir().join(format!("yanshi-nb-routes-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).expect("dir");
+  let models_yml = dir.join("models.yml");
+  std::fs::write(
+    &models_yml,
+    "models:\n  mock-asr:\n    vendor: mock\n    type: asr\n    model_id: mock-asr\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
+  )
+  .expect("models.yml");
+  yanshi_llm::Yanshi::init_with_config(models_yml.to_str().expect("utf8"))
+    .await
+    .expect("init mock-asr");
+  let wav_bytes = yanshi_llm::providers::mock_media::silent_wav(200);
+  let (code, rec_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "recording",
+      "filename": "briefing.wav",
+      "model": "mock-asr",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(&wav_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{rec_src}");
 
   let sources = settled_sources(&state, &tenant, &id).await;
-  assert_eq!(sources.len(), 3);
+  assert_eq!(sources.len(), 5);
   let by_kind = |kind: &str| {
     sources
       .iter()
@@ -149,7 +220,18 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   };
   assert_eq!(by_kind("text")["status"], "ready");
   assert_eq!(by_kind("text")["sha256"].as_str().map(str::len), Some(64));
-  assert_eq!(by_kind("file")["status"], "ready");
+  assert!(
+    sources
+      .iter()
+      .filter(|s| s["kind"] == "file")
+      .all(|s| s["status"] == "ready"),
+    "both HTML and PDF files must ingest cleanly: {sources:?}"
+  );
+  assert_eq!(
+    by_kind("recording")["status"],
+    "ready",
+    "recording source must transcribe to ready: {sources:?}"
+  );
   let url = by_kind("url");
   assert_eq!(url["status"], "failed", "loopback must be refused: {url}");
   assert!(url["error"].as_str().is_some_and(|e| !e.is_empty()));
@@ -187,10 +269,23 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   let (_, hits) = search(state.clone(), "quarter").await;
   assert_eq!(
     hits["chunks"][0]["source_id"],
-    by_kind("file")["id"],
+    sources
+      .iter()
+      .find(|s| s["title"] == "neap.html")
+      .expect("neap.html")["id"],
     "HTML text is searchable: {hits}"
   );
   assert!(!hits.to_string().contains("noise()"), "scripts are dropped");
+  let (_, pdf_hits) = search(state.clone(), "Perigean").await;
+  assert_eq!(
+    pdf_hits["chunks"][0]["source_id"], pdf_src["id"],
+    "PDF text is searchable: {pdf_hits}"
+  );
+  let (_, rec_hits) = search(state.clone(), "transcript").await;
+  assert_eq!(
+    rec_hits["chunks"][0]["source_id"], rec_src["id"],
+    "Recording transcript is searchable: {rec_hits}"
+  );
 
   // "Restart": a new AppState (empty index cache) on the same database.
   let restarted = AppState::new(state.db.clone());

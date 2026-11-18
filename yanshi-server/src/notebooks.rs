@@ -12,10 +12,11 @@
 //!
 //! Ingestion: fetch (`url`, through the http tool's SSRF filter: the URL
 //! is tenant-supplied), or take the pasted `text`, or decode an uploaded
-//! text-like `file`; extract text (HTML via the RAG loader); chunk by
-//! paragraph; store the chunks in `source_chunks`; mark the source
-//! `ready` (or `failed`, with the reason). `recording` sources are
-//! rejected until transcription is wired in.
+//! `file` (`.txt`, `.md`, `.html`, `.pdf`), or transcribe an uploaded
+//! audio `recording` via a configured ASR model; extract text (HTML and
+//! PDF via the RAG loaders, with `pdftotext` fallback when installed);
+//! chunk by paragraph; store the chunks in `source_chunks`; mark the
+//! source `ready` (or `failed`, with the reason).
 //!
 //! The index is derived, not stored: a notebook's BM25 index is built
 //! from its ready chunks on first search, cached in this process, and
@@ -157,18 +158,51 @@ pub enum AddSourceRequest {
     #[serde(default)]
     title: Option<String>,
   },
-  /// A text-like file (`.txt`, `.md`, `.html`), base64-encoded.
+  /// An uploaded document (`.txt`, `.md`, `.html`, `.pdf`), base64-encoded.
   File {
     filename: String,
     content_base64: String,
+    #[serde(default)]
+    title: Option<String>,
   },
-  Recording {},
+  /// An uploaded audio recording (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`,
+  /// `.webm`, `.aac`), base64-encoded and transcribed via ASR.
+  Recording {
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    content_base64: String,
+    #[serde(default)]
+    title: Option<String>,
+    /// Registry name of the ASR model; falls back to `YANSHI_ASR_MODEL`.
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional BCP-47 / ISO-639 language hint passed to the ASR provider.
+    #[serde(default)]
+    language: Option<String>,
+  },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BytesFormat {
+  PlainText,
+  Html,
+  Pdf,
 }
 
 /// What ingestion starts from, resolved at submit time.
 enum Payload {
   Url(String),
-  Bytes { bytes: Vec<u8>, html: bool },
+  Bytes {
+    bytes: Vec<u8>,
+    format: BytesFormat,
+  },
+  Recording {
+    bytes: Vec<u8>,
+    filename: String,
+    model: String,
+    language: Option<String>,
+  },
 }
 
 pub async fn add_source(
@@ -190,7 +224,9 @@ pub async fn add_source(
       }
       (
         SourceKind::Url,
-        title.unwrap_or_else(|| url.clone()),
+        title
+          .filter(|t| !t.trim().is_empty())
+          .unwrap_or_else(|| url.clone()),
         Some(url.clone()),
         Payload::Url(url),
       )
@@ -206,17 +242,20 @@ pub async fn add_source(
       }
       (
         SourceKind::Text,
-        title.unwrap_or_else(|| text.chars().take(60).collect()),
+        title
+          .filter(|t| !t.trim().is_empty())
+          .unwrap_or_else(|| text.chars().take(60).collect()),
         None,
         Payload::Bytes {
           bytes: text.into_bytes(),
-          html: false,
+          format: BytesFormat::PlainText,
         },
       )
     }
     AddSourceRequest::File {
       filename,
       content_base64,
+      title,
     } => {
       use base64::Engine as _;
       let extension = FsPath::new(&filename)
@@ -224,34 +263,108 @@ pub async fn add_source(
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-      let html = match extension.as_str() {
-        "html" | "htm" => true,
-        "txt" | "md" | "markdown" => false,
+      let format = match extension.as_str() {
+        "html" | "htm" => BytesFormat::Html,
+        "txt" | "md" | "markdown" => BytesFormat::PlainText,
+        "pdf" => BytesFormat::Pdf,
         other => {
           return Err(ApiError::BadRequest(format!(
-            "unsupported file type '.{other}': upload .txt, .md or .html"
+            "unsupported file type '.{other}': upload .txt, .md, .html or .pdf"
           )));
         }
       };
       let bytes = base64::engine::general_purpose::STANDARD
-        .decode(content_base64.as_bytes())
+        .decode(content_base64.trim().as_bytes())
         .map_err(|e| ApiError::BadRequest(format!("content_base64: {e}")))?;
+      if bytes.is_empty() {
+        return Err(ApiError::BadRequest("file must not be empty".into()));
+      }
       if bytes.len() > MAX_SOURCE_BYTES {
         return Err(ApiError::PayloadTooLarge(format!(
           "file is larger than {MAX_SOURCE_BYTES} bytes"
         )));
       }
+      if format == BytesFormat::Pdf && !bytes.starts_with(b"%PDF-") {
+        return Err(ApiError::BadRequest(
+          "file is not a valid PDF (missing %PDF- header)".into(),
+        ));
+      }
+      let resolved_title = title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| filename.clone());
       (
         SourceKind::File,
-        filename.clone(),
+        resolved_title,
         Some(filename),
-        Payload::Bytes { bytes, html },
+        Payload::Bytes { bytes, format },
       )
     }
-    AddSourceRequest::Recording {} => {
-      return Err(ApiError::BadRequest(
-        "recording sources are not supported yet; transcribe first and add the text".into(),
-      ));
+    AddSourceRequest::Recording {
+      filename,
+      content_base64,
+      title,
+      model,
+      language,
+    } => {
+      use base64::Engine as _;
+      let filename = filename.trim().to_string();
+      if filename.is_empty() {
+        return Err(ApiError::BadRequest(
+          "recording filename must not be empty".into(),
+        ));
+      }
+      let extension = FsPath::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+      if !matches!(
+        extension.as_str(),
+        "mp3" | "wav" | "m4a" | "ogg" | "flac" | "webm" | "aac" | "mp4"
+      ) {
+        return Err(ApiError::BadRequest(format!(
+          "unsupported recording type '.{extension}': upload .mp3, .wav, .m4a, .ogg, .flac, .webm or .aac"
+        )));
+      }
+      let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64.trim().as_bytes())
+        .map_err(|e| ApiError::BadRequest(format!("content_base64: {e}")))?;
+      if bytes.is_empty() {
+        return Err(ApiError::BadRequest(
+          "recording audio must not be empty".into(),
+        ));
+      }
+      if bytes.len() > MAX_SOURCE_BYTES {
+        return Err(ApiError::PayloadTooLarge(format!(
+          "recording is larger than {MAX_SOURCE_BYTES} bytes"
+        )));
+      }
+      let model = model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .or_else(|| {
+          std::env::var("YANSHI_ASR_MODEL")
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+        })
+        .ok_or_else(|| {
+          ApiError::BadRequest("set `model`, or YANSHI_ASR_MODEL on the gateway".into())
+        })?;
+      let resolved_title = title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| filename.clone());
+      (
+        SourceKind::Recording,
+        resolved_title,
+        Some(filename.clone()),
+        Payload::Recording {
+          bytes,
+          filename,
+          model,
+          language,
+        },
+      )
     }
   };
   let source = state
@@ -270,24 +383,37 @@ pub async fn add_source(
   Ok(Json(source))
 }
 
-/// Fetch / decode → text → chunks → `source_chunks`, then mark the
-/// source ready (or failed with the reason) and drop the notebook's
-/// cached index.
+/// Fetch / decode / transcribe → text → chunks → `source_chunks`, then
+/// mark the source ready (or failed with the reason) and drop the
+/// notebook's cached index.
 async fn ingest(state: AppState, source: Source, payload: Payload) {
   let sources = &state.repos.sources;
   let _ = sources
     .update_status(source.id, SourceStatus::Ingesting, None, None)
     .await;
   let outcome = async {
-    let (bytes, html) = match payload {
-      Payload::Url(url) => fetch(&url).await?,
-      Payload::Bytes { bytes, html } => (bytes, html),
-    };
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    let text = if html {
-      html_text(&bytes).await?
-    } else {
-      String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())?
+    let (digest, text) = match payload {
+      Payload::Url(url) => {
+        let (bytes, format) = fetch(&url).await?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let text = extract_bytes_text(bytes, format).await?;
+        (digest, text)
+      }
+      Payload::Bytes { bytes, format } => {
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let text = extract_bytes_text(bytes, format).await?;
+        (digest, text)
+      }
+      Payload::Recording {
+        bytes,
+        filename,
+        model,
+        language,
+      } => {
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let text = transcribe_recording(bytes, filename, model, language).await?;
+        (digest, text)
+      }
     };
     let chunks = chunk(&text)?;
     if chunks.is_empty() {
@@ -318,26 +444,44 @@ async fn ingest(state: AppState, source: Source, payload: Payload) {
   state.notebook_indexes.invalidate(source.notebook_id);
 }
 
+async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<String, String> {
+  match format {
+    BytesFormat::Html => html_text(&bytes).await,
+    BytesFormat::Pdf => pdf_text(&bytes).await,
+    BytesFormat::PlainText => {
+      String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())
+    }
+  }
+}
+
 /// GET `url` through the http tool's default policy, which refuses
 /// loopback, private and cloud-metadata addresses.
-async fn fetch(url: &str) -> Result<(Vec<u8>, bool), String> {
+async fn fetch(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   let tool = yanshi_tools::builtin::HttpTool::new(Arc::new(yanshi_tools::SandboxPolicy::default()))
     .map_err(|e| format!("http client: {e}"))?;
   let response = tool
-    .send(&json!({ "url": url, "method": "GET" }))
+    .send_bytes(
+      &json!({ "url": url, "method": "GET" }),
+      Some(MAX_SOURCE_BYTES),
+    )
     .await
     .map_err(|e| format!("fetching {url} failed: {e}"))?;
   if !response.status.is_success() {
     return Err(format!("fetching {url} returned HTTP {}", response.status));
   }
-  let body = response.body;
-  let lowered = body
-    .trim_start()
-    .get(..512)
-    .unwrap_or(body.trim_start())
-    .to_ascii_lowercase();
-  let html = lowered.starts_with("<!doctype html") || lowered.contains("<html");
-  Ok((body.into_bytes(), html))
+  let bytes = response.body;
+  let format = if bytes.starts_with(b"%PDF-") {
+    BytesFormat::Pdf
+  } else {
+    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    let lowered = sample.trim_start().to_ascii_lowercase();
+    if lowered.starts_with("<!doctype html") || lowered.contains("<html") {
+      BytesFormat::Html
+    } else {
+      BytesFormat::PlainText
+    }
+  };
+  Ok((bytes, format))
 }
 
 /// Visible text of an HTML document (scripts and styles dropped).
@@ -352,6 +496,94 @@ async fn html_text(bytes: &[u8]) -> Result<String, String> {
   loaded
     .map(|document| document.content)
     .map_err(|e| format!("extracting text: {e}"))
+}
+
+/// Text of a PDF document: pure-Rust `PdfLoader` first, falling back to
+/// `pdftotext` when installed if the pure-Rust extractor yields no text.
+async fn pdf_text(bytes: &[u8]) -> Result<String, String> {
+  use yanshi_rag::sources::{DocumentLoader, pdf::PdfLoader};
+  let id = Uuid::new_v4();
+  let path = std::env::temp_dir().join(format!("yanshi-ingest-{id}.pdf"));
+  tokio::fs::write(&path, bytes)
+    .await
+    .map_err(|e| format!("staging the PDF: {e}"))?;
+  let pure_rust = PdfLoader::new()
+    .with_max_bytes(Some(MAX_SOURCE_BYTES as u64))
+    .load(&path)
+    .await;
+  if let Ok(doc) = &pure_rust
+    && !doc.content.trim().is_empty()
+  {
+    let _ = tokio::fs::remove_file(&path).await;
+    return Ok(doc.content.clone());
+  }
+  let fallback = pdftotext_fallback(&path, id).await;
+  let _ = tokio::fs::remove_file(&path).await;
+  if let Ok(text) = fallback
+    && !text.trim().is_empty()
+  {
+    return Ok(text);
+  }
+  pure_rust
+    .map(|doc| doc.content)
+    .map_err(|e| format!("extracting PDF text: {e}"))
+}
+
+async fn pdftotext_fallback(pdf_path: &FsPath, id: Uuid) -> Result<String, String> {
+  let out_path = std::env::temp_dir().join(format!("yanshi-ingest-{id}.txt"));
+  let run = tokio::time::timeout(
+    std::time::Duration::from_secs(60),
+    tokio::process::Command::new("pdftotext")
+      .args(["-layout", "-enc", "UTF-8"])
+      .arg(pdf_path)
+      .arg(&out_path)
+      .output(),
+  )
+  .await;
+  let result = match run {
+    Ok(Ok(output)) if output.status.success() => tokio::fs::read_to_string(&out_path)
+      .await
+      .map_err(|e| format!("reading pdftotext output: {e}")),
+    Ok(Ok(output)) => Err(format!(
+      "pdftotext exited with {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr)
+    )),
+    Ok(Err(e)) => Err(format!("spawning pdftotext: {e}")),
+    Err(_) => Err("pdftotext timed out".to_string()),
+  };
+  let _ = tokio::fs::remove_file(&out_path).await;
+  result
+}
+
+/// Transcribe an uploaded audio recording via a registered ASR model.
+async fn transcribe_recording(
+  bytes: Vec<u8>,
+  filename: String,
+  model: String,
+  language: Option<String>,
+) -> Result<String, String> {
+  yanshi_llm::Yanshi::ensure_init()
+    .await
+    .map_err(|e| format!("initializing model registry: {e}"))?;
+  let provider = yanshi_llm::Yanshi::asr(&model)
+    .await
+    .map_err(|e| format!("resolving ASR model '{model}': {e}"))?;
+  let response = provider
+    .transcribe(yanshi_llm::AsrRequest {
+      model,
+      response_format: "text".to_string(),
+      audio_data: bytes,
+      filename,
+      language: language
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty()),
+      temperature: None,
+      prompt: None,
+    })
+    .await
+    .map_err(|e| format!("transcribing recording failed: {e}"))?;
+  Ok(response.text)
 }
 
 fn chunk(text: &str) -> Result<Vec<(String, Value)>, String> {
@@ -449,8 +681,9 @@ pub async fn search_notebook(
 
 // ── generate (Y5.4) ─────────────────────────────────────────────────────
 
-/// The generator catalogue (RFC §3), compiled in so the gateway serves
-/// the same templates the CLI runs from `examples/generators/`.
+/// The source-grounded generator catalogue (RFC §3 + Studio flagship
+/// workflows), compiled in so the gateway serves the same templates the CLI
+/// runs from `examples/generators/`.
 const GENERATORS: &[(&str, &str)] = &[
   (
     "report",
@@ -480,6 +713,18 @@ const GENERATORS: &[(&str, &str)] = &[
   (
     "video_overview",
     include_str!("../../examples/generators/video_overview.yml"),
+  ),
+  (
+    "illustrated_slides",
+    include_str!("../../examples/generators/illustrated_slides.yml"),
+  ),
+  (
+    "tech_slides_video",
+    include_str!("../../examples/generators/tech_slides_video.yml"),
+  ),
+  (
+    "debate_podcast_show",
+    include_str!("../../examples/generators/debate_podcast_show.yml"),
   ),
 ];
 
@@ -571,6 +816,9 @@ pub async fn generate(
   }
   let mut inputs = req.params;
   inputs.insert("chunks".to_string(), Value::Array(chunks));
+  if definition.inputs.contains_key("chat_model") && !inputs.contains_key("chat_model") {
+    inputs.insert("chat_model".to_string(), Value::String(model.clone()));
+  }
 
   let run = crate::runs::admit_and_dispatch(
     &state,
@@ -654,5 +902,74 @@ mod tests {
       "{text}"
     );
     assert!(!text.contains("var x"), "{text}");
+  }
+
+  /// Build a valid 1-page PDF with an uncompressed Helvetica content stream.
+  fn minimal_pdf_bytes(line: &str) -> Vec<u8> {
+    let escaped = line
+      .replace('\\', "\\\\")
+      .replace('(', "\\(")
+      .replace(')', "\\)");
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET");
+    let obj1 = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    let obj2 = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+    let obj3 = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n";
+    let obj4 = format!(
+      "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+      stream.len(),
+      stream
+    );
+    let obj5 = "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(5);
+    for obj in [obj1, obj2, obj3, obj4.as_str(), obj5] {
+      offsets.push(pdf.len());
+      pdf.push_str(obj);
+    }
+    let xref_offset = pdf.len();
+    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for off in offsets {
+      pdf.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+      "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+  }
+
+  #[tokio::test]
+  async fn pdf_is_extracted_to_searchable_text() {
+    let pdf = minimal_pdf_bytes("Spring tides happen when the sun and moon align.");
+    let text = pdf_text(&pdf).await.expect("pdf text");
+    assert!(
+      text.contains("Spring tides happen when the sun and moon align."),
+      "extracted PDF text: {text}"
+    );
+  }
+
+  #[tokio::test]
+  async fn recording_is_transcribed_under_mock_asr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let models_path = dir.path().join("models.yml");
+    std::fs::write(
+      &models_path,
+      "models:\n  mock-asr:\n    vendor: mock\n    type: asr\n    model_id: mock-asr\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
+    )
+    .expect("write models.yml");
+    yanshi_llm::Yanshi::init_with_config(models_path.to_str().expect("utf8"))
+      .await
+      .expect("init");
+
+    let wav = yanshi_llm::providers::mock_media::silent_wav(250);
+    let transcript = transcribe_recording(
+      wav,
+      "standup.wav".to_string(),
+      "mock-asr".to_string(),
+      Some("en".to_string()),
+    )
+    .await
+    .expect("transcript");
+    assert_eq!(transcript, "mock transcript");
   }
 }
