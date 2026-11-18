@@ -1,0 +1,705 @@
+# Creative Studio 1 — `episodic_drama_studio`: Character-Locked Multi-Episode Series Studio.
+#
+# Combines 4 execution paradigms to solve character & plot drift across long episodic series:
+#   1. Optional HITL Creative Pitch (`type: agent` with `ask_user`)
+#   2. Multi-Agent Writers' Room (`type: multi_agent`, `mode: blackboard`):
+#      `showrunner` (world rules & multi-episode cliffhangers) ->
+#      `casting_director` (immutable English visual DNA + pinned TTS voice per character) ->
+#      `episode_writer` (scene-by-scene episodic shooting script + continuation ledger)
+#   3. Master Cast Turnaround Sheet + VLM Continuity Critic Loop
+#      (`type: while` + `text_to_image` + `image_understand` visual QA)
+#   4. Reference-Locked Multi-Episode Production (`type: map` -> `image_to_image` anchored to
+#      the Master Cast Sheet + optional I2V `text_to_video` + character-locked multi-voice `tts`)
+#      -> 1080p Season/Batch Master Cut `.mp4` + `.srt` + illustrated Series Bible `.pdf`
+#      + reusable `continuation_state` for filming future episodes without losing faces or voices!
+#
+#   yanshi workflow run examples/generators/episodic_drama_studio.yml --timeout 20m \
+#     --input premise "近未来雾港城科幻悬疑剧《记忆当铺》：失忆修复师林深与女警苏晚追查全城每七天被抹除一次记忆的真相" \
+#     --output-dir runs/memory-pawnshop-ep1-3
+name: episodic_drama_studio
+description: "长剧集多智能体连续剧制片厂：通过黑板编剧室、定妆母图 VLM 审片循环与跨集参考图锁脸（image_to_image / I2V）+ 专属声纹路由，生成角色高度一致的多集连播 1080p 短剧 MP4、字幕与《剧集设定圣经 PDF》，并支持跨次无限续拍"
+
+inputs:
+  premise:
+    description: "剧集核心创意、世界观梗概或故事母题"
+    default: "近未来雾港城科幻悬疑连续剧《记忆当铺》：经营地下记忆修复铺的失忆技师林深，受托修复一枚没有署名的碎裂记忆晶片，却在画面里看见三天后的自己正在销毁整座城市的记忆灯塔；刑警苏晚循线追查而至，两人被迫在下一次全城记忆清零倒计时前联手追凶"
+  genre_and_tone:
+    description: "题材类型与导演视听基调"
+    default: "赛博新黑色电影感悬疑剧（Neo-Noir Sci-Fi Drama），冷峻克制、雨夜霓虹与暖色钨丝灯强烈冷暖对比，每集结尾留强悬念钩子"
+  visual_style:
+    description: "全剧统一美术画风描述（贯穿定妆母图与全部分镜）"
+    default: "cinematic anime film cel-shaded key art, Makoto Shinkai and Ghost in the Shell atmospheric lighting, crisp expressive facial features, consistent character proportions, rich cinematic depth of field"
+  season_number:
+    description: "季数编号"
+    default: 1
+  start_episode:
+    description: "本次拍摄起始集数（首拍为 1；续拍后续剧集时可设为 4、7 等）"
+    default: 1
+  episode_count:
+    description: "本次连拍集数（推荐 2-4 集，支持 1-6 集）"
+    default: 2
+  scenes_per_episode:
+    description: "每集核心戏剧场次数（推荐 3-4 场，支持 2-6 场）"
+    default: 3
+  language:
+    description: "台词、旁白与设定集语言"
+    default: "中文"
+  interactive:
+    description: "是否在立项阶段启用 ask_user 多轮互动共创（false 时由编剧室直接自主立项开拍）"
+    default: false
+  existing_cast_sheet:
+    description: "跨次续拍可选输入：传入上一批剧集产出的《主演定妆参考母图》文件路径，留空则自动生成并经 VLM 审片定稿"
+    default: ""
+  existing_series_bible:
+    description: "跨次续拍可选输入：传入上一批剧集导出的角色设定与前情交接摘要文本/JSON，留空则从头开篇"
+    default: ""
+  max_cast_audit_rounds:
+    description: "主演定妆母图经 VLM 视觉总监审片重绘的最大迭代轮数（1-3）"
+    default: 2
+  chat_model:
+    description: "编剧室与结构化统筹模型"
+    default: "gemini-2.5-flash"
+  vision_model:
+    description: "定妆母图与视觉连续性审片多模态模型"
+    default: "gemini-2.5-flash"
+  image_model:
+    description: "支持参考图条件生成（image_to_image）的图像模型"
+    default: "gemini-3.1-flash-image"
+  image_size:
+    description: "画面画幅比例或分辨率"
+    default: "16:9"
+  tts_model:
+    description: "多角色配音语音合成模型"
+    default: "gemini-2.5-flash-preview-tts"
+  narrator_voice:
+    description: "旁白与分集片头专属音色（与剧中角色音色隔离）"
+    default: "Aoede"
+  video_model:
+    description: "可选图生视频模型（如 veo-3.1-generate-preview；留空时全片使用电影感锁脸关键帧，填写后对每集高潮镜头启用首帧锁脸动态视频）"
+    default: ""
+  video_seconds:
+    description: "动态高潮镜头时长（秒）"
+    default: 5
+  burn_subtitles:
+    description: "是否将角色对白烧录为电影感双行自适应硬字幕（需带 libass 的 ffmpeg）"
+    default: true
+  export_pdf:
+    description: "是否同步排版导出含定妆照与分集台本的《剧集设定圣经 PDF》"
+    default: true
+
+nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: |
+        {
+          "is_interactive": {{ interactive }},
+          "need_cast_sheet": {{ existing_cast_sheet == "" }},
+          "do_pdf": {{ export_pdf }},
+          "chat_model": {{ chat_model | json_encode() }},
+          "vision_model": {{ vision_model | json_encode() }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }},
+          "tts_model": {{ tts_model | json_encode() }},
+          "narrator_voice": {{ narrator_voice | json_encode() }}
+        }
+
+  - id: pitch_prompt
+    type: template
+    parameters:
+      template: |
+        用户希望立项拍摄一部多集连续剧：
+        - 核心创意：{{ premise }}
+        - 题材基调：{{ genre_and_tone }}
+        - 拍摄范围：第 {{ season_number }} 季，第 {{ start_episode }} 集起连拍 {{ episode_count }} 集（每集 {{ scenes_per_episode }} 场）
+        {% if existing_series_bible != "" %}
+        - 既有剧集设定与前情记录：{{ existing_series_bible }}
+        {% endif %}
+
+        请作为制片人使用 `ask_user` 工具向用户提出 1 轮最关键的创作取向确认（合并 2-3 个简洁选择题：主角核心动机抉择、跨集核心反转方向、结局余韵基调），拿到答复后整理为《立项创作确认单》。
+
+  - id: pitch_clarify
+    type: agent
+    dependencies: ["options", "pitch_prompt"]
+    run_if: "{{ nodes.options.outputs.is_interactive }}"
+    input_mapping:
+      prompt: "{{ nodes.pitch_prompt.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      system: "你是敏锐的剧集制片人，擅长用一轮精炼问答帮创作者敲定最具戏剧张力的故事走向。"
+      max_steps: 4
+
+  - id: writers_room_brief
+    type: template
+    dependencies: ["options"]
+    input_mapping:
+      clarified: "{{ nodes.pitch_clarify.outputs.output }}"
+    parameters:
+      template: |
+        【连续剧制片厂立项任务书】
+        - 剧集构想：{{ premise }}
+        - 视听基调：{{ genre_and_tone }}
+        - 美术画风：{{ visual_style }}
+        - 对白语言：{{ language }}
+        - 本批集数范围：第 {{ season_number }} 季，从第 {{ start_episode }} 集连续拍摄 {{ episode_count }} 集（即第 {{ start_episode }} 集至第 {{ start_episode + episode_count - 1 }} 集），每集严格规划 {{ scenes_per_episode }} 场核心戏。
+        {% if clarified is defined and clarified %}
+        - 创作者互动确认意见：
+        {{ clarified }}
+        {% endif %}
+        {% if existing_series_bible != "" %}
+        - 【最高优先级·续拍连续性约束】以下为前序剧集已锁定的角色设定与剧情交接档案，必须原样继承角色 ID、英文外貌服饰 DNA 与绑定音色，并严密承接前情伏笔：
+        {{ existing_series_bible }}
+        {% endif %}
+
+        请编剧室三位主创依次在共享黑板上协同完成：
+        1. `showrunner` 写入 `series_arc`（世界观硬法则 + 第 {{ start_episode }}..{{ start_episode + episode_count - 1 }} 集分集起承转合与集末悬念钩子）；
+        2. `casting_director` 读取 `series_arc` 并写入 `cast_bible`（锁定 2-3 位核心常驻角色的英文不可变外貌服饰 DNA、互不冲突的专属音色 `Charon`/`Kore`/`Puck`/`Fenrir`/`Zephyr` 以及主演同框定妆母图英文构图）；
+        3. `episode_writer` 读取 `series_arc` 与 `cast_bible`，编写全部集数的分场台本与续拍交接摘要，写入 `writers_room_package` 定稿。
+
+  - id: writers_room
+    type: multi_agent
+    dependencies: ["writers_room_brief", "options"]
+    input_mapping:
+      message: "{{ nodes.writers_room_brief.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      mode: blackboard
+      agents:
+        - name: showrunner
+          skill: examples/skills/drama-crew/showrunner
+        - name: casting_director
+          skill: examples/skills/drama-crew/casting-director
+        - name: episode_writer
+          skill: examples/skills/drama-crew/episode-writer
+      schedule:
+        mode: sequential
+        agents: ["showrunner", "casting_director", "episode_writer"]
+      stop_when:
+        type: key_set
+        key: writers_room_package
+      answer_from: writers_room_package
+
+  - id: compile_plan_prompt
+    type: template
+    dependencies: ["writers_room"]
+    input_mapping:
+      room_package: "{{ nodes.writers_room.outputs.response }}"
+    parameters:
+      template: |
+        请将以下编剧室黑板协同定稿的剧集方案，严格编译为可直接驱动多模态制片流水线的结构化 JSON（语言：{{ language }}；必须包含恰好 {{ episode_count }} 集，集号从 {{ start_episode }} 递增至 {{ start_episode + episode_count - 1 }}，每集恰好 {{ scenes_per_episode }} 场戏）。
+
+        关键制片约束（确保跨集角色 100% 稳定）：
+        1. `cast`（2-3 位常驻主角）：
+           - `id` 使用简短小写下划线英文（如 `lin_shen`、`su_wan`）；
+           - `voice` 必须从 `["Charon", "Kore", "Puck", "Fenrir", "Zephyr"]` 中为每位角色固定分配不同音色（严禁与旁白音色 `{{ narrator_voice }}` 重复）；
+           - `visual_dna_en` 与 `costume_lock_en` 必须使用精准英文描述五官轮廓、瞳色、发型、标志性外衣材质颜色与随身道具；
+        2. `cast_sheet_prompt_en`：一段精准英文画面描述，将 `cast` 中所有主角按从左到右顺序并排呈现在干净中性深灰影棚背景前（半身至全身角色设定参考母图，柔和清晰轮廓光，人物间距分明，绝对禁止任何文字、名字标签、字母或水印）；
+        3. 每集 `episodes[i]`：
+           - `title_card_narration`：分集片头导语（例如“第一集：碎裂的第七日。雾港城的雨从不停歇……”），1-2 句凝练旁白；
+           - `title_card_visual_en`：分集片头空镜或主角剪影氛围画面英文描述（严禁任何文字字母）；
+           - 每场戏 `scenes[j]`：
+             * `speaker_id` 必须严格等于 `cast` 中某位角色的 `id` 或 `"narrator"`；
+             * `dialogue` 为该角色或旁白说出的 1-3 句自然口语台词（严禁夹带括号动作提示或角色名前缀）；
+             * `emotion_en` 为英文配音语气导演指令（如 `"low tense whisper with restrained urgency"`）；
+             * `shot_prompt_en` 为英文分镜画面描述：**必须点名在场角色并显式复述其 `visual_dna_en` 与 `costume_lock_en` 关键外观词**，写明景别、机位、动作与环境光影，严禁出现任何文字、招牌字母或字幕；
+             * 每集最多将 1 场最具视觉冲击力的高潮戏设为 `"climax_motion": true`，其余设为 `false`。
+        4. `continuation_summary`：详尽总结截至第 {{ start_episode + episode_count - 1 }} 集结尾的角色状态、关键道具归属与未解悬念，供下一批续拍无缝衔接。
+
+        编剧室定稿方案：
+        {{ room_package }}
+
+  - id: shooting_plan
+    type: llm
+    dependencies: ["compile_plan_prompt", "options"]
+    input_mapping:
+      prompt: "{{ nodes.compile_plan_prompt.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      max_tokens: 8192
+      system: "你是严谨的影视制片统筹，仅输出完全符合 JSON Schema 的有效 JSON。"
+      json_schema:
+        type: object
+        required:
+          - series_title
+          - tagline
+          - logline
+          - world_rules
+          - cast
+          - cast_sheet_prompt_en
+          - episodes
+          - continuation_summary
+        properties:
+          series_title: { type: string }
+          tagline: { type: string }
+          logline: { type: string }
+          world_rules:
+            type: array
+            minItems: 2
+            maxItems: 5
+            items: { type: string }
+          cast:
+            type: array
+            minItems: 2
+            maxItems: 4
+            items:
+              type: object
+              required: [id, name, role, voice, vocal_style_en, visual_dna_en, costume_lock_en]
+              properties:
+                id: { type: string }
+                name: { type: string }
+                role: { type: string }
+                voice: { type: string }
+                vocal_style_en: { type: string }
+                visual_dna_en: { type: string }
+                costume_lock_en: { type: string }
+          cast_sheet_prompt_en: { type: string }
+          episodes:
+            type: array
+            minItems: 1
+            maxItems: 6
+            items:
+              type: object
+              required:
+                - episode_number
+                - episode_title
+                - recap
+                - cliffhanger
+                - title_card_narration
+                - title_card_visual_en
+                - scenes
+              properties:
+                episode_number: { type: integer }
+                episode_title: { type: string }
+                recap: { type: string }
+                cliffhanger: { type: string }
+                title_card_narration: { type: string }
+                title_card_visual_en: { type: string }
+                scenes:
+                  type: array
+                  minItems: 2
+                  maxItems: 6
+                  items:
+                    type: object
+                    required:
+                      - scene_number
+                      - location
+                      - speaker_id
+                      - speaker_name
+                      - dialogue
+                      - emotion_en
+                      - shot_prompt_en
+                      - climax_motion
+                    properties:
+                      scene_number: { type: integer }
+                      location: { type: string }
+                      speaker_id: { type: string }
+                      speaker_name: { type: string }
+                      dialogue: { type: string }
+                      emotion_en: { type: string }
+                      shot_prompt_en: { type: string }
+                      climax_motion: { type: boolean }
+          continuation_summary: { type: string }
+
+  # Prepare initial loop state for the Master Cast Reference Sheet VLM audit loop.
+  - id: cast_seed
+    type: template
+    dependencies: ["shooting_plan", "options"]
+    input_mapping:
+      plan: "{{ nodes.shooting_plan.outputs.output }}"
+    parameters:
+      output_format: json
+      template: |
+        {% set cast_desc = "" %}{% for c in plan.cast %}{% set_global cast_desc = cast_desc ~ "[" ~ c.name ~ " (" ~ c.id ~ ")]: " ~ c.visual_dna_en ~ ", wearing " ~ c.costume_lock_en ~ ". " %}{% endfor %}{% set init_prompt = plan.cast_sheet_prompt_en ~ ". Cast details: " ~ cast_desc ~ "Unified style: " ~ visual_style ~ ". Clean side-by-side character reference sheet on dark neutral studio backdrop, crisp faces, strictly NO text, NO letters, NO labels, NO watermarks." %}{
+          "needs_retake": true,
+          "round": 0,
+          "max_rounds": {{ max_cast_audit_rounds }},
+          "visual_style": {{ visual_style | json_encode() }},
+          "cast_spec_summary": {{ cast_desc | json_encode() }},
+          "current_cast_prompt": {{ init_prompt | json_encode() }},
+          "cast_sheet_path": "",
+          "cast_audit_note": ""
+        }
+
+  # `while` + `image_understand` VLM Continuity Supervisor loop: renders the Master Cast Sheet
+  # and verifies every character's visual DNA & zero-garbled-text cleanliness before filming episodes.
+  - id: cast_sheet_atelier
+    type: while
+    dependencies: ["cast_seed", "options"]
+    run_if: "{{ nodes.options.outputs.need_cast_sheet }}"
+    input_mapping:
+      needs_retake: "{{ nodes.cast_seed.outputs.needs_retake }}"
+      round: "{{ nodes.cast_seed.outputs.round }}"
+      max_rounds: "{{ nodes.cast_seed.outputs.max_rounds }}"
+      cast_spec_summary: "{{ nodes.cast_seed.outputs.cast_spec_summary }}"
+      current_cast_prompt: "{{ nodes.cast_seed.outputs.current_cast_prompt }}"
+      cast_sheet_path: "{{ nodes.cast_seed.outputs.cast_sheet_path }}"
+      cast_audit_note: "{{ nodes.cast_seed.outputs.cast_audit_note }}"
+    parameters:
+      condition: "{{ needs_retake }}"
+      max_iterations: 3
+      do:
+        - id: loop_ctx
+          type: template
+          parameters:
+            output_format: json
+            template: |
+              {% set c_prompt = "You are the Continuity Art Director. Inspect this Master Cast Reference Sheet against the required cast specification: " ~ cast_spec_summary ~ "Check: (1) Are all lead characters clearly visible with distinct faces and signature outfits matching the spec? (2) Is the art style cohesive? (3) Is the image free of large garbled text banners? Summarize your findings clearly and suggest a refined English prompt if a retake is needed." %}{
+                "round": {{ round }},
+                "max_rounds": {{ max_rounds }},
+                "visual_style": {{ visual_style | json_encode() }},
+                "cast_spec_summary": {{ cast_spec_summary | json_encode() }},
+                "current_cast_prompt": {{ current_cast_prompt | json_encode() }},
+                "critic_prompt": {{ c_prompt | json_encode() }},
+                "image_model": {{ image_model | json_encode() }},
+                "image_size": {{ image_size | json_encode() }},
+                "vision_model": {{ vision_model | json_encode() }},
+                "chat_model": {{ chat_model | json_encode() }}
+              }
+
+        - id: render_cast_sheet
+          type: text_to_image
+          dependencies: ["loop_ctx"]
+          input_mapping:
+            prompt: "{{ nodes.loop_ctx.outputs.current_cast_prompt }}"
+            model: "{{ nodes.loop_ctx.outputs.image_model }}"
+            size: "{{ nodes.loop_ctx.outputs.image_size }}"
+
+        - id: vlm_cast_critic
+          type: image_understand
+          dependencies: ["loop_ctx", "render_cast_sheet"]
+          input_mapping:
+            model: "{{ nodes.loop_ctx.outputs.vision_model }}"
+            text_prompt: "{{ nodes.loop_ctx.outputs.critic_prompt }}"
+            image_source: "{{ nodes.render_cast_sheet.outputs.render_cast_sheet_image }}"
+
+        - id: verdict_prompt
+          type: template
+          dependencies: ["loop_ctx", "vlm_cast_critic"]
+          input_mapping:
+            notes: "{{ nodes.vlm_cast_critic.outputs.vlm_cast_critic_output }}"
+            spec: "{{ nodes.loop_ctx.outputs.cast_spec_summary }}"
+            prev_prompt: "{{ nodes.loop_ctx.outputs.current_cast_prompt }}"
+          parameters:
+            template: |
+              Convert the Continuity Art Director's visual inspection below into a JSON decision.
+              Set `approved: true` if the characters are clearly depicted, match the cast spec reasonably well, and have no severe visual defects; set `approved: false` only if a character is missing, faces are distorted, or prominent garbled text ruins the reference sheet.
+              If `approved` is false, write `improved_prompt_en` preserving the exact cast visual DNA while fixing the defect (strictly NO text or letters).
+
+              Cast Spec: {{ spec }}
+              Previous Prompt: {{ prev_prompt }}
+              Inspector Notes: {{ notes }}
+
+        - id: cast_verdict
+          type: llm
+          dependencies: ["loop_ctx", "verdict_prompt"]
+          input_mapping:
+            prompt: "{{ nodes.verdict_prompt.outputs.output }}"
+            model: "{{ nodes.loop_ctx.outputs.chat_model }}"
+          parameters:
+            system: "Output valid JSON matching the schema only."
+            json_schema:
+              type: object
+              required: [approved, critique, improved_prompt_en]
+              properties:
+                approved: { type: boolean }
+                critique: { type: string }
+                improved_prompt_en: { type: string }
+
+        - id: loop_step
+          type: template
+          dependencies: ["loop_ctx", "render_cast_sheet", "cast_verdict"]
+          input_mapping:
+            ctx: "{{ nodes.loop_ctx.outputs.round }}"
+            max_r: "{{ nodes.loop_ctx.outputs.max_rounds }}"
+            style_str: "{{ nodes.loop_ctx.outputs.visual_style }}"
+            prev_prompt: "{{ nodes.loop_ctx.outputs.current_cast_prompt }}"
+            sheet_file: "{{ nodes.render_cast_sheet.outputs.render_cast_sheet_image }}"
+            verdict: "{{ nodes.cast_verdict.outputs.output }}"
+          parameters:
+            output_format: json
+            template: |
+              {% set next_round = ctx + 1 %}{% if not verdict.approved and next_round < max_r %}{% set retake = true %}{% else %}{% set retake = false %}{% endif %}{% set next_prompt = verdict.improved_prompt_en ~ ". Unified style: " ~ style_str ~ ". Clean character reference lineup on dark studio backdrop, strictly NO text, NO letters, NO labels." %}{
+                "round": {{ next_round }},
+                "needs_retake": {{ retake }},
+                "current_cast_prompt": {% if retake and verdict.improved_prompt_en != "" %}{{ next_prompt | json_encode() }}{% else %}{{ prev_prompt | json_encode() }}{% endif %},
+                "cast_sheet_path": {{ sheet_file | json_encode() }},
+                "cast_audit_note": {{ verdict.critique | json_encode() }}
+              }
+
+  - id: resolved_cast
+    type: template
+    dependencies: ["options", "shooting_plan"]
+    input_mapping:
+      atelier_sheet: "{{ nodes.cast_sheet_atelier.outputs.cast_sheet_path }}"
+      atelier_note: "{{ nodes.cast_sheet_atelier.outputs.cast_audit_note }}"
+      atelier_rounds: "{{ nodes.cast_sheet_atelier.outputs.iterations_used }}"
+    parameters:
+      output_format: json
+      template: |
+        {
+          "cast_sheet": {% if existing_cast_sheet != "" %}{{ existing_cast_sheet | json_encode() }}{% else %}{{ atelier_sheet | json_encode() }}{% endif %},
+          "audit_note": {{ atelier_note | default(value="Reused existing Master Cast Sheet from prior episode batch.") | json_encode() }},
+          "audit_rounds": {{ atelier_rounds | default(value=0) }}
+        }
+
+  # Flatten all episodes (opener card + scenes) into reference-locked production beats.
+  - id: production_beats
+    type: template
+    dependencies: ["shooting_plan", "resolved_cast"]
+    input_mapping:
+      plan: "{{ nodes.shooting_plan.outputs.output }}"
+      cast_ref: "{{ nodes.resolved_cast.outputs.cast_sheet }}"
+    parameters:
+      output_format: json
+      template: |
+        {"items": [{% set_global first = true %}{% for ep in plan.episodes %}{% if not first %},{% endif %}{% set_global first = false %}{% set ep_cap = "【第 " ~ ep.episode_number ~ " 集 · " ~ ep.episode_title ~ "】" ~ ep.title_card_narration %}{% set ep_vis = "Cinematic episode opener wide establishing shot, keeping exact world aesthetic and character likeness from the reference sheet if silhouettes appear: " ~ ep.title_card_visual_en ~ ". Style: " ~ visual_style ~ ". Pure visual frame: strictly NO text, NO title letters, NO numbers, NO watermarks." %}{
+          "episode_number": {{ ep.episode_number }},
+          "scene_number": 0,
+          "is_opener": true,
+          "is_episode_end": false,
+          "caption": {{ ep_cap | json_encode() }},
+          "spoken": {{ ep.title_card_narration | json_encode() }},
+          "voice": {{ narrator_voice | json_encode() }},
+          "vocal_instructions": "Speak as a cinematic series narrator introducing a new episode with atmospheric poise and subtle suspense.",
+          "visual": {{ ep_vis | json_encode() }},
+          "cast_sheet": {{ cast_ref | json_encode() }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }},
+          "tts_model": {{ tts_model | json_encode() }},
+          "moving": false,
+          "video_model": {{ video_model | json_encode() }},
+          "video_seconds": {{ video_seconds }}
+        }{% for sc in ep.scenes %}{% set_global resolved_voice = narrator_voice %}{% set_global resolved_vocal = sc.emotion_en %}{% for c in plan.cast %}{% if c.id == sc.speaker_id %}{% set_global resolved_voice = c.voice %}{% set_global resolved_vocal = c.vocal_style_en ~ "; scene emotion: " ~ sc.emotion_en %}{% endif %}{% endfor %}{% set sc_cap = sc.speaker_name ~ "：「" ~ sc.dialogue ~ "」" %}{% set sc_vis = "CRITICAL CONTINUITY RULE: Keep 100% identical facial features, hairstyle, eye color, and signature outfit from the provided Master Cast Reference Sheet for every character in frame. Episode " ~ ep.episode_number ~ " Scene " ~ sc.scene_number ~ " (" ~ sc.location ~ "): " ~ sc.shot_prompt_en ~ ". Style: " ~ visual_style ~ ". Strictly NO text, NO subtitles, NO letters, NO watermarks." %},{
+          "episode_number": {{ ep.episode_number }},
+          "scene_number": {{ sc.scene_number }},
+          "is_opener": false,
+          "is_episode_end": {{ loop.last }},
+          "caption": {{ sc_cap | json_encode() }},
+          "spoken": {{ sc.dialogue | json_encode() }},
+          "voice": {{ resolved_voice | json_encode() }},
+          "vocal_instructions": {{ resolved_vocal | json_encode() }},
+          "visual": {{ sc_vis | json_encode() }},
+          "cast_sheet": {{ cast_ref | json_encode() }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }},
+          "tts_model": {{ tts_model | json_encode() }},
+          "moving": {% if sc.climax_motion and video_model != "" %}true{% else %}false{% endif %},
+          "video_model": {{ video_model | json_encode() }},
+          "video_seconds": {{ video_seconds }}
+        }{% endfor %}{% endfor %}]}
+
+  # Shoot every beat across all episodes using `image_to_image` anchored to `cast_sheet`
+  # (+ optional I2V `text_to_video` from that exact keyframe), plus character-pinned `tts`.
+  - id: shoot_episodes
+    type: map
+    dependencies: ["production_beats"]
+    input_mapping:
+      input_list: "{{ nodes.production_beats.outputs.items }}"
+    parameters:
+      parallel: true
+      max_concurrent: 3
+      template:
+        - id: shot_mode
+          type: template
+          input_mapping:
+            moving: "{{ item.moving }}"
+          parameters:
+            output_format: json
+            template: '{"moving": {{ moving }}}'
+
+        - id: keyframe
+          type: image_to_image
+          input_mapping:
+            model: "{{ item.image_model }}"
+            size: "{{ item.image_size }}"
+            prompt: "{{ item.visual }}"
+            source_image: "{{ item.cast_sheet }}"
+          parameters:
+            source_weight: 0.85
+
+        - id: climax_clip
+          type: text_to_video
+          dependencies: ["shot_mode", "keyframe"]
+          run_if: "{{ nodes.shot_mode.outputs.moving }}"
+          input_mapping:
+            model: "{{ item.video_model }}"
+            prompt: "{{ item.visual }}"
+            image: "{{ nodes.keyframe.outputs.keyframe_output }}"
+            duration_seconds: "{{ item.video_seconds }}"
+          parameters:
+            aspect_ratio: "16:9"
+
+        - id: dialogue_tts
+          type: tts
+          input_mapping:
+            model: "{{ item.tts_model }}"
+            voice: "{{ item.voice }}"
+            instructions: "{{ item.vocal_instructions }}"
+            input_template: "{{ item.spoken }}"
+
+  - id: edit_timeline
+    type: template
+    dependencies: ["production_beats", "shoot_episodes"]
+    input_mapping:
+      beats: "{{ nodes.production_beats.outputs.items }}"
+      shot_results: "{{ nodes.shoot_episodes.outputs.results }}"
+    parameters:
+      output_format: json
+      template: |
+        {"scenes": [{% for r in shot_results %}{% set b = beats | nth(n=loop.index0) %}{
+          "audio": {{ r.dialogue_tts.Ok.dialogue_tts_output.path | json_encode() }},
+          "caption": {{ b.caption | json_encode() }},
+          "slide_start": {{ b.is_opener }},
+          "slide_end": {{ b.is_episode_end }},
+          "pause_after_ms": {% if b.is_episode_end %}900{% elif b.is_opener %}350{% else %}220{% endif %},
+          {% if r.climax_clip.Ok %}"video": {{ r.climax_clip.Ok.climax_clip_video.path | json_encode() }}{% else %}"image": {{ r.keyframe.Ok.keyframe_output.path | json_encode() }}{% endif %}
+        }{% if not loop.last %},{% endif %}{% endfor %}]}
+
+  - id: series_film
+    type: render_video
+    dependencies: ["edit_timeline"]
+    input_mapping:
+      scenes: "{{ nodes.edit_timeline.outputs.scenes }}"
+    parameters:
+      width: 1920
+      height: 1080
+      transition: "fade"
+      slide_pause_ms: 600
+
+  - id: series_bible_markdown_tpl
+    type: template
+    dependencies: ["shooting_plan", "resolved_cast", "production_beats", "shoot_episodes"]
+    input_mapping:
+      plan: "{{ nodes.shooting_plan.outputs.output }}"
+      cast_ref: "{{ nodes.resolved_cast.outputs.cast_sheet }}"
+      audit_note: "{{ nodes.resolved_cast.outputs.audit_note }}"
+      beats: "{{ nodes.production_beats.outputs.items }}"
+      shot_results: "{{ nodes.shoot_episodes.outputs.results }}"
+    parameters:
+      template: |
+        # 《{{ plan.series_title }}》剧集设定圣经与分集拍摄台本
+
+        > **{{ plan.tagline }}**
+        >
+        > **季/集范围**：第 {{ season_number }} 季 · 第 {{ start_episode }}–{{ start_episode + episode_count - 1 }} 集 ｜ **基调**：{{ genre_and_tone }}
+
+        ## 一、故事梗概与世界观底层法则
+
+        {{ plan.logline }}
+
+        {% for rule in plan.world_rules %}
+        - **法则 {{ loop.index }}**：{{ rule }}
+        {% endfor %}
+
+        ## 二、主演定妆参考母图与角色锁定档案（Character & Voice Bible）
+
+        ![主演定妆参考母图]({{ cast_ref }})
+
+        > **VLM 视觉场记审片记录**：{{ audit_note }}
+
+        | 角色 ID | 姓名 | 定位 | 绑定音色 | 不可变视觉特征锚点（Visual DNA） | 锁定服饰与标志物（Costume Lock） |
+        | --- | --- | --- | --- | --- | --- |
+        {% for c in plan.cast %}| `{{ c.id }}` | **{{ c.name }}** | {{ c.role }} | `{{ c.voice }}` | {{ c.visual_dna_en }} | {{ c.costume_lock_en }} |
+        {% endfor %}
+
+        ## 三、分集分镜拍摄台本与关键帧
+
+        {% set_global beat_idx = 0 %}
+        {% for ep in plan.episodes %}
+        ### 第 {{ ep.episode_number }} 集：《{{ ep.episode_title }}》
+
+        - **前情/开篇导语**：{{ ep.recap }}
+        - **片头旁白**：*“{{ ep.title_card_narration }}”*
+        {% set opener_shot = shot_results | nth(n=beat_idx) %}
+        {% set_global beat_idx = beat_idx + 1 %}
+
+        ![第 {{ ep.episode_number }} 集片头关键帧]({{ opener_shot.keyframe.Ok.keyframe_output.path }})
+
+        {% for sc in ep.scenes %}
+        {% set sc_shot = shot_results | nth(n=beat_idx) %}
+        {% set_global beat_idx = beat_idx + 1 %}
+        #### 第 {{ sc.scene_number }} 场 · {{ sc.location }}
+
+        - **说话人**：**{{ sc.speaker_name }}**（`{{ sc.speaker_id }}`）
+        - **台词**：*“{{ sc.dialogue }}”*
+        - **配音情绪**：`{{ sc.emotion_en }}`
+
+        ![E{{ ep.episode_number }}S{{ sc.scene_number }} 分镜帧]({{ sc_shot.keyframe.Ok.keyframe_output.path }})
+
+        {% endfor %}
+        - **本集结尾悬念钩子（Cliffhanger）**：**{{ ep.cliffhanger }}**
+
+        ---
+        {% endfor %}
+
+        ## 四、下一批剧集续拍交接档案（Episode {{ start_episode + episode_count }}+ Continuation）
+
+        {{ plan.continuation_summary }}
+
+        ```json
+        {
+          "next_start_episode": {{ start_episode + episode_count }},
+          "existing_cast_sheet": {{ cast_ref | json_encode() }},
+          "cast": {{ plan.cast | json_encode() }},
+          "world_rules": {{ plan.world_rules | json_encode() }},
+          "continuation_summary": {{ plan.continuation_summary | json_encode() }}
+        }
+        ```
+
+  - id: bible_md
+    type: render_markdown
+    dependencies: ["series_bible_markdown_tpl"]
+    input_mapping:
+      markdown: "{{ nodes.series_bible_markdown_tpl.outputs.output }}"
+
+  - id: bible_pdf
+    type: render_document
+    dependencies: ["series_bible_markdown_tpl", "shooting_plan", "options"]
+    run_if: "{{ nodes.options.outputs.do_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.series_bible_markdown_tpl.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies: ["shooting_plan", "resolved_cast", "series_film", "bible_md", "options"]
+    input_mapping:
+      plan: "{{ nodes.shooting_plan.outputs.output }}"
+      cast_ref: "{{ nodes.resolved_cast.outputs.cast_sheet }}"
+      audit_rounds: "{{ nodes.resolved_cast.outputs.audit_rounds }}"
+      mp4: "{{ nodes.series_film.outputs.series_film_output }}"
+      srt: "{{ nodes.series_film.outputs.series_film_subtitles }}"
+      seconds: "{{ nodes.series_film.outputs.series_film_seconds }}"
+      md_file: "{{ nodes.bible_md.outputs.bible_md_output }}"
+      pdf_file: "{{ nodes.bible_pdf.outputs.bible_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "video_overview",
+          "title": {{ plan.series_title | json_encode() }},
+          "content": {
+            "season": {{ season_number }},
+            "start_episode": {{ start_episode }},
+            "episode_count": {{ episode_count }},
+            "seconds": {{ seconds | json_encode() }},
+            "cast_audit_rounds": {{ audit_rounds }},
+            "cast": {{ plan.cast | json_encode() }},
+            "episodes": {{ plan.episodes | json_encode() }},
+            "continuation_state": {
+              "next_start_episode": {{ start_episode + episode_count }},
+              "existing_cast_sheet": {{ cast_ref | json_encode() }},
+              "continuation_summary": {{ plan.continuation_summary | json_encode() }}
+            }
+          },
+          "citations": [],
+          "files": [
+            {"node_id": "series_film", "name": {{ mp4 | split(pat="/") | last | json_encode() }}, "mime_type": "video/mp4", "role": "primary"},
+            {"node_id": "series_film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"},
+            {"node_id": "bible_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"}{% if pdf_file is defined and pdf_file %},
+            {"node_id": "bible_pdf", "name": {{ pdf_file | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "asset"}{% endif %}
+          ]
+        }}

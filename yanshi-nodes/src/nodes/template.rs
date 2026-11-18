@@ -466,6 +466,14 @@ No tasks found.
         {
           check_nodes(tera, &format!("{prefix}/{id}"), sub);
         }
+        if ntype == "while"
+          && let Some(sub) = node
+            .get("parameters")
+            .and_then(|p| p.get("do"))
+            .and_then(Value::as_array)
+        {
+          check_nodes(tera, &format!("{prefix}/{id}"), sub);
+        }
       }
     }
 
