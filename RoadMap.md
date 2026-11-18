@@ -82,8 +82,9 @@ Three access modes, in this priority order:
 
 ## Completed Track — Y: Content Studio (closed 2026-11-16)
 
-Tracked task-by-task in `TODOs.md` § Y (Y0–Y10 all `DONE`, plus the 15-template
-Studio catalogue and native OOXML slide upgrade):
+Tracked task-by-task in `TODOs.md` § Y (Y0–Y10 all `DONE`, plus the 18-template
+Studio catalogue — spanning daily productivity, keynote presenter video, and
+multi-paradigm creative/deliberative studios — and native OOXML slide upgrade):
 
 | Stage | Goal | Done when |
 |---|---|---|

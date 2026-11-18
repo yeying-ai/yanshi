@@ -1,10 +1,11 @@
 # Current Project Status
 
-Last updated: 2026-11-17 (Content Studio track **Y0–Y10** closed, plus the
-daily productivity & keynote studio suite — native pure-Rust OOXML `.pptx`
-writer, `16:9` widescreen Typst `.pdf` export, art-directed `illustration`
-node, 15 Studio catalogue workflows, and Pingora production gateway; see
-`RoadMap.md` and `TODOs.md`)
+Last updated: 2026-11-18 (Content Studio track **Y0–Y10** closed, plus the
+daily productivity, keynote & multi-paradigm creative studio suites — native
+pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst `.pdf` export,
+art-directed `illustration` node, 18 Studio catalogue workflows including
+`episodic_drama_studio`, `debate_podcast_show`, and `worldbuilding_bible`, and
+Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
 evaluations, roadmap notes, and TODO queues may explain how the project arrived
@@ -144,14 +145,16 @@ has closed:
   domain checks + compile-error feedback loop), and `illustration` node
   (art-directed prompt refinement, 6 visual style presets, dark/light palette
   harmonization, bounded concurrent `SlideDeck` / batch generation).
-- **Y4–Y6** — 15 Studio catalogue workflows under `examples/generators/`
-  (`illustrated_slides`, `tech_slides_video`, `slides`, `video_overview`,
+- **Y4–Y6** — 18 Studio catalogue workflows under `examples/generators/`
+  (`illustrated_slides`, `tech_slides_video`, `episodic_drama_studio`,
+  `debate_podcast_show`, `worldbuilding_bible`, `slides`, `video_overview`,
   `report`, `infographic`, `mindmap`, `circuit_diagram`, `audio_overview`,
   `flashcards`, `quiz`, `repo_architecture`, `backend_project_planner`,
   `paper_reader`, `video_summarizer`), `examples/applications/content-studio/`,
   persistent `notebooks` / `sources` / `source_chunks` / `notebook_artifacts`
   with unified citations and `POST /v1/notebooks/{id}/generate`, plus inline
-  workflow `agent` HITL `ask_user` interrupt/resume in gateway and Studio UI.
+  workflow `agent` HITL `ask_user` interrupt/resume and gateway-safe inline
+  `multi_agent` (`blackboard` / `debate` / `handoff`) in gateway and Studio UI.
 - **Y7–Y10** — cost-budget approvals, `ToolEffect::Publish`, gateway reach
   ceilings, input precedence fixes, streaming thinking & reply images,
   Anthropic adaptive thinking + native structured output, and live multimodal
