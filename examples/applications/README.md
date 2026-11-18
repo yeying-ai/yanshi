@@ -29,7 +29,7 @@ status table.
 | A2 | GitHub PR code reviewer | WIP — live ✅ as a skill (2026-05-18); [`code-reviewer-write/`](code-reviewer-write/) is the reference binary | [`code-reviewer/`](code-reviewer/) |
 | A3 | Arxiv research assistant | WIP — live ✅ iter 1 (2026-05-18) | [`research-assistant/`](research-assistant/) |
 | A4 | Meeting recording → speaker transcript + summary + action items (`.md` / `.xlsx` / `.pdf`) | DONE — offline mock smoke in CI + live ASR/LLM verified (2026-11-18) | [`meeting-transcriber/`](meeting-transcriber/) |
-| A5 | Scheduled weekly digest email | TODO | [`weekly-digest/`](weekly-digest/) |
+| A5 | Scheduled weekly digest email (BM25 RAG + SQLite watermark + SendGrid/Resend retry) | WIP — L1 crate + watermark/retry smoke + live LLM ✅ (2026-11-18; 4-week soak pending) | [`weekly-digest/`](weekly-digest/) |
 | A6 | Markdown folder multi-language translator | WIP — four workflow iterations shipped | [`doc-translator/`](doc-translator/) |
 | A7 | Git log → conventional CHANGELOG (yanshi eats its own dogfood) | WIP — live ✅ as a binary; skill form rejected (2026-05-18) | [`changelog-writer/`](changelog-writer/) |
 | A8 | **Content Studio** — one URL or idea → report + mind map + audio overview via a planner agent (track Y, `TODOs.md` Y4.4) | DONE — mock smoke in CI; the live run needs model keys (2026-11-05) | [`content-studio/`](content-studio/) |

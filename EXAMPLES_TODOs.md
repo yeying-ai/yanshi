@@ -36,7 +36,7 @@ Last updated: 2026-11-18（A8 content-studio 标记 DONE；Studio 官方生成�
 | A2 | [code-reviewer](examples/applications/code-reviewer/) | WIP — live ✅ as L3 skill (2026-05-18) | ReAct agent + shell tool with git/gh allowed_commands; multi-call decision-making | gh CLI + git (system installs), kimi-k2.6 |
 | A3 | [research-assistant](examples/applications/research-assistant/) | WIP — live ✅ iter 1 (2026-05-18) | arxiv search API, SqliteEntityFactStore dedup, one-shot LLM briefing | Moonshot LLM；arxiv API 免费；RAG + scheduled run 留 iter 2 |
 | A4 | [meeting-transcriber](examples/applications/meeting-transcriber/) | DONE — CI mock smoke + live `gemini-2.5-flash-asr` 实测通过 (2026-11-18) | `asr` node (`.srt`), 两阶段 `json_schema` LLM 切分与行动项提取, `render_markdown` / `render_table` (`.xlsx`/`.csv`) / `render_document` (`.pdf`) | Gemini ASR / OpenAI Whisper / 本地兼容端 + LLM |
-| A5 | [weekly-digest](examples/applications/weekly-digest/) | TODO | RAG, LLM, HTTP (SMTP/SendGrid), scheduled | SendGrid/Mailgun/SMTP |
+| A5 | [weekly-digest](examples/applications/weekly-digest/) | WIP — L1 crate + 水位线/重试回环测试 + live LLM ✅ (2026-11-18；待 4 周无人值守观察) | `SqliteEntityFactStore` 增量水位线, `Bm25KnowledgeBackend` 检索, LLM 简报, SendGrid/Resend HTTPS 重试与死信落盘 | SendGrid / Resend API（支持 `dry-run` 本地落盘） |
 | A6 | [doc-translator](examples/applications/doc-translator/) | WIP — workflow.yml + iter2/3/4 已落地（见 A6 段） | template, batch / map (parallel), LLM, file, shell | LLM API |
 | A7 | [changelog-writer](examples/applications/changelog-writer/) | WIP — live ✅ as L1 binary; L3 skill form rejected (2026-05-18) | custom AsyncNode + std::process git + single LlmInit::prompt call; LLM provider registry | 无（git + LLM key） |
 | A8 | [content-studio](examples/applications/content-studio/) | DONE — 已落地 `skill.toml` + `README.md` 及 `examples/generators/` 全套 18 个 Studio 生成器模板（含 `creative-producer` 多范式创意制片技能） | 规划 agent + `WorkflowTool` 生成器模板 + `FlowValue::File` 产物 + `--output-dir`；是 `docs/RFC_CONTENT_STUDIO.md` 的端到端验证 | LLM + TTS key；pandoc + typst；ffmpeg |
@@ -672,14 +672,20 @@ LLM 后处理的组合；典型「音频 → 结构化输出」流程。
 - 持久 RAG 索引（A3 的产物可以复用）
 
 **TODO 子项**:
-- [ ] 写 `README.md`
-- [ ] 选邮件 provider
-- [ ] 设计失败兜底（重试 + 上次成功时间戳）
+- [x] 写 `README.md`（含架构、死信/水位线保证与 `cron` 定时配置）
+- [x] 选邮件 provider（原生支持 `SendGrid /v3/mail/send`、`Resend /emails` 与 `dry-run` 本地预览）
+- [x] 设计失败兜底（先写 `outbox_dir` 死信归档 + 指数退避重试 `429`/`5xx` + 仅在 `2xx` 成功后推进 SQLite `last_successful_run` 水位线）
 - [ ] 跑 4 周观察
 
-**DONE 子项**: （待填）
+**DONE 子项 (iteration 1, 2026-11-18)**:
+- 落地独立 L1 应用 `examples/applications/weekly-digest/`（4 节点 `Flow`：`collect_and_search` → `synthesize_digest` → `deliver_email` → `commit_watermark`）
+- 新增本地回环集成测试 `tests/smoke.rs`（`reqwest::Client::builder().no_proxy()` + Mock SendGrid 服务），完整覆盖 `503` 重试耗尽不推进水位线、死信 `.md`/`.html` 保留、`202 Accepted` 恢复投递推进水位线、立即重跑零开销跳过（`8.33ms`）与新增笔记增量投递四阶段状态机
+- 复用 A3 `sample-briefings` 完成 `gemini-2.5-flash` 真机简报生成与二次重跑幂等跳过验证
 
-**Findings**: （待填）
+**Findings**:
+- **`F-A5-1` — `FlowExt::run()` 节点报错封装在返回 `HashMap` 内而非顶层 `Err`**：L1 调用方必须遍历 `state` 检查每个节点的 `Result`，否则下游被 `NodeSkipped` 时容易丢失上游真实报错上下文（如 HTTP `503` 状态码）。
+- **`F-A5-2` — `EntityFactStore::record_fact(&mut self)` 签名要求可变借用**：尽管底层 `SqlitePool` 已具备内部并发安全，`record_fact` 仍要求 `&mut self`，跨节点共享时需加 `Mutex` 或按阶段打开连接。
+- **`F-A5-3` — 系统代理环境下本地 HTTP 测试必须显式注入 `.no_proxy()`**：通过 `EmailDispatcher::with_client` 注入 `.no_proxy()` 客户端避免了 macOS 系统代理劫持 `127.0.0.1` 回环请求。
 
 ---
 

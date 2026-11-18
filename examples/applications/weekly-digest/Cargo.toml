@@ -1,0 +1,32 @@
+[workspace]
+
+[package]
+name = "weekly-digest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A5 dogfooding application: incremental watermark + BM25 RAG retrieval + LLM weekly digest + retry-hardened HTTPS email delivery"
+
+[dependencies]
+yanshi-core   = { path = "../../../yanshi-core" }
+yanshi-llm    = { path = "../../../yanshi-llm" }
+yanshi-memory = { path = "../../../yanshi-memory" }
+yanshi-rag    = { path = "../../../yanshi-rag", default-features = false }
+
+tokio              = { version = "1", features = ["full"] }
+async-trait        = "0.1"
+anyhow             = "1"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono             = { version = "0.4", features = ["serde"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy            = "0.15"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[[bin]]
+name = "weekly-digest"
+path = "src/main.rs"
