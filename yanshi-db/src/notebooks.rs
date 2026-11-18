@@ -143,6 +143,15 @@ pub trait SourceRepo: Send + Sync {
     error: Option<&str>,
     sha256: Option<&str>,
   ) -> Result<(), DbError>;
+  /// Delete a single source (and its `source_chunks` via `ON DELETE CASCADE`)
+  /// belonging to `(tenant_id, notebook_id)`. Returns `false` when missing or
+  /// owned by another tenant / notebook.
+  async fn delete(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<bool, DbError>;
 }
 
 #[derive(Clone, Debug)]
@@ -358,6 +367,23 @@ impl SourceRepo for PgSourceRepo {
       });
     }
     Ok(())
+  }
+
+  async fn delete(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<bool, DbError> {
+    let deleted =
+      sqlx::query("DELETE FROM sources WHERE id = $1 AND notebook_id = $2 AND tenant_id = $3")
+        .bind(source_id)
+        .bind(notebook_id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+    Ok(deleted == 1)
   }
 }
 

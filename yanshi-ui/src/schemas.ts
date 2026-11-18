@@ -506,6 +506,19 @@ export const NotebookSearchEnvelopeSchema = z
   .loose();
 export type NotebookSearchEnvelope = z.infer<typeof NotebookSearchEnvelopeSchema>;
 
+export const NotebookChunkSchema = z
+  .object({
+    chunk_id: z.string(),
+    source_id: z.string(),
+    notebook_id: z.string(),
+    tenant_id: z.string().optional(),
+    ordinal: z.number(),
+    content: z.string(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .loose();
+export type NotebookChunk = z.infer<typeof NotebookChunkSchema>;
+
 export const NotebookGenerateResponseSchema = z
   .object({
     run_id: z.string(),

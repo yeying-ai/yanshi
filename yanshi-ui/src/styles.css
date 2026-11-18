@@ -5129,6 +5129,119 @@ button.studio-upload-btn:hover {
   flex-wrap: wrap;
 }
 
+.nb-picker-label-row,
+.nb-source-item__actions,
+.nb-dialog__head,
+.nb-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nb-dialog__actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.nb-danger-link {
+  color: #b91c1c;
+}
+
+.nb-danger-link:hover {
+  color: #991b1b;
+}
+
+.nb-btn-danger {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.nb-btn-danger:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: #991b1b;
+}
+
+.nb-chunk-lookup-form {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nb-chunk-lookup-form label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #475569;
+}
+
+dialog.nb-dialog {
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 18px 20px;
+  max-width: 460px;
+  width: calc(100% - 32px);
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.18);
+}
+
+dialog.nb-dialog--wide {
+  max-width: 680px;
+}
+
+dialog[open].nb-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+dialog.nb-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.nb-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+dialog.nb-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+dialog.nb-dialog p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #475569;
+}
+
+.nb-chunk-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nb-chunk-preview__body {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 55vh;
+  overflow: auto;
+}
+
 @media (max-width: 1180px) {
   .nb-workbench {
     grid-template-columns: 1fr;

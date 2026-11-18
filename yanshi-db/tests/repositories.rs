@@ -1339,6 +1339,49 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
       .is_empty()
   );
 
+  // Source-level delete is scoped to (tenant, notebook) and cascades chunks.
+  let disposable = repos
+    .sources
+    .create(NewSource {
+      notebook_id: notebook.id,
+      tenant_id: tenant.clone(),
+      kind: SourceKind::Text,
+      title: "Disposable".into(),
+      uri: None,
+    })
+    .await
+    .expect("create disposable")
+    .expect("owned");
+  assert!(
+    !repos
+      .sources
+      .delete(&other, notebook.id, disposable.id)
+      .await
+      .expect("cross-tenant source delete")
+  );
+  assert!(
+    !repos
+      .sources
+      .delete(&tenant, Uuid::new_v4(), disposable.id)
+      .await
+      .expect("wrong-notebook source delete")
+  );
+  assert!(
+    repos
+      .sources
+      .delete(&tenant, notebook.id, disposable.id)
+      .await
+      .expect("owner source delete")
+  );
+  assert!(
+    repos
+      .sources
+      .get(&tenant, disposable.id)
+      .await
+      .expect("get deleted source")
+      .is_none()
+  );
+
   // Delete cascades to sources and links; another tenant cannot delete.
   assert!(
     !repos

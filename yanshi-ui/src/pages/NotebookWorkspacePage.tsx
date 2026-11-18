@@ -13,6 +13,7 @@ import {
 import {
   ListNotebooksEnvelopeSchema,
   NotebookArtifactsEnvelopeSchema,
+  NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookGenerateResponseSchema,
   NotebookSchema,
@@ -23,6 +24,7 @@ import {
   parseJsonResponse,
   type Notebook,
   type NotebookArtifact,
+  type NotebookChunk,
   type NotebookSearchHit,
   type NotebookSource,
   type StreamedEvent,
@@ -513,10 +515,17 @@ export function NotebookWorkspacePage({
     recording: null,
   });
 
-  // BM25 search state
+  // BM25 search & citation chunk lookup state
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchBusy, setSearchBusy] = useState<boolean>(false);
   const [searchHits, setSearchHits] = useState<NotebookSearchHit[] | null>(null);
+  const [chunkLookupId, setChunkLookupId] = useState<string>('');
+  const [chunkLookupBusy, setChunkLookupBusy] = useState<boolean>(false);
+  const [inspectedChunk, setInspectedChunk] = useState<NotebookChunk | null>(null);
+  const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [deleteNotebookBusy, setDeleteNotebookBusy] = useState<boolean>(false);
+  const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
+  const chunkDialogRef = useRef<HTMLDialogElement | null>(null);
 
   // Studio generator state
   const [expandedKind, setExpandedKind] = useState<GeneratorKind>('flashcards');
@@ -643,6 +652,7 @@ export function NotebookWorkspacePage({
 
   useEffect(() => {
     setSearchHits(null);
+    setInspectedChunk(null);
     void loadNotebookDetailAndArtifacts(selectedNotebookId);
   }, [selectedNotebookId, loadNotebookDetailAndArtifacts]);
 
@@ -763,6 +773,133 @@ export function NotebookWorkspacePage({
       navigateTo(`/ui/notebooks/${encodeURIComponent(nextId)}`);
     } else {
       navigateTo('/ui/notebooks');
+    }
+  };
+
+  const openModalDialog = (dialog: HTMLDialogElement | null) => {
+    if (!dialog) return;
+    if (typeof dialog.showModal === 'function') {
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+    } else {
+      dialog.setAttribute('open', '');
+    }
+  };
+
+  const closeModalDialog = (dialog: HTMLDialogElement | null) => {
+    if (!dialog) return;
+    dialog.returnValue = '';
+    if (typeof dialog.close === 'function' && dialog.open) {
+      dialog.close();
+    } else {
+      dialog.removeAttribute('open');
+    }
+  };
+
+  const handleConfirmDeleteNotebook = async () => {
+    if (!selectedNotebookId) return;
+    const deletedTitle = activeNotebook?.title ?? selectedNotebookId;
+    setDeleteNotebookBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}`,
+        apiToken,
+        { method: 'DELETE' },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`删除笔记本失败 (${res.status}): ${text}`);
+      }
+      closeModalDialog(deleteDialogRef.current);
+      setSearchHits(null);
+      setInspectedChunk(null);
+      setActiveGenRunId('');
+      const remaining = notebooks.filter((n) => n.id !== selectedNotebookId);
+      setNotebooks(remaining);
+      const nextId = remaining[0]?.id ?? '';
+      handleSelectNotebook(nextId);
+      if (!nextId) {
+        setActiveNotebook(null);
+        setSources([]);
+        setArtifacts([]);
+      }
+      setNoticeBanner(`已删除笔记本「${deletedTitle}」及其关联来源索引。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setDeleteNotebookBusy(false);
+    }
+  };
+
+  const handleDeleteSource = async (source: NotebookSource) => {
+    if (!selectedNotebookId) return;
+    setDeletingSourceId(source.id);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources/${encodeURIComponent(
+          source.id,
+        )}`,
+        apiToken,
+        { method: 'DELETE' },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`移除来源失败 (${res.status}): ${text}`);
+      }
+      setSources((prev) => prev.filter((item) => item.id !== source.id));
+      setSearchHits((prev) =>
+        prev ? prev.filter((hit) => hit.source_id !== source.id) : null,
+      );
+      if (inspectedChunk?.source_id === source.id) {
+        setInspectedChunk(null);
+        closeModalDialog(chunkDialogRef.current);
+      }
+      setNoticeBanner(`已移除来源「${source.title}」，BM25 索引缓存已即时刷新。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setDeletingSourceId(null);
+    }
+  };
+
+  const handleInspectChunk = async (rawChunkId: string) => {
+    if (!selectedNotebookId) return;
+    const trimmed = rawChunkId.trim();
+    if (!trimmed) {
+      setErrorBanner('请输入要溯源的引用分块 ID（例如 source_id:0）。');
+      return;
+    }
+    setChunkLookupBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/chunks/${encodeURIComponent(
+          trimmed,
+        )}`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`查询分块 ${trimmed} 失败 (${res.status}): ${text}`);
+      }
+      const chunk = await parseJsonResponse(
+        NotebookChunkSchema,
+        res,
+        'GET /v1/notebooks/:id/chunks/:chunk_id',
+      );
+      setInspectedChunk(chunk);
+      openModalDialog(chunkDialogRef.current);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setChunkLookupBusy(false);
     }
   };
 
@@ -1106,7 +1243,21 @@ export function NotebookWorkspacePage({
 
             {notebooks.length > 0 && (
               <div className="nb-field">
-                <label htmlFor="nb-select">切换已有笔记本</label>
+                <div className="nb-picker-label-row">
+                  <label htmlFor="nb-select">切换已有笔记本</label>
+                  {activeNotebook && (
+                    <button
+                      type="button"
+                      className="studio-link-btn nb-danger-link"
+                      data-testid="open-delete-notebook-btn"
+                      aria-label={`删除笔记本 ${activeNotebook.title}`}
+                      disabled={deleteNotebookBusy}
+                      onClick={() => openModalDialog(deleteDialogRef.current)}
+                    >
+                      删除笔记本
+                    </button>
+                  )}
+                </div>
                 <select
                   id="nb-select"
                   name="notebook_id"
@@ -1361,19 +1512,41 @@ export function NotebookWorkspacePage({
                     : '请先在上方新建一个主题笔记本。'}
                 </p>
               ) : (
-                <ul className="nb-source-list" aria-label="已添加的资料来源">
+                <ul className="nb-source-list" role="list" aria-label="已添加的资料来源">
                   {sources.map((src) => (
                     <li key={src.id} className="nb-source-item">
                       <div className="nb-source-item__top">
                         <strong>{src.title}</strong>
-                        <span className="nb-source-status" data-status={src.status}>
-                          {sourceStatusLabel(src.status)}
-                        </span>
+                        <div className="nb-source-item__actions">
+                          <span className="nb-source-status" data-status={src.status}>
+                            {sourceStatusLabel(src.status)}
+                          </span>
+                          <button
+                            type="button"
+                            className="studio-link-btn nb-danger-link"
+                            data-testid={`delete-source-${src.id}`}
+                            aria-label={`移除 ${src.title}`}
+                            disabled={deletingSourceId === src.id}
+                            onClick={() => void handleDeleteSource(src)}
+                          >
+                            {deletingSourceId === src.id ? '移除中…' : '移除'}
+                          </button>
+                        </div>
                       </div>
                       <div className="nb-source-item__meta">
                         <span>{src.kind.toUpperCase()}</span>
                         <span>{formatTime(src.created_at)}</span>
                         {src.sha256 ? <code>#{src.sha256.slice(0, 8)}</code> : null}
+                        {src.status === 'ready' && (
+                          <button
+                            type="button"
+                            className="studio-link-btn"
+                            aria-label={`查看首段 ${src.title}`}
+                            onClick={() => void handleInspectChunk(`${src.id}:0`)}
+                          >
+                            查看首段
+                          </button>
+                        )}
                       </div>
                       {src.error ? <p className="nb-source-item__error">{src.error}</p> : null}
                     </li>
@@ -1425,7 +1598,7 @@ export function NotebookWorkspacePage({
                 {searchHits.length === 0 ? (
                   <p className="nb-empty-hint">未找到匹配分块，请尝试调整关键词。</p>
                 ) : (
-                  <ul className="nb-hit-list">
+                  <ul className="nb-hit-list" role="list">
                     {searchHits.map((hit) => (
                       <li key={hit.chunk_id} className="nb-hit-card">
                         <div className="nb-hit-card__head">
@@ -1434,7 +1607,14 @@ export function NotebookWorkspacePage({
                         </div>
                         <p>{hit.content}</p>
                         <div className="nb-hit-card__foot">
-                          <small>{hit.chunk_id}</small>
+                          <button
+                            type="button"
+                            className="studio-link-btn"
+                            aria-label={`查看分块 ${hit.chunk_id}`}
+                            onClick={() => void handleInspectChunk(hit.chunk_id)}
+                          >
+                            查看分块 {hit.chunk_id.slice(-8)}
+                          </button>
                           <button
                             type="button"
                             className="studio-link-btn"
@@ -1449,6 +1629,38 @@ export function NotebookWorkspacePage({
                 )}
               </div>
             )}
+
+            <form
+              className="nb-chunk-lookup-form"
+              onSubmit={(ev) => {
+                ev.preventDefault();
+                void handleInspectChunk(chunkLookupId);
+              }}
+            >
+              <label htmlFor="nb-chunk-id-input">按引用分块 ID 溯源原文</label>
+              <div className="nb-search-form">
+                <input
+                  id="nb-chunk-id-input"
+                  name="chunk_id"
+                  type="text"
+                  data-testid="chunk-lookup-input"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="例如 550e8400-...:0"
+                  value={chunkLookupId}
+                  onChange={(ev) => setChunkLookupId(ev.target.value)}
+                />
+                <button
+                  type="submit"
+                  className="studio-btn-secondary studio-btn-sm"
+                  data-testid="chunk-lookup-btn"
+                  disabled={chunkLookupBusy || !selectedNotebookId}
+                >
+                  {chunkLookupBusy ? '定位中…' : '溯源'}
+                </button>
+              </div>
+            </form>
           </section>
         </aside>
 
@@ -1682,6 +1894,74 @@ export function NotebookWorkspacePage({
           </div>
         </aside>
       </main>
+
+      <dialog
+        ref={deleteDialogRef}
+        className="nb-dialog"
+        data-testid="delete-notebook-dialog"
+        aria-labelledby="nb-delete-dialog-title"
+        onClose={(ev) => {
+          ev.currentTarget.returnValue = '';
+        }}
+      >
+        <h2 id="nb-delete-dialog-title">确认删除笔记本？</h2>
+        <p>
+          将永久移除笔记本「{activeNotebook?.title ?? ''}」及其名下全部 {sources.length}{' '}
+          份资料分块与成品挂载记录，此操作不可撤销。
+        </p>
+        <div className="nb-dialog__actions">
+          <form method="dialog">
+            <button type="submit" value="cancel" className="studio-btn-secondary studio-btn-sm" autoFocus>
+              取消
+            </button>
+          </form>
+          <button
+            type="button"
+            className="studio-btn-primary studio-btn-sm nb-btn-danger"
+            data-testid="confirm-delete-notebook-btn"
+            disabled={deleteNotebookBusy}
+            onClick={() => void handleConfirmDeleteNotebook()}
+          >
+            {deleteNotebookBusy ? '删除中…' : '确认删除'}
+          </button>
+        </div>
+      </dialog>
+
+      <dialog
+        ref={chunkDialogRef}
+        className="nb-dialog nb-dialog--wide"
+        data-testid="chunk-preview-dialog"
+        aria-labelledby="nb-chunk-dialog-title"
+        onClose={(ev) => {
+          ev.currentTarget.returnValue = '';
+        }}
+      >
+        <div className="nb-dialog__head">
+          <h2 id="nb-chunk-dialog-title">
+            引用分块原文 {inspectedChunk ? `· #${inspectedChunk.ordinal}` : ''}
+          </h2>
+          <form method="dialog">
+            <button type="submit" value="close" className="studio-btn-secondary studio-btn-sm" autoFocus>
+              关闭
+            </button>
+          </form>
+        </div>
+        {inspectedChunk && (
+          <div className="nb-chunk-preview">
+            <div className="nb-source-item__meta">
+              <span>{sourceTitleById.get(inspectedChunk.source_id) ?? '所属来源'}</span>
+              <code>{inspectedChunk.chunk_id}</code>
+              {typeof inspectedChunk.metadata?.start_line === 'number' &&
+                typeof inspectedChunk.metadata?.end_line === 'number' && (
+                  <span>
+                    行号 {inspectedChunk.metadata.start_line}–{inspectedChunk.metadata.end_line}
+                  </span>
+                )}
+            </div>
+            <pre className="nb-chunk-preview__body">{inspectedChunk.content}</pre>
+          </div>
+        )}
+      </dialog>
     </div>
   );
 }

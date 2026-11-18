@@ -677,15 +677,26 @@ pub fn create_router(state: AppState) -> Router {
       "/v1/runs/:id/questions/:question_id",
       post(answer_run_question),
     )
-    // Y5.2: notebooks, their sources and search.
+    // Y5.2 / Z2: notebooks, their sources, chunk lookup and search.
     .route(
       "/v1/notebooks",
       get(notebooks::list_notebooks).post(notebooks::create_notebook),
     )
-    .route("/v1/notebooks/:id", get(notebooks::get_notebook))
+    .route(
+      "/v1/notebooks/:id",
+      get(notebooks::get_notebook).delete(notebooks::delete_notebook),
+    )
     .route(
       "/v1/notebooks/:id/sources",
       post(notebooks::add_source).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+    )
+    .route(
+      "/v1/notebooks/:id/sources/:source_id",
+      axum::routing::delete(notebooks::delete_source),
+    )
+    .route(
+      "/v1/notebooks/:id/chunks/:chunk_id",
+      get(notebooks::get_notebook_chunk),
     )
     .route("/v1/notebooks/:id/search", get(notebooks::search_notebook))
     .route("/v1/notebooks/:id/generate", post(notebooks::generate))
@@ -815,7 +826,13 @@ fn cors_layer(defaults: &SecurityProfileDefaults) -> CorsLayer {
       };
       CorsLayer::new()
         .allow_origin(allow_origin)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+          Method::GET,
+          Method::POST,
+          Method::PUT,
+          Method::DELETE,
+          Method::OPTIONS,
+        ])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
         .expose_headers(Any)
     }

@@ -1,13 +1,16 @@
 //! Notebooks and their sources (Y5.2, `docs/RFC_CONTENT_STUDIO.md` §6).
 //!
 //! ```text
-//! POST /v1/notebooks                      {title}              → notebook
-//! GET  /v1/notebooks                                           → {notebooks}
-//! GET  /v1/notebooks/{id}                                      → {notebook, sources}
-//! POST /v1/notebooks/{id}/sources         {kind, ...}          → source (pending; ingests in the background)
-//! GET  /v1/notebooks/{id}/search?q=&top_k=                     → {chunks}
-//! POST /v1/notebooks/{id}/generate        {kind, params, model} → {run_id, kind}
-//! GET  /v1/notebooks/{id}/artifacts                            → {artifacts}
+//! POST   /v1/notebooks                              {title}              → notebook
+//! GET    /v1/notebooks                                                   → {notebooks}
+//! GET    /v1/notebooks/{id}                                              → {notebook, sources}
+//! DELETE /v1/notebooks/{id}                                              → 204 No Content
+//! POST   /v1/notebooks/{id}/sources                 {kind, ...}          → source (pending; ingests in the background)
+//! DELETE /v1/notebooks/{id}/sources/{source_id}                          → 204 No Content
+//! GET    /v1/notebooks/{id}/chunks/{chunk_id}                            → chunk
+//! GET    /v1/notebooks/{id}/search?q=&top_k=                             → {chunks}
+//! POST   /v1/notebooks/{id}/generate                {kind, params, model} → {run_id, kind}
+//! GET    /v1/notebooks/{id}/artifacts                                    → {artifacts}
 //! ```
 //!
 //! Ingestion: fetch (`url`, through the http tool's SSRF filter: the URL
@@ -30,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use axum::{
   Extension, Json,
   extract::{Path, Query, State},
+  http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -142,6 +146,58 @@ pub async fn get_notebook(
     .list_for_notebook(tenant.as_str(), id)
     .await?;
   Ok(Json(json!({ "notebook": notebook, "sources": sources })))
+}
+
+pub async fn delete_notebook(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+  let deleted = state.repos.notebooks.delete(tenant.as_str(), id).await?;
+  if !deleted {
+    return Err(ApiError::NotFound(format!("notebook {id} not found")));
+  }
+  state.notebook_indexes.invalidate(id);
+  Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_source(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path((notebook_id, source_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+  let deleted = state
+    .repos
+    .sources
+    .delete(tenant.as_str(), notebook_id, source_id)
+    .await?;
+  if !deleted {
+    return Err(ApiError::NotFound(format!(
+      "source {source_id} in notebook {notebook_id} not found"
+    )));
+  }
+  state.notebook_indexes.invalidate(notebook_id);
+  Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_notebook_chunk(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path((notebook_id, chunk_id)): Path<(Uuid, String)>,
+) -> Result<Json<SourceChunk>, ApiError> {
+  own_notebook(&state, &tenant, notebook_id).await?;
+  let chunk = state
+    .repos
+    .chunks
+    .get(tenant.as_str(), chunk_id.trim())
+    .await?
+    .filter(|c| c.notebook_id == notebook_id)
+    .ok_or_else(|| {
+      ApiError::NotFound(format!(
+        "chunk '{chunk_id}' in notebook {notebook_id} not found"
+      ))
+    })?;
+  Ok(Json(chunk))
 }
 
 /// `POST /v1/notebooks/{id}/sources` body.
@@ -793,27 +849,30 @@ pub async fn generate(
     }
   }
 
-  let mut budget = GENERATE_CHUNK_BUDGET;
-  let chunks: Vec<Value> = state
+  let ready_chunks = state
     .repos
     .chunks
     .list_ready_for_notebook(tenant.as_str(), id)
-    .await?
-    .into_iter()
-    .take_while(|chunk| {
-      let fits = chunk.content.len() <= budget;
-      budget = budget.saturating_sub(chunk.content.len());
-      fits
-    })
-    .map(|chunk| {
-      json!({ "chunk_id": chunk.chunk_id, "source_id": chunk.source_id, "content": chunk.content })
-    })
-    .collect();
-  if chunks.is_empty() {
+    .await?;
+  if ready_chunks.is_empty() {
     return Err(ApiError::BadRequest(format!(
       "notebook {id} has no ready sources to generate from"
     )));
   }
+  let query_hint = req
+    .params
+    .get("focus")
+    .and_then(Value::as_str)
+    .or_else(|| req.params.get("topic").and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|s| !s.is_empty());
+  let selected = select_chunks_for_generate(ready_chunks, query_hint, GENERATE_CHUNK_BUDGET).await;
+  let chunks: Vec<Value> = selected
+    .into_iter()
+    .map(|chunk| {
+      json!({ "chunk_id": chunk.chunk_id, "source_id": chunk.source_id, "content": chunk.content })
+    })
+    .collect();
   let mut inputs = req.params;
   inputs.insert("chunks".to_string(), Value::Array(chunks));
   if definition.inputs.contains_key("chat_model") && !inputs.contains_key("chat_model") {
@@ -843,6 +902,117 @@ pub async fn generate(
   Ok(Json(
     json!({ "run_id": run.id, "kind": req.kind, "status": run.status }),
   ))
+}
+
+/// Select chunks up to `budget` bytes while prioritising BM25 relevance to
+/// `query_hint` (`focus` / `topic`) and round-robin coverage across sources,
+/// then re-ordering in natural `(source, ordinal)` reading order.
+async fn select_chunks_for_generate(
+  ready: Vec<SourceChunk>,
+  query_hint: Option<&str>,
+  budget: usize,
+) -> Vec<SourceChunk> {
+  if ready.is_empty() || budget == 0 {
+    return Vec::new();
+  }
+  let total_bytes: usize = ready.iter().map(|c| c.content.len()).sum();
+  if total_bytes <= budget {
+    return ready;
+  }
+
+  let mut remaining = budget;
+  let mut picked = vec![false; ready.len()];
+  let pos_by_id: HashMap<&str, usize> = ready
+    .iter()
+    .enumerate()
+    .map(|(idx, c)| (c.chunk_id.as_str(), idx))
+    .collect();
+
+  // 1. Pull BM25 hits matching the caller's focus / topic first so relevant
+  //    passages in later sources are never starved by earlier sources.
+  if let Some(query) = query_hint.map(str::trim).filter(|q| !q.is_empty()) {
+    let backend = Bm25KnowledgeBackend::from_documents(
+      ready
+        .iter()
+        .map(|c| (c.chunk_id.clone(), c.content.clone())),
+    );
+    if let Ok(hits) = backend.search(query, ready.len()).await {
+      for hit in hits {
+        if hit.score <= 0.0 {
+          continue;
+        }
+        if let Some(&idx) = pos_by_id.get(hit.id.as_str())
+          && !picked[idx]
+          && ready[idx].content.len() <= remaining
+        {
+          picked[idx] = true;
+          remaining -= ready[idx].content.len();
+        }
+      }
+    }
+  }
+
+  // 2. Fill remaining budget round-robin across sources so multi-document
+  //    notebooks stay balanced even when `focus` is omitted or generic.
+  let mut source_order: Vec<Uuid> = Vec::new();
+  let mut buckets: HashMap<Uuid, std::collections::VecDeque<usize>> = HashMap::new();
+  for (idx, chunk) in ready.iter().enumerate() {
+    if picked[idx] {
+      continue;
+    }
+    let entry = buckets.entry(chunk.source_id).or_insert_with(|| {
+      source_order.push(chunk.source_id);
+      std::collections::VecDeque::new()
+    });
+    entry.push_back(idx);
+  }
+
+  loop {
+    let mut progressed = false;
+    for source_id in &source_order {
+      let Some(queue) = buckets.get_mut(source_id) else {
+        continue;
+      };
+      while let Some(idx) = queue.pop_front() {
+        let len = ready[idx].content.len();
+        if len <= remaining {
+          picked[idx] = true;
+          remaining -= len;
+          progressed = true;
+          break;
+        }
+      }
+    }
+    if !progressed {
+      break;
+    }
+  }
+
+  let mut selected: Vec<SourceChunk> = ready
+    .iter()
+    .enumerate()
+    .filter(|(idx, _)| picked[*idx])
+    .map(|(_, chunk)| chunk.clone())
+    .collect();
+
+  // Safety fallback when every single chunk exceeds `budget`.
+  if selected.is_empty()
+    && let Some(mut first) = ready.into_iter().next()
+  {
+    let cut = first
+      .content
+      .char_indices()
+      .take_while(|(byte_idx, ch)| byte_idx + ch.len_utf8() <= budget)
+      .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
+      .last()
+      .unwrap_or(0);
+    first.content.truncate(cut);
+    if !first.content.is_empty() {
+      selected.push(first);
+    }
+  }
+
+  selected
 }
 
 pub async fn list_notebook_artifacts(
@@ -975,5 +1145,64 @@ mod tests {
     .await
     .expect("transcript");
     assert_eq!(transcript, "mock transcript");
+  }
+
+  #[tokio::test]
+  async fn select_chunks_prioritises_focused_and_multi_source_chunks_under_budget() {
+    let notebook_id = Uuid::new_v4();
+    let src_a = Uuid::new_v4();
+    let src_b = Uuid::new_v4();
+
+    let mut ready = Vec::new();
+    for ord in 0..30 {
+      ready.push(SourceChunk {
+        chunk_id: format!("{src_a}:{ord}"),
+        source_id: src_a,
+        notebook_id,
+        tenant_id: "t1".to_string(),
+        ordinal: ord,
+        content: format!(
+          "Gravitational ocean tides paragraph {ord}. {}",
+          "Lunar orbital mechanics and coastal amplitude observations. ".repeat(14)
+        ),
+        metadata: json!({"start_line": ord * 10 + 1, "end_line": ord * 10 + 8}),
+      });
+    }
+    for ord in 0..3 {
+      ready.push(SourceChunk {
+        chunk_id: format!("{src_b}:{ord}"),
+        source_id: src_b,
+        notebook_id,
+        tenant_id: "t1".to_string(),
+        ordinal: ord,
+        content: format!(
+          "PostgreSQL advisory lock pool tuning section {ord}: pg_advisory_xact_lock serialises per-tenant run admission cleanly."
+        ),
+        metadata: json!({"start_line": ord * 5 + 1, "end_line": ord * 5 + 4}),
+      });
+    }
+
+    let focused = select_chunks_for_generate(
+      ready.clone(),
+      Some("PostgreSQL advisory lock pool tuning"),
+      4_000,
+    )
+    .await;
+    let total_bytes: usize = focused.iter().map(|c| c.content.len()).sum();
+    assert!(
+      total_bytes <= 4_000,
+      "must stay within budget: {total_bytes}"
+    );
+    assert!(
+      focused.iter().filter(|c| c.source_id == src_b).count() == 3,
+      "all 3 focused chunks from later source B must be selected instead of starved by source A"
+    );
+
+    let balanced = select_chunks_for_generate(ready, None, 4_000).await;
+    assert!(
+      balanced.iter().any(|c| c.source_id == src_a)
+        && balanced.iter().any(|c| c.source_id == src_b),
+      "unfocused selection over budget must represent both sources"
+    );
   }
 }

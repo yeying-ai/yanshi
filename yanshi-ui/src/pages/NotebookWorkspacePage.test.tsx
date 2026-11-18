@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
   NotebookArtifactsEnvelopeSchema,
+  NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookSearchEnvelopeSchema,
 } from '../schemas';
@@ -155,9 +156,20 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
       ],
     });
     expect(arts.artifacts).toHaveLength(1);
+
+    const chunk = NotebookChunkSchema.parse({
+      chunk_id: 'src-1:0',
+      source_id: 'src-1',
+      notebook_id: 'nb-1',
+      ordinal: 0,
+      content: 'Perigean king tides peak when the moon is closest.',
+      metadata: { start_line: 1, end_line: 4 },
+    });
+    expect(chunk.ordinal).toBe(0);
+    expect(chunk.metadata?.start_line).toBe(1);
   });
 
-  it('renders 3-column NotebookWorkspacePage SSR markup with PDF/Recording tabs, search, and 11 generators', () => {
+  it('renders 3-column NotebookWorkspacePage SSR markup with PDF/Recording tabs, chunk lookup, native dialogs, and 11 generators', () => {
     const html = renderToStaticMarkup(
       <NotebookWorkspacePage apiToken="" onTokenChange={() => {}} />,
     );
@@ -166,6 +178,11 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="nb-tab-recording"');
     expect(html).toContain('accept=".pdf,');
+    expect(html).toContain('data-testid="chunk-lookup-input"');
+    expect(html).toContain('data-testid="delete-notebook-dialog"');
+    expect(html).toContain('data-testid="chunk-preview-dialog"');
+    expect(html).not.toContain('role="dialog"');
+    expect(html).not.toContain('aria-modal=');
     for (const spec of STUDIO_GENERATORS) {
       expect(html).toContain(`data-testid="generator-card-${spec.kind}"`);
     }

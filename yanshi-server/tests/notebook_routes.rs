@@ -251,13 +251,13 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
       .await
     }
   };
-  let (code, hits) = search(state.clone(), "moon").await;
+  let (code, hits) = search(state.clone(), "gravitational").await;
   assert_eq!(code, StatusCode::OK, "{hits}");
   let first = &hits["chunks"][0];
   assert!(
     first["content"]
       .as_str()
-      .is_some_and(|c| c.contains("moon")),
+      .is_some_and(|c| c.contains("gravitational") && c.contains("moon")),
     "{hits}"
   );
   assert_eq!(first["source_id"], by_kind("text")["id"]);
@@ -312,5 +312,104 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     Some(json!({"kind": "text", "text": "x"})),
   )
   .await;
+  assert_eq!(code, StatusCode::NOT_FOUND);
+
+  // Citation chunk lookup resolves chunk_id scoped to (tenant, notebook).
+  let pdf_chunk_id = pdf_hits["chunks"][0]["chunk_id"]
+    .as_str()
+    .expect("pdf chunk_id")
+    .to_string();
+  let (code, chunk_doc) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/chunks/{pdf_chunk_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{chunk_doc}");
+  assert_eq!(chunk_doc["chunk_id"], pdf_chunk_id);
+  assert!(
+    chunk_doc["content"]
+      .as_str()
+      .is_some_and(|c| c.contains("Perigean")),
+    "{chunk_doc}"
+  );
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/chunks/{pdf_chunk_id}"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND);
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{}/chunks/{pdf_chunk_id}", Uuid::new_v4()),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND);
+
+  // Deleting a source invalidates the in-memory BM25 cache immediately and cascades chunks.
+  let pdf_source_id = pdf_src["id"].as_str().expect("pdf source id").to_string();
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{id}/sources/{pdf_source_id}"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND);
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{id}/sources/{pdf_source_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NO_CONTENT);
+  let (code, after_delete_hits) = search(state.clone(), "Perigean").await;
+  assert_eq!(code, StatusCode::OK);
+  assert_eq!(
+    after_delete_hits["chunks"].as_array().map(Vec::len),
+    Some(0),
+    "deleted source must disappear immediately from cached BM25 search: {after_delete_hits}"
+  );
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/chunks/{pdf_chunk_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "source_chunks cascaded");
+
+  // Deleting the notebook cascades remaining sources and returns 404 thereafter.
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{id}"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND);
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NO_CONTENT);
+  let (code, _) = call(&state, "GET", &format!("/v1/notebooks/{id}"), &tenant, None).await;
   assert_eq!(code, StatusCode::NOT_FOUND);
 }
