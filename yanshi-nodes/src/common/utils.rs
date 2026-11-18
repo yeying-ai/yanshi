@@ -84,6 +84,20 @@ pub async fn load_data_uri_from_source(
   load_data_uri_from_str(source).await
 }
 
+pub async fn load_data_uri_from_input_or_value(
+  value: &FlowValue,
+  key: &str,
+  inputs: &yanshi_core::async_node::AsyncNodeInputs,
+) -> Result<String, YanshiError> {
+  if let FlowValue::Json(Value::String(s)) = value {
+    let trimmed = s.trim();
+    if !trimmed.is_empty() && trimmed != key && inputs.contains_key(trimmed) {
+      return load_data_uri_from_source(trimmed, inputs).await;
+    }
+  }
+  load_data_uri_from_flow_value(value, key).await
+}
+
 pub async fn load_bytes_from_source(
   source: &str,
   inputs: &yanshi_core::async_node::AsyncNodeInputs,

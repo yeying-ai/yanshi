@@ -11,7 +11,7 @@ use yanshi_core::{
 };
 use yanshi_llm::{Yanshi, multimodal::MultimodalMessage};
 use yanshi_nodes::common::utils::{
-  flow_value_to_string, load_data_uri_from_flow_value, load_data_uri_from_source,
+  flow_value_to_string, load_data_uri_from_input_or_value, load_data_uri_from_source,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +103,7 @@ impl ImageUnderstandNode {
     inputs: &AsyncNodeInputs,
   ) -> Result<(Option<String>, String), YanshiError> {
     let primary = if let Some(val) = inputs.get("image_source") {
-      load_data_uri_from_flow_value(val, "image_source").await?
+      load_data_uri_from_input_or_value(val, "image_source", inputs).await?
     } else if !self.image_source.trim().is_empty() {
       load_data_uri_from_source(&self.image_source, inputs).await?
     } else {
@@ -120,7 +120,7 @@ impl ImageUnderstandNode {
       if raw_str.trim().is_empty() || matches!(val, FlowValue::Json(Value::Null)) {
         None
       } else {
-        Some(load_data_uri_from_flow_value(val, "reference_image").await?)
+        Some(load_data_uri_from_input_or_value(val, "reference_image", inputs).await?)
       }
     } else if let Some(ref_src) = self
       .reference_image

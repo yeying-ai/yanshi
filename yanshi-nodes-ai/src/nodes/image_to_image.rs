@@ -11,8 +11,8 @@ use yanshi_core::{
 };
 use yanshi_llm::{Yanshi, providers::modality::Image2ImageRequest as ModalityImage2ImageRequest};
 use yanshi_nodes::common::utils::{
-  flow_value_to_string, load_data_uri_from_flow_value, load_data_uri_from_source,
-  load_data_uri_from_str,
+  flow_value_to_string, load_data_uri_from_flow_value, load_data_uri_from_input_or_value,
+  load_data_uri_from_source, load_data_uri_from_str,
 };
 
 use crate::artifacts::{self, ArtifactOutputFormat};
@@ -115,7 +115,7 @@ impl ImageToImageNode {
     inputs: &AsyncNodeInputs,
   ) -> Result<(String, Vec<String>), YanshiError> {
     let source_url = if let Some(val) = inputs.get("source_image") {
-      load_data_uri_from_flow_value(val, "source_image").await?
+      load_data_uri_from_input_or_value(val, "source_image", inputs).await?
     } else if !self.source_image.trim().is_empty() {
       load_data_uri_from_source(&self.source_image, inputs).await?
     } else {
@@ -138,14 +138,16 @@ impl ImageToImageNode {
             {
               continue;
             }
-            reference_urls.push(load_data_uri_from_flow_value(&fv, "reference_images").await?);
+            reference_urls
+              .push(load_data_uri_from_input_or_value(&fv, "reference_images", inputs).await?);
           }
         }
         FlowValue::Json(Value::Null) => {}
         other => {
           let s = flow_value_to_string(other);
           if !s.trim().is_empty() {
-            reference_urls.push(load_data_uri_from_flow_value(other, "reference_images").await?);
+            reference_urls
+              .push(load_data_uri_from_input_or_value(other, "reference_images", inputs).await?);
           }
         }
       }
