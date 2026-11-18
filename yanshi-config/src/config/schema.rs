@@ -295,6 +295,13 @@ fn validate_node_schema(
     }
   }
 
+  if node.node_type == "multi_agent"
+    && node.parameters.contains_key("mode")
+    && let Err(err) = crate::executor::multi_agent::validate_params(&node.parameters)
+  {
+    report.issues.push(format!("{}.{}: {err}", path, node.id));
+  }
+
   // F-A6-6: the `template` node is designed to consume arbitrary
   // Tera context — any key in `parameters` that isn't `template` /
   // `output_key` / `output_format` is intentional input for the

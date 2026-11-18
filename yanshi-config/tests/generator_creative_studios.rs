@@ -18,8 +18,6 @@ fn workspace_root() -> PathBuf {
 
 fn assert_strict_valid_and_builds(generator_file: &str) {
   let root = workspace_root();
-  let prev = std::env::current_dir().expect("cwd");
-  std::env::set_current_dir(&root).expect("set workspace root");
   let yaml_path = root.join("examples/generators").join(generator_file);
   let raw = std::fs::read_to_string(&yaml_path)
     .unwrap_or_else(|e| panic!("failed to read {}: {e}", yaml_path.display()));
@@ -43,7 +41,6 @@ fn assert_strict_valid_and_builds(generator_file: &str) {
   );
   build_flow_from_definition(&def, Some("mock-model"))
     .unwrap_or_else(|e| panic!("failed to build Flow for {generator_file}: {e}"));
-  let _ = std::env::set_current_dir(prev);
 }
 
 fn assert_skill_valid(rel_dir: &str) {

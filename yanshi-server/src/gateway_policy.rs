@@ -116,7 +116,8 @@ impl GatewayPolicy {
   fn check_node(&self, node: &NodeDefinitionV2) -> Result<(), String> {
     let kind = node.node_type.as_str();
     let id = &node.id;
-    let is_safe_inline_agent = kind == "agent" && is_gateway_safe_inline_agent(node);
+    let is_safe_inline_agent = (kind == "agent" && is_gateway_safe_inline_agent(node))
+      || (kind == "multi_agent" && is_gateway_safe_inline_multi_agent(node));
     if HOST_NODE_TYPES.contains(&kind)
       && !is_safe_inline_agent
       && !self.host_node_types.contains(kind)
@@ -274,6 +275,77 @@ fn is_gateway_safe_inline_agent(node: &NodeDefinitionV2) -> bool {
   }
 }
 
+/// An inline `type: multi_agent` node whose participants all declare inline
+/// `system` prompts (zero host `skill` paths) and restrict optional `tools` to
+/// SSRF-filtered `web_search` / `http` is pure in-memory coordination and safe
+/// under the default gateway policy.
+fn is_gateway_safe_inline_multi_agent(node: &NodeDefinitionV2) -> bool {
+  for blocked in ["mode", "agents", "participants", "judge"] {
+    if node.input_mapping.contains_key(blocked) {
+      return false;
+    }
+  }
+  let has_message =
+    node.parameters.contains_key("message") || node.input_mapping.contains_key("message");
+  if !has_message {
+    return false;
+  }
+
+  let is_safe_spec = |val: &serde_yaml::Value| -> bool {
+    let Some(map) = val.as_mapping() else {
+      return false;
+    };
+    if map.contains_key("skill") {
+      return false;
+    }
+    let has_name = map
+      .get("name")
+      .and_then(|v| v.as_str())
+      .is_some_and(|s| !s.trim().is_empty());
+    let has_system = map
+      .get("system")
+      .and_then(|v| v.as_str())
+      .is_some_and(|s| !s.trim().is_empty());
+    if !has_name || !has_system {
+      return false;
+    }
+    match map.get("tools") {
+      None => true,
+      Some(tools) => tools.as_sequence().is_some_and(|seq| {
+        seq
+          .iter()
+          .all(|entry| matches!(entry.as_str(), Some("web_search" | "http")))
+      }),
+    }
+  };
+
+  match node.parameters.get("mode").and_then(|v| v.as_str()) {
+    Some("handoff" | "blackboard") => {
+      if node.parameters.contains_key("participants") || node.parameters.contains_key("judge") {
+        return false;
+      }
+      node
+        .parameters
+        .get("agents")
+        .and_then(|v| v.as_sequence())
+        .is_some_and(|seq| !seq.is_empty() && seq.iter().all(is_safe_spec))
+    }
+    Some("debate") => {
+      if node.parameters.contains_key("agents") {
+        return false;
+      }
+      let ok_participants = node
+        .parameters
+        .get("participants")
+        .and_then(|v| v.as_sequence())
+        .is_some_and(|seq| !seq.is_empty() && seq.iter().all(is_safe_spec));
+      let ok_judge = node.parameters.get("judge").is_some_and(is_safe_spec);
+      ok_participants && ok_judge
+    }
+    _ => false,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -424,6 +496,33 @@ mod tests {
         .check_workflow(&shell_tool_agent)
         .is_err()
     );
+
+    // Inline `multi_agent` (no `skill`, safe built-in tools only) is permitted,
+    // whereas skill-backed or unsafe-tool `multi_agent` remains host-gated.
+    let inline_multi_agent = workflow(
+      "name: w\nnodes:\n  - id: debate\n    type: multi_agent\n    parameters:\n      mode: debate\n      message: Motion\n      participants:\n        - name: pro\n          system: Argue pro\n          tools: [web_search]\n        - name: con\n          system: Argue con\n      judge:\n        name: mod_host\n        system: Judge fairly\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&inline_multi_agent)
+        .is_ok()
+    );
+    let skill_multi_agent = workflow(
+      "name: w\nnodes:\n  - id: relay\n    type: multi_agent\n    parameters:\n      mode: handoff\n      message: Build lore\n      agents:\n        - name: lore\n          skill: examples/skills/worldbuilders/lore-architect\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&skill_multi_agent)
+        .is_err()
+    );
+    let shell_multi_agent = workflow(
+      "name: w\nnodes:\n  - id: room\n    type: multi_agent\n    parameters:\n      mode: blackboard\n      message: Draft script\n      agents:\n        - name: writer\n          system: Write script\n          tools: [shell]\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&shell_multi_agent)
+        .is_err()
+    );
   }
 
   #[test]
@@ -432,12 +531,15 @@ mod tests {
       .parent()
       .expect("workspace root")
       .join("examples/generators");
-    let daily_suite = [
+    let strict_suite = [
       "illustrated_slides.yml",
       "repo_architecture.yml",
       "backend_project_planner.yml",
       "paper_reader.yml",
       "video_summarizer.yml",
+      "episodic_drama_studio.yml",
+      "debate_podcast_show.yml",
+      "worldbuilding_bible.yml",
     ];
     let policy = GatewayPolicy::default();
     let mut count = 0usize;
@@ -461,7 +563,7 @@ mod tests {
         "{file_name} has schema issues: {:?}",
         report.issues
       );
-      if daily_suite.contains(&file_name) {
+      if strict_suite.contains(&file_name) {
         assert!(
           report.warnings.is_empty(),
           "{file_name} has schema warnings: {:?}",
@@ -475,6 +577,6 @@ mod tests {
         .unwrap_or_else(|e| panic!("{file_name} rejected by GatewayPolicy::default(): {e}"));
     }
 
-    assert!(count >= 15, "expected at least 15 generator workflows");
+    assert!(count >= 18, "expected at least 18 generator workflows");
   }
 }
