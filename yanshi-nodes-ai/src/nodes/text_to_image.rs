@@ -145,8 +145,17 @@ impl TextToImageNode {
     self
   }
 
-  /// Resolve template variables in the prompt using inputs
+  /// Resolve template variables in the prompt using inputs, falling back
+  /// to `inputs["prompt"]` when `prompt_template` is empty (so YAML
+  /// `input_mapping: { prompt: ... }` works without a redundant
+  /// `parameters: { prompt: "{{prompt}}" }`).
   fn resolve_prompt(&self, inputs: &AsyncNodeInputs) -> Result<String, YanshiError> {
+    if self.prompt_template.trim().is_empty()
+      && let Some(FlowValue::Json(Value::String(s))) = inputs.get("prompt")
+      && !s.trim().is_empty()
+    {
+      return Ok(s.clone());
+    }
     let mut resolved = self.prompt_template.clone();
     for (key, value) in inputs {
       let placeholder = format!("{{{{{}}}}}", key);

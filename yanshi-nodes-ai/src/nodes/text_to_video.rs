@@ -140,9 +140,15 @@ impl TextToVideoNode {
     self
   }
 
-  /// Resolve template variables in the prompt using inputs. Mirrors
-  /// `TextToImageNode::resolve_prompt` exactly.
+  /// Resolve template variables in the prompt using inputs, falling back
+  /// to `inputs["prompt"]` when `prompt_template` is empty.
   fn resolve_prompt(&self, inputs: &AsyncNodeInputs) -> Result<String, YanshiError> {
+    if self.prompt_template.trim().is_empty()
+      && let Some(FlowValue::Json(Value::String(s))) = inputs.get("prompt")
+      && !s.trim().is_empty()
+    {
+      return Ok(s.clone());
+    }
     let mut resolved = self.prompt_template.clone();
     for (key, value) in inputs {
       let placeholder = format!("{{{{{}}}}}", key);

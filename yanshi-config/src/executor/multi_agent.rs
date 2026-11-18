@@ -292,7 +292,7 @@ impl MultiAgentNode {
     model_override: Option<&str>,
   ) -> Result<AgentRunResult, YanshiError> {
     let blackboard = Blackboard::new();
-    let mut builder = BlackboardSupervisorBuilder::new();
+    let mut builder = BlackboardSupervisorBuilder::new().use_blackboard(blackboard.clone());
 
     for spec in specs {
       let (dir, mut manifest) = self.load_manifest(&spec.skill).await?;

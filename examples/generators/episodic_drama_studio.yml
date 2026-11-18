@@ -176,8 +176,7 @@ nodes:
         mode: sequential
         agents: ["showrunner", "casting_director", "episode_writer"]
       stop_when:
-        type: key_set
-        key: writers_room_package
+        type: all_completed
       answer_from: writers_room_package
 
   - id: compile_plan_prompt
@@ -185,9 +184,14 @@ nodes:
     dependencies: ["writers_room"]
     input_mapping:
       room_package: "{{ nodes.writers_room.outputs.response }}"
+      room_trace: "{{ nodes.writers_room.outputs.agent_result }}"
     parameters:
       template: |
-        请将以下编剧室黑板协同定稿的剧集方案，严格编译为可直接驱动多模态制片流水线的结构化 JSON（语言：{{ language }}；必须包含恰好 {{ episode_count }} 集，集号从 {{ start_episode }} 递增至 {{ start_episode + episode_count - 1 }}，每集恰好 {{ scenes_per_episode }} 场戏）。
+        请将以下编剧室黑板协同定稿的剧集方案，严格编译为可直接驱动多模态制片流水线的结构化 JSON（语言：{{ language }}；核心构想：{{ premise }}；必须包含恰好 {{ episode_count }} 集，集号从 {{ start_episode }} 递增至 {{ start_episode + episode_count - 1 }}，每集恰好 {{ scenes_per_episode }} 场戏）。
+        {% if existing_series_bible != "" %}
+        【最高优先级·续拍继承约束】必须严格继承以下既有角色 ID、姓名、绑定音色、英文外观 DNA 与前情线索继续推进第 {{ start_episode }} 集剧情，严禁另起炉灶：
+        {{ existing_series_bible }}
+        {% endif %}
 
         关键制片约束（确保跨集角色 100% 稳定）：
         1. `cast`（2-3 位常驻主角）：
@@ -206,8 +210,8 @@ nodes:
              * 每集最多将 1 场最具视觉冲击力的高潮戏设为 `"climax_motion": true`，其余设为 `false`。
         4. `continuation_summary`：详尽总结截至第 {{ start_episode + episode_count - 1 }} 集结尾的角色状态、关键道具归属与未解悬念，供下一批续拍无缝衔接。
 
-        编剧室定稿方案：
-        {{ room_package }}
+        编剧室黑板定稿方案：
+        {% if room_package != "" %}{{ room_package }}{% else %}{{ room_trace | json_encode() | truncate(length=18000) }}{% endif %}
 
   - id: shooting_plan
     type: llm
@@ -470,7 +474,7 @@ nodes:
           "moving": false,
           "video_model": {{ video_model | json_encode() }},
           "video_seconds": {{ video_seconds }}
-        }{% for sc in ep.scenes %}{% set_global resolved_voice = narrator_voice %}{% set_global resolved_vocal = sc.emotion_en %}{% for c in plan.cast %}{% if c.id == sc.speaker_id %}{% set_global resolved_voice = c.voice %}{% set_global resolved_vocal = c.vocal_style_en ~ "; scene emotion: " ~ sc.emotion_en %}{% endif %}{% endfor %}{% set sc_cap = sc.speaker_name ~ "：「" ~ sc.dialogue ~ "」" %}{% set sc_vis = "CRITICAL CONTINUITY RULE: Keep 100% identical facial features, hairstyle, eye color, and signature outfit from the provided Master Cast Reference Sheet for every character in frame. Episode " ~ ep.episode_number ~ " Scene " ~ sc.scene_number ~ " (" ~ sc.location ~ "): " ~ sc.shot_prompt_en ~ ". Style: " ~ visual_style ~ ". Strictly NO text, NO subtitles, NO letters, NO watermarks." %},{
+        }{% for sc in ep.scenes %}{% set_global resolved_voice = narrator_voice %}{% set_global resolved_vocal = sc.emotion_en %}{% for c in plan.cast %}{% if c.id == sc.speaker_id %}{% set_global resolved_voice = c.voice %}{% set_global resolved_vocal = c.vocal_style_en ~ "; scene emotion: " ~ sc.emotion_en %}{% endif %}{% endfor %}{% set sc_cap = "【" ~ sc.speaker_name ~ "】" ~ sc.dialogue %}{% set sc_vis = "CRITICAL CONTINUITY RULE: Keep 100% identical facial features, hairstyle, eye color, and signature outfit from the provided Master Cast Reference Sheet for every character in frame. Episode " ~ ep.episode_number ~ " Scene " ~ sc.scene_number ~ " (" ~ sc.location ~ "): " ~ sc.shot_prompt_en ~ ". Style: " ~ visual_style ~ ". Strictly NO text, NO subtitles, NO letters, NO watermarks." %},{
           "episode_number": {{ ep.episode_number }},
           "scene_number": {{ sc.scene_number }},
           "is_opener": false,

@@ -699,6 +699,7 @@ pub struct BlackboardSupervisorBuilder {
   schedule: Option<BlackboardSchedule>,
   stop: BlackboardStop,
   answer_key: Option<String>,
+  blackboard: Option<Blackboard>,
   delegation_specs: HashMap<String, crate::delegation::DelegationSpec>,
 }
 
@@ -715,6 +716,7 @@ impl Default for BlackboardSupervisorBuilder {
       schedule: None,
       stop: BlackboardStop::AllAgentsCompleted,
       answer_key: None,
+      blackboard: None,
       delegation_specs: HashMap::new(),
     }
   }
@@ -761,6 +763,14 @@ impl BlackboardSupervisorBuilder {
   /// is missing) the supervisor returns `None`.
   pub fn answer_from(mut self, key: impl Into<String>) -> Self {
     self.answer_key = Some(key.into());
+    self
+  }
+
+  /// Supply a pre-constructed [`Blackboard`] (mirroring
+  /// [`super::HandoffSupervisorBuilder::use_signal`]) for async agent
+  /// builders that wire `bb_read` / `bb_write` before `add_agent`.
+  pub fn use_blackboard(mut self, blackboard: Blackboard) -> Self {
+    self.blackboard = Some(blackboard);
     self
   }
 
@@ -817,7 +827,7 @@ impl BlackboardSupervisorBuilder {
       }
     }
 
-    let blackboard = Blackboard::new();
+    let blackboard = self.blackboard.unwrap_or_default();
     let mut agents: HashMap<String, super::common::SharedAgentRuntime> = HashMap::new();
     let mut agent_descriptions: Vec<(String, String)> = Vec::new();
     for spec in self.pending {
@@ -1292,5 +1302,26 @@ providers:
       result,
       Err(BlackboardSupervisorError::UnknownDelegationSpecAgent(_))
     ));
+  }
+
+  #[tokio::test]
+  async fn use_blackboard_shares_preconstructed_board_with_supervisor() {
+    let shared_bb = Blackboard::new();
+    let prebuilt_agent = StubRuntime {
+      write_tool: BlackboardWriteTool::new(shared_bb.clone(), "writer"),
+      answer: "final_script".to_string(),
+    };
+    let mut supervisor = BlackboardSupervisorBuilder::new()
+      .use_blackboard(shared_bb)
+      .add_agent("writer", "pre-built async skill agent", move |_bb| {
+        prebuilt_agent
+      })
+      .stop_when(BlackboardStop::KeySet("answer".to_string()))
+      .answer_from("answer")
+      .build()
+      .expect("build");
+
+    let out = supervisor.run("write package").await.expect("run");
+    assert_eq!(out, "final_script");
   }
 }
