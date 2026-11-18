@@ -48,6 +48,7 @@
 //! `yanshi-rag`. The `EmbeddingProvider` contract (evaluation R6) is a
 //! follow-up: it needs the rag/memory error surfaces unified first.
 
+pub mod entity_facts;
 pub mod error;
 pub mod knowledge;
 pub mod preference;
@@ -56,6 +57,7 @@ pub mod store;
 pub mod task_summary;
 pub mod types;
 
+pub use entity_facts::{EntityFact, EntityFactStore};
 pub use error::MemoryError;
 pub use knowledge::{KnowledgeBackend, KnowledgeChunk, KnowledgeError};
 pub use preference::{PreferenceScope, PreferenceStore, PreferenceValue};

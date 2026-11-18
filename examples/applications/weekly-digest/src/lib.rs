@@ -265,10 +265,10 @@ async fn write_watermark(
     std::fs::create_dir_all(parent)
       .with_context(|| format!("create watermark parent dir {}", parent.display()))?;
   }
-  let mut store = SqliteEntityFactStore::open(state_path)
+  let store = SqliteEntityFactStore::open(state_path)
     .await
     .with_context(|| format!("open watermark store {}", state_path.display()))?;
-  let fact = EntityFact::new(
+  let fact = EntityFact::observed(
     format!("digest:{digest_id}"),
     WATERMARK_FACT_ID.to_string(),
     "watermark".to_string(),
@@ -277,7 +277,6 @@ async fn write_watermark(
       "new_docs": new_docs,
       "recorded_at": Utc::now().to_rfc3339(),
     }),
-    1.0,
   );
   store
     .record_fact(fact)

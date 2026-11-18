@@ -35,7 +35,7 @@ pub mod task_summary;
 // root so every consumer — and this crate's own impls — keep compiling.
 pub use yanshi_store_spi::{error, store, types};
 
-pub use entity_facts::SqliteEntityFactStore;
+pub use entity_facts::{InMemoryEntityFactStore, SqliteEntityFactStore};
 pub use error::MemoryError;
 pub use layer::{
   EntityFact, EntityFactStore, MemoryLayer, PreferenceScope, PreferenceStore, PreferenceValue,

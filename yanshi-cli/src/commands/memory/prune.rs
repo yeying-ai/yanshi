@@ -61,7 +61,7 @@ pub async fn execute(
       ("preference", removed)
     }
     "entity_facts" => {
-      let mut store = SqliteEntityFactStore::open(&db_path)
+      let store = SqliteEntityFactStore::open(&db_path)
         .await
         .with_context(|| format!("opening entity_facts store at {}", db_path.display()))?;
       let removed = store

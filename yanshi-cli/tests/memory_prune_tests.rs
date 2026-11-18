@@ -107,7 +107,7 @@ async fn cli_memory_prune_entity_facts_skips_active_rows() {
   // safety invariant from the EntityFactStore trait docs:
   // `prune_invalidated` is restricted to invalidated rows.
   {
-    let mut store = SqliteEntityFactStore::open(&db)
+    let store = SqliteEntityFactStore::open(&db)
       .await
       .expect("open seed store");
     let active = EntityFact::new("e1", "f-active", "color", serde_json::json!("blue"), 0.9);

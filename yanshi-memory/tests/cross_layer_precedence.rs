@@ -143,7 +143,7 @@ async fn four_layers_coexist_without_aliasing() {
   );
 
   // ── Entity facts: structured fact + invalidation lifecycle ───────────
-  let mut facts = SqliteEntityFactStore::in_memory().await.unwrap();
+  let facts = SqliteEntityFactStore::in_memory().await.unwrap();
   let fact = EntityFact::new(
     "project:atlas",
     "fact_deadline_1",

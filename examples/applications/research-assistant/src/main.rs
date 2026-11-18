@@ -40,18 +40,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use yanshi_core::async_node::{AsyncNode, AsyncNodeInputs, AsyncNodeResult};
-use yanshi_core::error::YanshiError;
-use yanshi_core::events::ConsoleListener;
-use yanshi_core::flow::{Flow, GraphNode, NodeType};
-use yanshi_core::value::FlowValue;
-use yanshi_llm::Yanshi as LlmInit;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use yanshi_core::FlowExt;
+use yanshi_core::async_node::{AsyncNode, AsyncNodeInputs, AsyncNodeResult};
+use yanshi_core::error::YanshiError;
+use yanshi_core::events::ConsoleListener;
+use yanshi_core::flow::{Flow, GraphNode, NodeType};
+use yanshi_core::value::FlowValue;
+use yanshi_llm::Yanshi as LlmInit;
 
 use arxiv_fetch::Paper;
 use seen_store::SeenStore;
@@ -120,14 +121,12 @@ impl AsyncNode for DiffSeenNode {
   async fn execute(&self, _inputs: &AsyncNodeInputs) -> AsyncNodeResult {
     let all_papers = {
       let mut bus = self.bus.lock().await;
-      bus
-        .take()
-        .ok_or_else(|| YanshiError::AsyncExecutionError {
-          message: "FetchArxivNode produced no paper list on the bus".to_string(),
-        })?
+      bus.take().ok_or_else(|| YanshiError::AsyncExecutionError {
+        message: "FetchArxivNode produced no paper list on the bus".to_string(),
+      })?
     };
 
-    let mut seen = SeenStore::open(self.state_path.clone())
+    let seen = SeenStore::open(self.state_path.clone())
       .await
       .map_err(|err| YanshiError::ConfigurationError {
         message: format!("open SeenStore({}): {err:#}", self.state_path.display()),
@@ -180,11 +179,9 @@ impl AsyncNode for BriefingNode {
   async fn execute(&self, _inputs: &AsyncNodeInputs) -> AsyncNodeResult {
     let papers = {
       let mut bus = self.bus.lock().await;
-      bus
-        .take()
-        .ok_or_else(|| YanshiError::AsyncExecutionError {
-          message: "DiffSeenNode produced no unseen-paper list on the bus".to_string(),
-        })?
+      bus.take().ok_or_else(|| YanshiError::AsyncExecutionError {
+        message: "DiffSeenNode produced no unseen-paper list on the bus".to_string(),
+      })?
     };
 
     if papers.is_empty() {
@@ -192,11 +189,11 @@ impl AsyncNode for BriefingNode {
         "# Arxiv Briefing — `{}` (no new papers)\n\nAll most-recent papers were already seen.\n",
         self.category
       );
-      tokio::fs::write(&self.output, &msg).await.map_err(|e| {
-        YanshiError::AsyncExecutionError {
+      tokio::fs::write(&self.output, &msg)
+        .await
+        .map_err(|e| YanshiError::AsyncExecutionError {
           message: format!("write {}: {e}", self.output.display()),
-        }
-      })?;
+        })?;
       let mut outputs = HashMap::new();
       outputs.insert(
         "summary".to_string(),

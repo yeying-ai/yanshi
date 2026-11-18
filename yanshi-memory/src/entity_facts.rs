@@ -23,7 +23,9 @@
 //! with per-row citations rather than merging them — see the design doc
 //! `docs/MEMORY_LAYERING.md` §4 for the rationale.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 // Q2.1: pool construction (PRAGMA + safe path handling) is shared
 // via `crate::sqlite_pool`.
 use crate::sqlite_pool;
@@ -146,7 +148,7 @@ fn row_to_fact(row: &SqliteRow) -> Result<EntityFact, MemoryError> {
 
 #[async_trait]
 impl EntityFactStore for SqliteEntityFactStore {
-  async fn record_fact(&mut self, fact: EntityFact) -> Result<(), MemoryError> {
+  async fn record_fact(&self, fact: EntityFact) -> Result<(), MemoryError> {
     let value_str = serde_json::to_string(&fact.value)?;
     sqlx::query(
       "INSERT INTO entity_facts (
@@ -206,7 +208,7 @@ impl EntityFactStore for SqliteEntityFactStore {
   }
 
   async fn invalidate_fact(
-    &mut self,
+    &self,
     entity_id: &str,
     fact_id: &str,
     reason: &str,
@@ -235,7 +237,7 @@ impl EntityFactStore for SqliteEntityFactStore {
     Ok(())
   }
 
-  async fn prune_invalidated(&mut self, older_than: Duration) -> Result<u64, MemoryError> {
+  async fn prune_invalidated(&self, older_than: Duration) -> Result<u64, MemoryError> {
     let chrono_dur = chrono::Duration::from_std(older_than)
       .map_err(|e| MemoryError::StorageError(format!("invalid retention duration: {e}")))?;
     let cutoff = Utc::now()
@@ -250,6 +252,88 @@ impl EntityFactStore for SqliteEntityFactStore {
     .await
     .map_err(|e| MemoryError::StorageError(e.to_string()))?;
     Ok(result.rows_affected())
+  }
+}
+
+/// Ephemeral in-memory [`EntityFactStore`] matching [`crate::InMemoryProjectMemoryStore`]
+/// and [`crate::InMemoryTaskSummaryStore`].
+#[derive(Debug, Default)]
+pub struct InMemoryEntityFactStore {
+  rows: Mutex<HashMap<(String, String), EntityFact>>,
+}
+
+impl InMemoryEntityFactStore {
+  pub fn new() -> Self {
+    Self::default()
+  }
+}
+
+#[async_trait]
+impl EntityFactStore for InMemoryEntityFactStore {
+  async fn record_fact(&self, fact: EntityFact) -> Result<(), MemoryError> {
+    self
+      .rows
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert((fact.entity_id.clone(), fact.fact_id.clone()), fact);
+    Ok(())
+  }
+
+  async fn get_facts(
+    &self,
+    entity_id: &str,
+    include_invalidated: bool,
+  ) -> Result<Vec<EntityFact>, MemoryError> {
+    let mut facts: Vec<EntityFact> = self
+      .rows
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .values()
+      .filter(|f| f.entity_id == entity_id && (include_invalidated || !f.is_invalidated()))
+      .cloned()
+      .collect();
+    facts.sort_by(|a, b| b.extracted_at.cmp(&a.extracted_at));
+    Ok(facts)
+  }
+
+  async fn invalidate_fact(
+    &self,
+    entity_id: &str,
+    fact_id: &str,
+    reason: &str,
+  ) -> Result<(), MemoryError> {
+    let mut guard = self
+      .rows
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(entry) = guard.get_mut(&(entity_id.to_string(), fact_id.to_string())) else {
+      return Err(MemoryError::StorageError(format!(
+        "no active fact `{fact_id}` under entity `{entity_id}` to invalidate"
+      )));
+    };
+    if entry.is_invalidated() {
+      return Err(MemoryError::StorageError(format!(
+        "no active fact `{fact_id}` under entity `{entity_id}` to invalidate"
+      )));
+    }
+    entry.invalidated_at = Some(Utc::now());
+    entry.invalidation_reason = Some(reason.to_string());
+    Ok(())
+  }
+
+  async fn prune_invalidated(&self, older_than: Duration) -> Result<u64, MemoryError> {
+    let chrono_dur = chrono::Duration::from_std(older_than)
+      .map_err(|e| MemoryError::StorageError(format!("invalid retention duration: {e}")))?;
+    let cutoff = Utc::now()
+      .checked_sub_signed(chrono_dur)
+      .ok_or_else(|| MemoryError::StorageError("retention cutoff underflow".to_string()))?;
+    let mut guard = self
+      .rows
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = guard.len();
+    guard.retain(|_, f| !f.invalidated_at.is_some_and(|ts| ts < cutoff));
+    Ok((before - guard.len()) as u64)
   }
 }
 
@@ -268,7 +352,7 @@ mod tests {
 
   #[tokio::test]
   async fn record_and_get_facts_roundtrip() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     let f = fact("user:alice", "fact_1", "tone", json!("formal")).with_source("msg_42");
     store.record_fact(f.clone()).await.unwrap();
 
@@ -282,7 +366,7 @@ mod tests {
 
   #[tokio::test]
   async fn multiple_facts_per_entity_are_not_merged() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("user:alice", "fact_1", "tone", json!("formal")))
       .await
@@ -307,7 +391,7 @@ mod tests {
 
   #[tokio::test]
   async fn invalidate_hides_fact_from_default_get() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("user:alice", "f1", "tone", json!("formal")))
       .await
@@ -336,7 +420,7 @@ mod tests {
 
   #[tokio::test]
   async fn invalidate_missing_fact_errors() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     let err = store
       .invalidate_fact("nope", "nope", "reason")
       .await
@@ -346,7 +430,7 @@ mod tests {
 
   #[tokio::test]
   async fn invalidate_already_invalidated_errors() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("user:alice", "f1", "tone", json!("x")))
       .await
@@ -364,7 +448,7 @@ mod tests {
 
   #[tokio::test]
   async fn record_with_same_id_replaces_value() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("e1", "f1", "color", json!("blue")))
       .await
@@ -380,7 +464,7 @@ mod tests {
 
   #[tokio::test]
   async fn prune_invalidated_only_drops_expired() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     // Two invalidated facts, one backdated, one fresh.
     store
       .record_fact(fact("e", "old", "x", json!(1)))
@@ -415,7 +499,7 @@ mod tests {
 
   #[tokio::test]
   async fn prune_invalidated_skips_active_rows() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("e", "f1", "x", json!(1)))
       .await
@@ -431,7 +515,7 @@ mod tests {
 
   #[tokio::test]
   async fn entities_are_isolated() {
-    let mut store = fresh_store().await;
+    let store = fresh_store().await;
     store
       .record_fact(fact("e1", "f", "color", json!("red")))
       .await
@@ -447,5 +531,57 @@ mod tests {
     assert_eq!(e2.len(), 1);
     assert_eq!(e1[0].value, json!("red"));
     assert_eq!(e2[0].value, json!("blue"));
+  }
+
+  #[tokio::test]
+  async fn arc_store_supports_concurrent_writes_without_external_mutex() {
+    let store: std::sync::Arc<dyn EntityFactStore> = std::sync::Arc::new(fresh_store().await);
+    let mut handles = Vec::new();
+    for idx in 0..8 {
+      let shared = store.clone();
+      handles.push(tokio::spawn(async move {
+        shared
+          .record_fact(EntityFact::observed(
+            "digest:weekly",
+            format!("item-{idx}"),
+            "seen",
+            json!(idx),
+          ))
+          .await
+          .unwrap();
+      }));
+    }
+    for handle in handles {
+      handle.await.unwrap();
+    }
+    let facts = store.get_facts("digest:weekly", false).await.unwrap();
+    assert_eq!(facts.len(), 8);
+    assert!(
+      facts
+        .iter()
+        .all(|f| (f.confidence - 1.0).abs() < f32::EPSILON)
+    );
+  }
+
+  #[tokio::test]
+  async fn in_memory_entity_fact_store_roundtrip_and_invalidation() {
+    let store = InMemoryEntityFactStore::new();
+    store
+      .record_fact(EntityFact::observed("e1", "f1", "status", json!("active")))
+      .await
+      .unwrap();
+    assert_eq!(store.get_facts("e1", false).await.unwrap().len(), 1);
+    store
+      .invalidate_fact("e1", "f1", "superseded")
+      .await
+      .unwrap();
+    assert!(store.get_facts("e1", false).await.unwrap().is_empty());
+    assert_eq!(store.get_facts("e1", true).await.unwrap().len(), 1);
+    let pruned = store
+      .prune_invalidated(Duration::from_secs(0))
+      .await
+      .unwrap();
+    assert_eq!(pruned, 1);
+    assert!(store.get_facts("e1", true).await.unwrap().is_empty());
   }
 }

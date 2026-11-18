@@ -14,11 +14,11 @@
 //!   — denormalized snapshot so the briefing tool can describe a paper
 //!   without re-fetching arxiv if it ever needs to.
 
-use yanshi_memory::SqliteEntityFactStore;
-use yanshi_memory::layer::{EntityFact, EntityFactStore};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::path::PathBuf;
+use yanshi_memory::SqliteEntityFactStore;
+use yanshi_memory::layer::{EntityFact, EntityFactStore};
 
 use crate::arxiv_fetch::Paper;
 
@@ -64,10 +64,10 @@ impl SeenStore {
   /// Record each paper as "seen" under `arxiv:<category>`. Idempotent —
   /// re-recording the same paper just replaces the row (SqliteEntityFactStore's
   /// `record_fact` semantics).
-  pub async fn mark_seen_batch(&mut self, category: &str, papers: &[Paper]) -> Result<()> {
+  pub async fn mark_seen_batch(&self, category: &str, papers: &[Paper]) -> Result<()> {
     let entity_id = entity_id_for_category(category);
     for paper in papers {
-      let fact = EntityFact::new(
+      let fact = EntityFact::observed(
         entity_id.clone(),
         paper.paper_id.clone(),
         "first_seen".to_string(),
@@ -76,7 +76,6 @@ impl SeenStore {
           "published": paper.published.to_rfc3339(),
           "abs_url": paper.abs_url,
         }),
-        1.0, // We're certain we saw the paper — we just fetched it.
       );
       self
         .inner
@@ -134,7 +133,7 @@ mod tests {
     let store = SqliteEntityFactStore::in_memory()
       .await
       .expect("in_memory store");
-    let mut seen = SeenStore { inner: store };
+    let seen = SeenStore { inner: store };
     let first_batch = vec![paper("2501.00001"), paper("2501.00002")];
     seen
       .mark_seen_batch("cs.AI", &first_batch)
@@ -154,7 +153,7 @@ mod tests {
     let store = SqliteEntityFactStore::in_memory()
       .await
       .expect("in_memory store");
-    let mut seen = SeenStore { inner: store };
+    let seen = SeenStore { inner: store };
     seen
       .mark_seen_batch("cs.AI", &[paper("2501.00001")])
       .await
@@ -175,7 +174,7 @@ mod tests {
     let store = SqliteEntityFactStore::in_memory()
       .await
       .expect("in_memory store");
-    let mut seen = SeenStore { inner: store };
+    let seen = SeenStore { inner: store };
     let p = paper("2501.99999");
     seen
       .mark_seen_batch("cs.AI", std::slice::from_ref(&p))
