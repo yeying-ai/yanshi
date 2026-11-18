@@ -1010,9 +1010,8 @@ fn is_genuine_failure(result: &AsyncNodeResult) -> bool {
 /// the actual error.
 fn representative_failure_message(state_pool: &HashMap<String, AsyncNodeResult>) -> String {
   state_pool
-    .values()
-    .filter(|result| is_genuine_failure(result))
-    .find_map(|result| result.as_ref().err().map(ToString::to_string))
+    .first_node_failure()
+    .map(|(_, err)| err.to_string())
     .unwrap_or_else(|| "workflow failed".to_string())
 }
 
@@ -2381,6 +2380,59 @@ impl FlowExt for Flow {
     FlowExecutor::new(self)
       .execute_from_inputs_with_id_and_config(workflow_id, initial_inputs, config)
       .await
+  }
+}
+
+/// Extension methods on the per-node state pool returned by [`FlowExt::run`]
+/// and [`FlowExt::execute_from_inputs`] (`F-A5-1`).
+///
+/// Because [`Flow`] records per-node failures inside the returned `HashMap`
+/// (with `Err(YanshiError::NodeSkipped)` representing benign `run_if` skips),
+/// L1 SDK callers can call `state.ensure_succeeded()?` to surface the first
+/// root-cause node failure deterministically without hand-rolling loops.
+pub trait FlowStateExt {
+  /// Return the first genuine node failure `(node_id, error)` in deterministic
+  /// `node_id` order, ignoring benign `YanshiError::NodeSkipped` entries and
+  /// preferring primary node failures over downstream `DependencyNotMet` cascades.
+  fn first_node_failure(&self) -> Option<(&str, &YanshiError)>;
+
+  /// Return `Ok(())` when every node succeeded or was benignly skipped via
+  /// `run_if`, or `Err` carrying the root-cause failing node id and error.
+  fn ensure_succeeded(&self) -> Result<(), YanshiError>;
+}
+
+impl FlowStateExt for HashMap<String, AsyncNodeResult> {
+  fn first_node_failure(&self) -> Option<(&str, &YanshiError)> {
+    let mut primary: Vec<(&str, &YanshiError)> = Vec::new();
+    let mut secondary: Vec<(&str, &YanshiError)> = Vec::new();
+    for (node_id, result) in self {
+      let Err(err) = result else {
+        continue;
+      };
+      if matches!(err, YanshiError::NodeSkipped) {
+        continue;
+      }
+      if matches!(err, YanshiError::DependencyNotMet { .. }) {
+        secondary.push((node_id.as_str(), err));
+      } else {
+        primary.push((node_id.as_str(), err));
+      }
+    }
+    if !primary.is_empty() {
+      primary.sort_unstable_by_key(|(id, _)| *id);
+      return primary.into_iter().next();
+    }
+    secondary.sort_unstable_by_key(|(id, _)| *id);
+    secondary.into_iter().next()
+  }
+
+  fn ensure_succeeded(&self) -> Result<(), YanshiError> {
+    if let Some((node_id, err)) = self.first_node_failure() {
+      return Err(YanshiError::FlowExecutionFailed {
+        message: format!("node '{node_id}' failed: {err}"),
+      });
+    }
+    Ok(())
   }
 }
 
@@ -6657,5 +6709,38 @@ mod tests {
       state["d"].as_ref().expect("d succeeded").get("output"),
       Some(&FlowValue::Json(json!("MOCKED_C_VALUE")))
     );
+  }
+
+  #[test]
+  fn flow_state_ext_ignores_benign_skips_and_prefers_root_cause_failures() {
+    let mut clean: HashMap<String, AsyncNodeResult> = HashMap::new();
+    clean.insert("ok_node".into(), Ok(HashMap::new()));
+    clean.insert("skipped_pdf".into(), Err(YanshiError::NodeSkipped));
+    assert!(clean.first_node_failure().is_none());
+    assert!(clean.ensure_succeeded().is_ok());
+
+    let mut cascading = clean;
+    // "commit_watermark" sorts alphabetically BEFORE "deliver_email", yet
+    // `first_node_failure` must surface the root-cause 503 failure rather than
+    // the downstream `DependencyNotMet` cascade.
+    cascading.insert(
+      "commit_watermark".into(),
+      Err(YanshiError::DependencyNotMet {
+        node_id: "commit_watermark".into(),
+        dependency_id: "deliver_email".into(),
+      }),
+    );
+    cascading.insert(
+      "deliver_email".into(),
+      Err(YanshiError::NetworkError {
+        message: "SendGrid returned HTTP 503".into(),
+      }),
+    );
+    let (node_id, err) = cascading.first_node_failure().expect("failure");
+    assert_eq!(node_id, "deliver_email");
+    assert!(err.to_string().contains("503"));
+    let ensured = cascading.ensure_succeeded().expect_err("must fail");
+    assert!(ensured.to_string().contains("deliver_email"));
+    assert!(ensured.to_string().contains("503"));
   }
 }

@@ -31,7 +31,7 @@ use yanshi_core::async_node::{AsyncNode, AsyncNodeInputs, AsyncNodeResult};
 use yanshi_core::error::YanshiError;
 use yanshi_core::events::NoOpListener;
 use yanshi_core::value::FlowValue;
-use yanshi_core::{Flow, FlowExt, GraphNode, NodeType};
+use yanshi_core::{Flow, FlowExt, FlowStateExt, GraphNode, NodeType};
 use yanshi_llm::Yanshi as LlmService;
 use yanshi_memory::SqliteEntityFactStore;
 use yanshi_memory::layer::{EntityFact, EntityFactStore};
@@ -786,16 +786,7 @@ pub async fn run_weekly_digest(
   };
 
   let state = flow.run().await.context("Flow execution aborted")?;
-  for node_id in [
-    "collect_and_search",
-    "synthesize_digest",
-    "deliver_email",
-    "commit_watermark",
-  ] {
-    if let Some(Err(err)) = state.get(node_id) {
-      anyhow::bail!("node '{node_id}' failed: {err}");
-    }
-  }
+  state.ensure_succeeded()?;
 
   let snapshot = bus.lock().await.clone();
   let watermark_after = read_watermark(&config.state_path, &config.digest_id).await?;

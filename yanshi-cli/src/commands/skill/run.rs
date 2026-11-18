@@ -46,14 +46,11 @@ pub struct RunArgs {
 
 /// The request text: `--message`, then `--input` facts as a list.
 fn compose_message(message: Option<String>, inputs: &[String]) -> Result<String> {
-  let mut facts = Vec::with_capacity(inputs.len());
-  for input in inputs {
-    let (key, value) = input
-      .split_once('=')
-      .filter(|(key, _)| !key.trim().is_empty())
-      .with_context(|| format!("--input '{input}' must be KEY=VALUE"))?;
-    facts.push(format!("- {}: {}", key.trim(), value.trim()));
-  }
+  let parsed = crate::commands::parse_input_flag_tokens(inputs)?;
+  let facts: Vec<String> = parsed
+    .into_iter()
+    .map(|(key, value)| format!("- {}: {}", key.trim(), value.trim()))
+    .collect();
   match (message, facts.is_empty()) {
     (Some(message), true) => Ok(message),
     (Some(message), false) => Ok(format!("{message}\n\nInputs:\n{}", facts.join("\n"))),

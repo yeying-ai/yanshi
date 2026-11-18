@@ -500,6 +500,35 @@ fn cli_workflow_run_accepts_inputs_and_writes_output_file() {
 }
 
 #[test]
+fn cli_workflow_run_accepts_key_equals_value_input_syntax() {
+  let home = TempDir::new().unwrap();
+  let work = TempDir::new().unwrap();
+  let workflow = write_template_workflow(&work);
+  let output = work.path().join("result_eq.json");
+
+  let mut cmd = Command::cargo_bin("yanshi").unwrap();
+  cmd
+    .args([
+      "workflow",
+      "run",
+      workflow.to_str().unwrap(),
+      "--input",
+      "topic=EqualsSyntax",
+      "--output",
+      output.to_str().unwrap(),
+    ])
+    .env("HOME", home.path())
+    .assert()
+    .success();
+
+  let saved = fs::read_to_string(output).unwrap();
+  assert!(
+    saved.contains("Hello EqualsSyntax"),
+    "expected --input KEY=VALUE to work on workflow run, got: {saved}"
+  );
+}
+
+#[test]
 fn cli_workflow_run_accepts_explicit_run_artifacts_directory() {
   let home = TempDir::new().unwrap();
   let work = TempDir::new().unwrap();

@@ -19,7 +19,8 @@ enum WorkflowCommands {
     /// Override the model used by LLM nodes in this workflow
     #[arg(short = 'm', long)]
     model: Option<String>,
-    #[arg(short, long, num_args = 2, value_names = ["KEY", "VALUE"])]
+    /// Workflow input as `--input KEY VALUE` or `--input KEY=VALUE` (repeatable)
+    #[arg(short, long, num_args = 1..=2, value_names = ["KEY[=VALUE]", "VALUE"])]
     input: Vec<String>,
     #[arg(long)]
     dry_run: bool,
@@ -308,13 +309,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       tenant,
       format,
     } => {
-      if input.len() % 2 != 0 {
-        eprintln!(
-          "Error: Input must be provided in key-value pairs. Got {} arguments (expected even number).",
-          input.len()
-        );
-        std::process::exit(1);
-      }
+      let input_pairs = crate::commands::parse_input_flag_tokens(&input)?;
       // Server-mode short-circuits the in-process executor when
       // --server (or YANSHI_SERVER_URL) is set. P10.11.4
       // closed the silent-drop class of bug: every per-run knob
@@ -364,12 +359,6 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
           },
         }
       } else {
-        let input_pairs = input
-          .as_chunks::<2>()
-          .0
-          .iter()
-          .map(|[key, value]| (key.clone(), value.clone()))
-          .collect();
         run::execute(
           workflow_file,
           watch,

@@ -103,9 +103,9 @@ enum SkillCommands {
     /// given (the inputs are then the request).
     #[arg(short, long)]
     message: Option<String>,
-    /// `KEY=VALUE` facts for the agent (e.g. `url=...`, `want=report`),
-    /// appended to the message. **Local-only.**
-    #[arg(long = "input", value_name = "KEY=VALUE")]
+    /// `KEY=VALUE` or `KEY VALUE` facts for the agent (e.g. `url=...` or
+    /// `--input want report`), appended to the message. **Local-only.**
+    #[arg(short = 'i', long = "input", num_args = 1..=2, value_names = ["KEY[=VALUE]", "VALUE"])]
     inputs: Vec<String>,
     /// Copy the files produced by the skill's `[[workflows]]` tools to
     /// `<DIR>/<tool>/<node_id>/<file>`. **Local-only.**

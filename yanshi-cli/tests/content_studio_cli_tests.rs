@@ -66,7 +66,7 @@ fn run_studio(want: &str, calls: Vec<Value>, replies: Vec<String>) -> (TempDir, 
     .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/applications/content-studio"))
     .args(["--model", "mock-model"])
     .arg(format!("--input=text={SOURCE}"))
-    .arg(format!("--input=want={want}"))
+    .args(["--input", "want", want])
     .arg("--run-dir")
     .arg(work.path().join("runs"))
     .arg("--output-dir")

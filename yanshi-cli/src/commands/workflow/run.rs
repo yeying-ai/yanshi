@@ -416,15 +416,14 @@ async fn run_with_retries(
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("workflow execution failed")))
 }
 
-/// V1.1: mirrors `yanshi_core::flow`'s `is_genuine_failure` -- a
-/// benign `run_if` skip (`YanshiError::NodeSkipped`) is not a
-/// workflow failure and must not trigger a retry or a non-zero exit.
+/// V1.1 / Z4: delegates to `yanshi_core::FlowStateExt::first_node_failure` so
+/// benign `run_if` skips (`YanshiError::NodeSkipped`) are ignored and primary
+/// failures take deterministic precedence over downstream cascades.
 pub(super) fn first_genuine_state_error(
   state: &std::collections::HashMap<String, yanshi_core::async_node::AsyncNodeResult>,
 ) -> Option<String> {
-  state.iter().find_map(|(node_id, result)| match result {
-    Err(yanshi_core::YanshiError::NodeSkipped) => None,
-    Err(err) => Some(format!("{node_id}: {err}")),
-    Ok(_) => None,
-  })
+  use yanshi_core::FlowStateExt;
+  state
+    .first_node_failure()
+    .map(|(node_id, err)| format!("{node_id}: {err}"))
 }

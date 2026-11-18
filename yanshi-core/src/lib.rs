@@ -78,7 +78,7 @@ pub use error::{Result, YanshiError};
 pub use events::{
   ConsoleListener, DebugPausePhase, EventListener, MultiListener, NoOpListener, WorkflowEvent,
 };
-pub use flow::{Flow, FlowExt, GraphNode, NodeType};
+pub use flow::{Flow, FlowExt, FlowStateExt, GraphNode, NodeType};
 pub use health::{HealthChecker, HealthReport, HealthStatus};
 pub use resource_limits::ResourceLimits;
 pub use resume::{
