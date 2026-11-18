@@ -1,0 +1,351 @@
+# A4 — `meeting-transcriber`: Audio Recording -> ASR Transcript + Speaker Turns + Summary + Action Items (.md / .xlsx / .csv / .pdf).
+#
+#   yanshi workflow run examples/applications/meeting-transcriber/workflow.yml \
+#     --input audio_source examples/applications/meeting-transcriber/fixtures/standup_sample.mp3 \
+#     --output-dir runs/meeting-transcriber
+name: meeting_transcriber
+description: "输入会议录音（.mp3 / .wav / .m4a），经 ASR 转写后通过两阶段结构化 LLM 提炼发言人轮次、核心决议与负责人/DDL 行动项清单（导出 transcript.md、summary.md、action_items.md/.xlsx/.csv 与完整纪要 PDF）"
+
+inputs:
+  audio_source:
+    description: "会议录音文件路径、URL 或 data:audio/*;base64 URI（支持 .mp3 / .wav / .m4a / .ogg）"
+    default: "examples/applications/meeting-transcriber/fixtures/standup_sample.mp3"
+  asr_model:
+    description: "ASR 语音识别模型注册名（如 gemini-2.5-flash-asr、whisper-1、step-asr）"
+    default: "gemini-2.5-flash-asr"
+  language:
+    description: "会议纪要与行动项输出语言（如 中文、English）"
+    default: "English"
+  participants_hint:
+    description: "可选参会人姓名与角色提示（帮助提升发言人归属准确度）"
+    default: ""
+  vocabulary_hint:
+    description: "可选领域专有名词提示词（传入 ASR prompt 提升术语识别准确率，如 Postgres, SQLx, Yanshi）"
+    default: ""
+  export_pdf:
+    description: "是否同时排版导出完整《会议纪要与行动项追踪单 PDF》（需 pandoc + typst）"
+    default: true
+
+nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: |
+        {
+          "asr_model": {{ asr_model | json_encode() }},
+          "asr_prompt": {{ vocabulary_hint | json_encode() }},
+          "want_pdf": {{ export_pdf }}
+        }
+
+  - id: transcribe
+    type: asr
+    dependencies: ["options"]
+    input_mapping:
+      model: "{{ nodes.options.outputs.asr_model }}"
+      prompt: "{{ nodes.options.outputs.asr_prompt }}"
+    parameters:
+      response_format: srt
+
+  - id: summary_prompt
+    type: template
+    dependencies: ["transcribe"]
+    input_mapping:
+      raw_text: "{{ nodes.transcribe.outputs.text }}"
+      raw_srt: "{{ nodes.transcribe.outputs.srt }}"
+    parameters:
+      template: |
+        You are an executive technical meeting scribe. Analyze the ASR meeting transcript below and output structured JSON in {{ language }}.
+
+        {% if participants_hint != "" %}
+        Known participants / roles hint: {{ participants_hint }}
+        {% endif %}
+
+        Tasks:
+        1. Attribute utterances into sequential `speaker_turns` (`speaker`, `timestamp_hint`, `utterance`), using explicit self-introductions or speaker shifts when present (or `Speaker 1`, `Speaker 2` when unnamed).
+        2. Synthesize a crisp `meeting_title`, `executive_summary` (1 concise paragraph), `decisions` (concrete agreements locked in the meeting), and `topics` (`topic`, `summary`, `open_questions`).
+
+        Plain transcript:
+        {{ raw_text | truncate(length=28000) }}
+
+        Timestamped SRT cues:
+        {{ raw_srt | truncate(length=28000) }}
+
+  - id: segment_and_summarize
+    type: llm
+    dependencies: ["summary_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.summary_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 8192
+      system: "Return strictly valid JSON conforming to the meeting summary schema."
+      json_schema:
+        type: object
+        required: [meeting_title, executive_summary, decisions, topics, speaker_turns]
+        properties:
+          meeting_title: { type: string }
+          executive_summary: { type: string }
+          decisions:
+            type: array
+            items: { type: string }
+          topics:
+            type: array
+            items:
+              type: object
+              required: [topic, summary, open_questions]
+              properties:
+                topic: { type: string }
+                summary: { type: string }
+                open_questions: { type: string }
+          speaker_turns:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [speaker, timestamp_hint, utterance]
+              properties:
+                speaker: { type: string }
+                timestamp_hint: { type: string }
+                utterance: { type: string }
+
+  - id: action_prompt
+    type: template
+    dependencies: ["segment_and_summarize"]
+    input_mapping:
+      segmented: "{{ nodes.segment_and_summarize.outputs.output }}"
+    parameters:
+      template: |
+        Extract every concrete follow-up commitment and action item from this segmented meeting record in {{ language }}.
+        For each item provide:
+        - `id` (e.g. `AI-01`, `AI-02`)
+        - `owner` (person or team responsible; `"Unassigned"` if none stated)
+        - `action` (specific deliverable or task verb phrase)
+        - `deadline` (explicit date/day mentioned, or `"TBD"` if unspecified)
+        - `priority` (`"P0"`, `"P1"`, or `"P2"`)
+        - `evidence` (short quote or speaker reference from the transcript)
+
+        Segmented meeting JSON:
+        {{ segmented | json_encode() }}
+
+  - id: extract_action_items
+    type: llm
+    dependencies: ["action_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.action_prompt.outputs.output }}"
+    parameters:
+      max_tokens: 4096
+      system: "Return strictly valid JSON conforming to the action items schema."
+      json_schema:
+        type: object
+        required: [items]
+        properties:
+          items:
+            type: array
+            items:
+              type: object
+              required: [id, owner, action, deadline, priority, evidence]
+              properties:
+                id: { type: string }
+                owner: { type: string }
+                action: { type: string }
+                deadline: { type: string }
+                priority: { type: string }
+                evidence: { type: string }
+
+  - id: format_transcript_md
+    type: template
+    dependencies: ["segment_and_summarize", "transcribe"]
+    input_mapping:
+      meta: "{{ nodes.segment_and_summarize.outputs.output }}"
+      raw_srt: "{{ nodes.transcribe.outputs.srt }}"
+    parameters:
+      template: |
+        # {{ meta.meeting_title }} — Speaker-Segmented Transcript
+
+        {% for turn in meta.speaker_turns %}- **`[{{ turn.timestamp_hint }}]` {{ turn.speaker }}**: {{ turn.utterance }}
+        {% endfor %}
+
+        ---
+
+        ## Raw SubRip (`.srt`) Reference
+
+        ```srt
+        {{ raw_srt }}
+        ```
+
+  - id: transcript_md
+    type: render_markdown
+    dependencies: ["format_transcript_md"]
+    input_mapping:
+      markdown: "{{ nodes.format_transcript_md.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: format_summary_md
+    type: template
+    dependencies: ["segment_and_summarize"]
+    input_mapping:
+      meta: "{{ nodes.segment_and_summarize.outputs.output }}"
+    parameters:
+      template: |
+        # {{ meta.meeting_title }} — Meeting Summary
+
+        ## Executive Summary
+
+        {{ meta.executive_summary }}
+
+        ## Key Decisions
+
+        {% if meta.decisions | length > 0 %}{% for d in meta.decisions %}- {{ d }}
+        {% endfor %}{% else %}- *(No formal decisions recorded)*{% endif %}
+
+        ## Topics Covered
+
+        | Topic | Discussion Summary | Open Questions |
+        | --- | --- | --- |
+        {% for t in meta.topics %}| **{{ t.topic }}** | {{ t.summary }} | {{ t.open_questions }} |
+        {% endfor %}
+
+  - id: summary_md
+    type: render_markdown
+    dependencies: ["format_summary_md"]
+    input_mapping:
+      markdown: "{{ nodes.format_summary_md.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: summary_html
+    type: render_markdown
+    dependencies: ["format_summary_md"]
+    input_mapping:
+      markdown: "{{ nodes.format_summary_md.outputs.output }}"
+
+  - id: format_actions_md
+    type: template
+    dependencies: ["segment_and_summarize", "extract_action_items"]
+    input_mapping:
+      meta: "{{ nodes.segment_and_summarize.outputs.output }}"
+      actions: "{{ nodes.extract_action_items.outputs.output }}"
+    parameters:
+      template: |
+        # {{ meta.meeting_title }} — Action Items
+
+        {% for item in actions.items %}- [ ] **[{{ item.id }} | {{ item.priority }}]** **{{ item.owner }}** will {{ item.action }} by **{{ item.deadline }}** *(ref: {{ item.evidence }})*
+        {% endfor %}
+
+        ## Structured Tracker
+
+        | ID | Priority | Owner | Action | Deadline | Transcript Evidence |
+        | --- | --- | --- | --- | --- | --- |
+        {% for item in actions.items %}| `{{ item.id }}` | `{{ item.priority }}` | **{{ item.owner }}** | {{ item.action }} | `{{ item.deadline }}` | {{ item.evidence }} |
+        {% endfor %}
+
+  - id: action_items_md
+    type: render_markdown
+    dependencies: ["format_actions_md"]
+    input_mapping:
+      markdown: "{{ nodes.format_actions_md.outputs.output }}"
+    parameters:
+      format: md
+
+  - id: action_rows_json
+    type: template
+    dependencies: ["extract_action_items"]
+    input_mapping:
+      actions: "{{ nodes.extract_action_items.outputs.output }}"
+    parameters:
+      output_format: json
+      template: "{{ actions.items | json_encode() }}"
+
+  - id: action_items_xlsx
+    type: render_table
+    dependencies: ["action_rows_json"]
+    input_mapping:
+      rows: "{{ nodes.action_rows_json.outputs.output }}"
+    parameters:
+      format: xlsx
+      columns: [id, priority, owner, action, deadline, evidence]
+
+  - id: action_items_csv
+    type: render_table
+    dependencies: ["action_rows_json"]
+    input_mapping:
+      rows: "{{ nodes.action_rows_json.outputs.output }}"
+    parameters:
+      format: csv
+      columns: [id, priority, owner, action, deadline, evidence]
+
+  - id: full_minutes_dossier
+    type: template
+    dependencies: ["format_summary_md", "format_actions_md", "format_transcript_md"]
+    input_mapping:
+      summary_part: "{{ nodes.format_summary_md.outputs.output }}"
+      actions_part: "{{ nodes.format_actions_md.outputs.output }}"
+      transcript_part: "{{ nodes.format_transcript_md.outputs.output }}"
+    parameters:
+      template: |
+        {{ summary_part }}
+
+        ---
+
+        {{ actions_part }}
+
+        ---
+
+        {{ transcript_part }}
+
+  - id: minutes_pdf
+    type: render_document
+    dependencies: ["full_minutes_dossier", "options"]
+    run_if: "{{ nodes.options.outputs.want_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.full_minutes_dossier.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies:
+      - transcribe
+      - segment_and_summarize
+      - extract_action_items
+      - transcript_md
+      - summary_md
+      - summary_html
+      - action_items_md
+      - action_items_xlsx
+      - action_items_csv
+    input_mapping:
+      meta: "{{ nodes.segment_and_summarize.outputs.output }}"
+      actions: "{{ nodes.extract_action_items.outputs.output }}"
+      srt_path: "{{ nodes.transcribe.outputs.srt_file }}"
+      t_md: "{{ nodes.transcript_md.outputs.transcript_md_output }}"
+      s_md: "{{ nodes.summary_md.outputs.summary_md_output }}"
+      s_html: "{{ nodes.summary_html.outputs.summary_html_output }}"
+      a_md: "{{ nodes.action_items_md.outputs.action_items_md_output }}"
+      a_xlsx: "{{ nodes.action_items_xlsx.outputs.action_items_xlsx_output }}"
+      a_csv: "{{ nodes.action_items_csv.outputs.action_items_csv_output }}"
+      pdf: "{{ nodes.minutes_pdf.outputs.minutes_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "meeting_transcriber",
+          "title": {{ meta.meeting_title | json_encode() }},
+          "content": {
+            "summary": {{ meta | json_encode() }},
+            "action_items": {{ actions.items | json_encode() }}
+          },
+          "citations": [],
+          "files": [
+            {"node_id": "summary_html", "name": {{ s_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
+            {"node_id": "summary_md", "name": {{ s_md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "primary"},
+            {"node_id": "action_items_md", "name": {{ a_md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "primary"},
+            {"node_id": "action_items_xlsx", "name": {{ a_xlsx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "role": "primary"},
+            {"node_id": "action_items_csv", "name": {{ a_csv | split(pat="/") | last | json_encode() }}, "mime_type": "text/csv", "role": "asset"},
+            {"node_id": "transcript_md", "name": {{ t_md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "transcribe", "name": {{ srt_path | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"}{% if pdf is defined and pdf %},
+            {"node_id": "minutes_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

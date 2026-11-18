@@ -35,7 +35,7 @@ Last updated: 2026-11-18（A8 content-studio 标记 DONE；Studio 官方生成�
 | A1.5 | [podcast-mastering](examples/applications/podcast-mastering/) | WIP — live smoke ✅ (1st run 2026-05-18) | **L3 validation**: skill + `[[mcp_servers]]` + ReAct agent + native tool calling driving phonon-mcp subprocess | phonon-mcp binary (`cargo build --release -p phonon-mcp`), Moonshot LLM |
 | A2 | [code-reviewer](examples/applications/code-reviewer/) | WIP — live ✅ as L3 skill (2026-05-18) | ReAct agent + shell tool with git/gh allowed_commands; multi-call decision-making | gh CLI + git (system installs), kimi-k2.6 |
 | A3 | [research-assistant](examples/applications/research-assistant/) | WIP — live ✅ iter 1 (2026-05-18) | arxiv search API, SqliteEntityFactStore dedup, one-shot LLM briefing | Moonshot LLM；arxiv API 免费；RAG + scheduled run 留 iter 2 |
-| A4 | [meeting-transcriber](examples/applications/meeting-transcriber/) | TODO | ASR node, LLM summarize, file output | Whisper (local 或 API) |
+| A4 | [meeting-transcriber](examples/applications/meeting-transcriber/) | DONE — CI mock smoke + live `gemini-2.5-flash-asr` 实测通过 (2026-11-18) | `asr` node (`.srt`), 两阶段 `json_schema` LLM 切分与行动项提取, `render_markdown` / `render_table` (`.xlsx`/`.csv`) / `render_document` (`.pdf`) | Gemini ASR / OpenAI Whisper / 本地兼容端 + LLM |
 | A5 | [weekly-digest](examples/applications/weekly-digest/) | TODO | RAG, LLM, HTTP (SMTP/SendGrid), scheduled | SendGrid/Mailgun/SMTP |
 | A6 | [doc-translator](examples/applications/doc-translator/) | WIP — workflow.yml + iter2/3/4 已落地（见 A6 段） | template, batch / map (parallel), LLM, file, shell | LLM API |
 | A7 | [changelog-writer](examples/applications/changelog-writer/) | WIP — live ✅ as L1 binary; L3 skill form rejected (2026-05-18) | custom AsyncNode + std::process git + single LlmInit::prompt call; LLM provider registry | 无（git + LLM key） |
@@ -634,14 +634,21 @@ LLM 后处理的组合；典型「音频 → 结构化输出」流程。
 - LLM provider
 
 **TODO 子项**:
-- [ ] 写 `README.md`
-- [ ] 决定 ASR provider（成本 / 质量 / 隐私三角）
-- [ ] 准备会议录音 fixture（自己录一段或用公开样本）
-- [ ] 写 `workflow.yml`
+- [x] 写 `README.md`（含 ASR 选型成本/质量/隐私权衡矩阵与运行说明）
+- [x] 决定 ASR provider（默认 `gemini-2.5-flash-asr`，支持 `--input asr_model` 切换 `whisper-1` / 本地 Whisper / `mock-asr`）
+- [x] 准备会议录音 fixture（`fixtures/standup_sample.mp3`，24.5 秒双声线站会录音，145 KB）
+- [x] 写 `workflow.yml` + CLI 离线集成测试 `yanshi-cli/tests/meeting_transcriber_cli_tests.rs`
 
-**DONE 子项**: （待填）
+**DONE 子项 (2026-11-18)**:
+- 落地网关安全声明式 `examples/applications/meeting-transcriber/workflow.yml`（`asr` `.srt` 转写 → `segment_and_summarize` 发言人轮次与核心决议 → `extract_action_items` 负责人/DDL/优先级提取 → 并行渲染 `transcript_md`、`summary_md`/`html`、`action_items_md`/`.xlsx`/`.csv` 与可选 `minutes_pdf`）
+- 新增离线确定性冒烟测试 `yanshi-cli/tests/meeting_transcriber_cli_tests.rs`（`mock-asr` + `mock-model` + `--strict` 静态校验，0.20s 全绿）
+- 完成真机端到端实测（`gemini-2.5-flash-asr` + `gemini-2.5-flash` 处理 `standup_sample.mp3`，18.53s 产出 `.srt`、Markdown 纪要、OOXML `.xlsx` 行动项追踪表与 94 KB 排版 PDF）
 
-**Findings**: （待填）
+**Findings**:
+- **`F-A4-1` — `load_bytes_from_source` 远程 URL 未走 `HttpTool` SSRF 过滤**：`ASRNode` 处理 `http(s)://` 音频直链时调用 `yanshi_nodes::common::utils::load_bytes_from_source` 中的裸 `reqwest::get`，多租户场景下若接收不可信远程音频 URL 应优先走带 `HttpTool` 校验的 `video_ingest` 或本地文件上传。
+- **`F-A4-2` — CLI `--input` 参数形态在子命令间不一致**：`yanshi workflow run` 要求双参数 `--input <KEY> <VALUE>`，而 `yanshi skill run` 要求单参数 `--input KEY=VALUE`，后续可在 CLI 层统一兼容两种写法。
+- **`F-A4-3` — 可选 `run_if` 产物在 `deliverable` 中需走软边引用**：将 `minutes_pdf` 列入 `deliverable.dependencies` 会在 `export_pdf=false` 时触发级联 `Skipped`；仅在 `deliverable.input_mapping` 中引用则作为软依赖，PDF 跳过时仍正常汇总其余 7 份产物。
+- **`F-A4-4` — 专有技术术语需透传 `ASRNode` `prompt`**：未加词表提示时合成语音中的 `"Postgres pool config"` 易被转写为同音词 `"post pool config"`，因此在 `workflow.yml` 暴露 `vocabulary_hint` 直通 `transcribe.input_mapping.prompt`。
 
 ---
 
