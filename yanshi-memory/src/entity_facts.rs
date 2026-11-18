@@ -292,7 +292,7 @@ impl EntityFactStore for InMemoryEntityFactStore {
       .filter(|f| f.entity_id == entity_id && (include_invalidated || !f.is_invalidated()))
       .cloned()
       .collect();
-    facts.sort_by(|a, b| b.extracted_at.cmp(&a.extracted_at));
+    facts.sort_by_key(|a| std::cmp::Reverse(a.extracted_at));
     Ok(facts)
   }
 

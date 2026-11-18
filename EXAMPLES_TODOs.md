@@ -572,9 +572,9 @@ agent 周期性抓新论文、读摘要、与已索引文献做对比、产出�
 - **F-A3-2 — `EntityFact.confidence: f32` 字段对"自己抓的"数据不太
   meaningful**。dedup 用例下我每次都填 `1.0`（我刚 fetch 的，没有
   不确定性）。`confidence` 适合 NER / extraction-from-text 场景；
-  对外部数据源 ingest 是 noise。**改进**：提供
-  `EntityFact::observed(...)` 构造器 default confidence=1.0 (确定性)，
-  让 ingest 用例不必每次填同一个魔法数字。
+  对外部数据源 ingest 是 noise。
+  ✅ **CLOSED 2026-11-18 (`f43a1cd`)**: `yanshi-store-spi::EntityFact::observed(...)`
+  提供默认 `confidence = 1.0` 的确定性构造器，并已在 `research-assistant` 与 `weekly-digest` 中落地。
 - **F-A3-3 — 节点间传 Rust 结构需要自己拉 shared bus**。3-node DAG
   里我必须维护 `Arc<Mutex<Option<Vec<Paper>>>>` 在节点 struct 之间
   共享 `Vec<Paper>`。`FlowValue::Json` 路由能传值但需要 serialize +
@@ -645,8 +645,8 @@ LLM 后处理的组合；典型「音频 → 结构化输出」流程。
 - 完成真机端到端实测（`gemini-2.5-flash-asr` + `gemini-2.5-flash` 处理 `standup_sample.mp3`，18.53s 产出 `.srt`、Markdown 纪要、OOXML `.xlsx` 行动项追踪表与 94 KB 排版 PDF）
 
 **Findings**:
-- **`F-A4-1` — `load_bytes_from_source` 远程 URL 未走 `HttpTool` SSRF 过滤**：`ASRNode` 处理 `http(s)://` 音频直链时调用 `yanshi_nodes::common::utils::load_bytes_from_source` 中的裸 `reqwest::get`，多租户场景下若接收不可信远程音频 URL 应优先走带 `HttpTool` 校验的 `video_ingest` 或本地文件上传。
-- **`F-A4-2` — CLI `--input` 参数形态在子命令间不一致**：`yanshi workflow run` 要求双参数 `--input <KEY> <VALUE>`，而 `yanshi skill run` 要求单参数 `--input KEY=VALUE`，后续可在 CLI 层统一兼容两种写法。
+- **`F-A4-1` — `load_bytes_from_source` 远程 URL 未走 `HttpTool` SSRF 过滤** —— ✅ **CLOSED 2026-11-18 (`bd869f0`)**：`yanshi_nodes::common::utils` 中 `load_bytes_from_source` 与 `load_data_uri_*` 的远程 `http(s)://` 下载已统一改走 `HttpTool::send_bytes`（DNS 绑定防重绑、拦截回环/私网/云元数据地址并设 50 MiB 流式上限），同时 `GatewayPolicy` 补齐了模态源参数与 `CreateRunRequest.inputs` 的主机路径封顶校验。
+- **`F-A4-2` — CLI `--input` 参数形态在子命令间不一致** —— ✅ **CLOSED 2026-11-18 (`e3453ff`)**：新增共享解析器 `parse_input_flag_tokens`，`yanshi workflow run` 与 `yanshi skill run` 现同时原生支持 `--input KEY=VALUE` 与 `--input KEY VALUE` 两种写法。
 - **`F-A4-3` — 可选 `run_if` 产物在 `deliverable` 中需走软边引用**：将 `minutes_pdf` 列入 `deliverable.dependencies` 会在 `export_pdf=false` 时触发级联 `Skipped`；仅在 `deliverable.input_mapping` 中引用则作为软依赖，PDF 跳过时仍正常汇总其余 7 份产物。
 - **`F-A4-4` — 专有技术术语需透传 `ASRNode` `prompt`**：未加词表提示时合成语音中的 `"Postgres pool config"` 易被转写为同音词 `"post pool config"`，因此在 `workflow.yml` 暴露 `vocabulary_hint` 直通 `transcribe.input_mapping.prompt`。
 
@@ -683,8 +683,8 @@ LLM 后处理的组合；典型「音频 → 结构化输出」流程。
 - 复用 A3 `sample-briefings` 完成 `gemini-2.5-flash` 真机简报生成与二次重跑幂等跳过验证
 
 **Findings**:
-- **`F-A5-1` — `FlowExt::run()` 节点报错封装在返回 `HashMap` 内而非顶层 `Err`**：L1 调用方必须遍历 `state` 检查每个节点的 `Result`，否则下游被 `NodeSkipped` 时容易丢失上游真实报错上下文（如 HTTP `503` 状态码）。
-- **`F-A5-2` — `EntityFactStore::record_fact(&mut self)` 签名要求可变借用**：尽管底层 `SqlitePool` 已具备内部并发安全，`record_fact` 仍要求 `&mut self`，跨节点共享时需加 `Mutex` 或按阶段打开连接。
+- **`F-A5-1` — `FlowExt::run()` 节点报错封装在返回 `HashMap` 内而非顶层 `Err`** —— ✅ **CLOSED 2026-11-18 (`e3453ff`)**：`yanshi-core` 新增并导出 `FlowStateExt`（`first_node_failure` / `ensure_succeeded`），自动跳过良性 `NodeSkipped` 并优先返回确定性根因节点错误，`yanshi-cli` 与 `weekly-digest` 均已改用 `state.ensure_succeeded()?`。
+- **`F-A5-2` — `EntityFactStore::record_fact(&mut self)` 签名要求可变借用** —— ✅ **CLOSED 2026-11-18 (`f43a1cd`)**：`EntityFact` 与 `EntityFactStore` 已上提至 `yanshi-store-spi::entity_facts` 且全部写方法改为 `&self`，支持无锁跨节点共享 `Arc<dyn EntityFactStore>`。
 - **`F-A5-3` — 系统代理环境下本地 HTTP 测试必须显式注入 `.no_proxy()`**：通过 `EmailDispatcher::with_client` 注入 `.no_proxy()` 客户端避免了 macOS 系统代理劫持 `127.0.0.1` 回环请求。
 
 ---

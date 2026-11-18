@@ -302,11 +302,15 @@ chunk → insert chunks; `recording` sources pass through `asr` first) so
 progress and failures arrive on the same SSE stream as every other run.
 
 Generation against a notebook: `POST /v1/notebooks/{id}/generate`
-`{ kind, params }` selects the template, runs it with the notebook's
-`KnowledgeBackend` injected into the `rag` node, applies Y2.3's
-`cost_limit_usd`, registers artifacts (§4.2) and links them through
-`notebook_artifacts`. `GET /v1/notebooks/{id}/artifacts` lists them with
-their `Deliverable`.
+`{ kind, params }` selects the template, ranks ready chunks by BM25 relevance
+against `focus` / `topic` with multi-source round-robin coverage when sources
+exceed the 24 KB prompt budget, applies Y2.3's `cost_limit_usd`, registers
+artifacts (§4.2) and links them through `notebook_artifacts`.
+`GET /v1/notebooks/{id}/artifacts` lists them with their `Deliverable`,
+`GET /v1/notebooks/{id}/chunks/{chunk_id}` resolves cited passages, and
+`DELETE /v1/notebooks/{id}` / `DELETE /v1/notebooks/{id}/sources/{source_id}`
+remove notebooks or individual sources while immediately invalidating the
+in-memory `NotebookIndexCache`.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)
 

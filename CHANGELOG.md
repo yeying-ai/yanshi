@@ -81,6 +81,18 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Security
 
+- **Modality media-source SSRF defense and gateway host-path ceilings (`bd869f0`, `F-A4-1`).**
+  `yanshi_nodes::common::utils` (`load_bytes_from_source` and `load_data_uri_*`)
+  now fetches `http(s)://` audio and image URLs through `HttpTool::send_bytes`
+  (pinned-DNS SSRF blocking for loopback, RFC1918, cloud-metadata and
+  IPv4-mapped IPv6 addresses, plus a 50 MiB streaming cap) instead of bare
+  `reqwest::get`. On the gateway, `GatewayPolicy` now also caps modality
+  media-source fields (`audio_source`, `image_source`, `source_image`,
+  `reference_image`, `reference_images`, `text_to_video.image`), declared
+  `inputs.*.default` values, and runtime `CreateRunRequest.inputs` against
+  `YANSHI_GATEWAY_PATH_ROOTS` / `YANSHI_GATEWAY_URL_HOSTS` while continuing to
+  admit `data:` URIs, SSRF-filtered URLs, `{{ ... }}` node placeholders, and
+  `input_mapping` keys.
 - **Skill workflow tools take only declared, plain-JSON inputs (Y8.5).**
   An agent could pass inputs a workflow never declared, which override
   that workflow's node parameters (e.g. a `file` node's `path`), or a
@@ -362,6 +374,20 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Notebook & source deletion lifecycle, citation chunk lookup, focus-ranked multi-source grounding, and Track Z SDK/CLI refinements (`2ce7375`, `f43a1cd`, `e3453ff`).**
+  Added `SourceRepo::delete`, `DELETE /v1/notebooks/{id}`,
+  `DELETE /v1/notebooks/{id}/sources/{source_id}` (both invalidating the
+  in-memory `NotebookIndexCache` immediately and cascading `source_chunks`),
+  `GET /v1/notebooks/{id}/chunks/{chunk_id}` for citation passage lookup,
+  `PUT` / `DELETE` CORS allowlists under `ExplicitOrigins`, BM25 `focus`/`topic`
+  relevance ranking with round-robin multi-source coverage in
+  `POST /v1/notebooks/{id}/generate`, and native `<dialog>` deletion & chunk
+  preview controls in `/ui/notebooks`. Promoted `EntityFact` (`+ EntityFact::observed`)
+  and `EntityFactStore` (`&self` write methods + `InMemoryEntityFactStore`) to
+  `yanshi-store-spi` (`F-A3-2`, `F-A5-2`), unified `--input KEY=VALUE` /
+  `--input KEY VALUE` across `yanshi workflow run` and `yanshi skill run`
+  (`F-A4-2`), and added `yanshi_core::FlowStateExt` (`first_node_failure` /
+  `ensure_succeeded`, `F-A5-1`).
 - **Notebook PDF & audio `Recording` ingestion, plus 11-generator Notebook / `content-studio` / Web UI sync.**
   `POST /v1/notebooks/{id}/sources` now extracts searchable text from uploaded
   `.pdf` files and PDF URLs (pure-Rust `PdfLoader` with `pdftotext` fallback)

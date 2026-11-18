@@ -129,8 +129,10 @@ contracts.
 ## Active Work
 
 The short-term execution queue in `TODOs.md` (maintainer-local, gitignored) is
-currently **empty** — every segment through **X** (2026-10-07 evaluation fixes)
-and **Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`)
+currently **empty** — every segment through **X** (2026-10-07 evaluation fixes),
+**Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`), and
+**Z** (2026-11-18 Notebook lifecycle closure, modality SSRF/gateway hardening &
+dogfooding refinements)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts
@@ -155,10 +157,14 @@ has closed:
   with unified citations and `POST /v1/notebooks/{id}/generate`, plus inline
   workflow `agent` HITL `ask_user` interrupt/resume and gateway-safe inline
   `multi_agent` (`blackboard` / `debate` / `handoff`) in gateway and Studio UI.
-- **Y7–Y10** — cost-budget approvals, `ToolEffect::Publish`, gateway reach
-  ceilings, input precedence fixes, streaming thinking & reply images,
-  Anthropic adaptive thinking + native structured output, and live multimodal
-  provider verification.
+- **Y7–Y10 & Z** — cost-budget approvals, `ToolEffect::Publish`, gateway reach
+  ceilings (including modality media sources and runtime `CreateRunRequest.inputs`),
+  pinned-DNS SSRF filtering on remote modality URLs, Notebook/source `DELETE`
+  lifecycle with immediate BM25 cache invalidation + `GET /v1/notebooks/{id}/chunks/{chunk_id}`
+  citation lookup + focus-ranked multi-source chunk selection, `EntityFactStore`
+  `&self` promotion to `yanshi-store-spi`, unified CLI `--input` syntax +
+  `FlowStateExt`, streaming thinking & reply images, Anthropic adaptive thinking
+  + native structured output, and live multimodal provider verification.
 
 Tracks that this product does not need yet (distributed workers, remaining
 multi-replica gaps, coding-session Harness providers, seccomp refinement, MCP
