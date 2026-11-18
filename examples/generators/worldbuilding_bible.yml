@@ -362,9 +362,10 @@ nodes:
 
   - id: faction_diagram
     type: figure
-    dependencies: ["codex_parts"]
+    dependencies: ["codex_parts", "options"]
     input_mapping:
       description: "{{ nodes.codex_parts.outputs.faction_desc }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
     parameters:
       language: d2
       png: true
@@ -373,9 +374,10 @@ nodes:
 
   - id: quest_diagram
     type: figure
-    dependencies: ["codex_parts"]
+    dependencies: ["codex_parts", "options"]
     input_mapping:
       description: "{{ nodes.codex_parts.outputs.quest_desc }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
     parameters:
       language: d2
       png: true
@@ -527,7 +529,7 @@ nodes:
           },
           "citations": [],
           "files": [
-            {"node_id": "world_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "world_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"},
             {"node_id": "world_html", "name": {{ html_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "faction_diagram", "name": {{ fac_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
             {"node_id": "quest_diagram", "name": {{ qst_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},

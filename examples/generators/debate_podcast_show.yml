@@ -245,6 +245,7 @@ nodes:
     input_mapping:
       concept: "{{ nodes.voice_items.outputs.cover_concept }}"
       model: "{{ nodes.options.outputs.image_model }}"
+      prompt_model: "{{ nodes.options.outputs.chat_model }}"
     parameters:
       style_preset: "editorial_tech"
       theme: "dark"
@@ -258,7 +259,7 @@ nodes:
       input_list: "{{ nodes.voice_items.outputs.items }}"
     parameters:
       parallel: true
-      max_concurrent: 4
+      max_concurrent: 2
       template:
         - id: turn_tts
           type: tts
@@ -371,8 +372,8 @@ nodes:
           "citations": [],
           "files": [
             {"node_id": "podcast_master", "name": {{ mp3 | split(pat="/") | last | json_encode() }}, "mime_type": "audio/mpeg", "role": "primary"},
-            {"node_id": "briefing_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"}{% if cover_img is defined and cover_img %},
-            {"node_id": "cover_art", "name": {{ cover_img | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "preview"}{% endif %}{% if pdf_file is defined and pdf_file %},
+            {"node_id": "briefing_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"}{% if cover_img is defined and cover_img %},
+            {"node_id": "cover_art", "name": {{ cover_img | split(pat="/") | last | json_encode() }}, "mime_type": {% if cover_img is ending_with(".png") %}"image/png"{% else %}"image/jpeg"{% endif %}, "role": "preview"}{% endif %}{% if pdf_file is defined and pdf_file %},
             {"node_id": "briefing_pdf", "name": {{ pdf_file | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "asset"}{% endif %}
           ]
         }}
