@@ -111,6 +111,15 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **`MultiAgentNode` shared blackboard state, runtime prompt overrides & indirect image-source keys (`add28fa`, `0952590`).**
+  `MultiAgentNode` previously omitted a shared `BlackboardStore` when building
+  `BlackboardSupervisor` and ignored `input_mapping` `message` / `prompt`
+  overrides whenever the static `prompt` field was empty; `image_understand` and
+  `image_to_image` now also dereference indirect input-key names (e.g.
+  `image_source: picture`) before falling back to file paths, and
+  `figure` / `illustration` nodes across the creative Studio templates receive
+  explicit `chat_model` / `image_model` bindings and accurate `Deliverable` MIME
+  types.
 - **CI `cargo-audit` and `content-studio` CLI integration test.** Bumped
   `openssl` (`0.10.73` → `0.10.82`) and `quinn-udp` (`0.5.14` → `0.5.16`) to
   clear nine new RustSec advisories, documented the upstream-blocked `sqlx`
@@ -353,6 +362,40 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Notebook PDF & audio `Recording` ingestion, plus 11-generator Notebook / `content-studio` / Web UI sync.**
+  `POST /v1/notebooks/{id}/sources` now extracts searchable text from uploaded
+  `.pdf` files and PDF URLs (pure-Rust `PdfLoader` with `pdftotext` fallback)
+  and transcribes uploaded audio `recording` sources (`.mp3` / `.wav` / `.m4a` /
+  `.ogg` / `.flac` / `.webm`) via `Yanshi::asr` (`model` or `YANSHI_ASR_MODEL`).
+  `illustrated_slides.yml`, `tech_slides_video.yml`, and
+  `debate_podcast_show.yml` accept Notebook `chunks` / `url` / `text` / `focus`,
+  expanding `POST /v1/notebooks/{id}/generate`,
+  `examples/applications/content-studio`, and `/ui/notebooks`
+  (`NotebookWorkspacePage`) from 8 to 11 source-grounded generators, while
+  `/ui/studio` registers all 18 official Studio presets with accessible category
+  tabs.
+- **Gateway-safe inline `multi_agent` workflows (`1455e4e`).** `yanshi-config`
+  supports self-contained inline `participants[].{system, tools}` (`web_search`,
+  `ask_user`, `noop`) without host `skill_path` directories, and `GatewayPolicy`
+  admits inline `multi_agent` nodes (`blackboard`, `debate`, `handoff`) under the
+  default deny-by-default host policy while still rejecting `skill_path` and
+  host-reaching tools.
+- **Dogfooding applications `A4 meeting-transcriber` & `A5 weekly-digest`.**
+  Added `examples/applications/meeting-transcriber/` (gateway-safe `asr` `.srt`
+  → two-stage `json_schema` speaker-turn segmentation & action-item
+  `.xlsx` / `.csv` / `.md` / `.pdf` workflow + CLI mock smoke test) and
+  `examples/applications/weekly-digest/` (standalone L1 4-node `Flow` combining
+  `SqliteEntityFactStore` watermarks, `Bm25KnowledgeBackend` retrieval,
+  pre-delivery dead-letter outbox, and retry-hardened SendGrid / Resend HTTPS
+  delivery).
+- **Native OOXML `.pptx` writer, `16:9` Typst `.pdf` handout renderer, and `illustration` node (`d270e78`, `e849a8e`, `377bea4`).**
+  `render_slides` writes editable Office OpenXML `.pptx` decks (`pptx_writer.rs`,
+  native vector shapes, tables, callout cards, and speaker notes with zero
+  Pandoc dependency) alongside `16:9` Typst `.pdf` handouts, and
+  `yanshi-nodes-ai` adds the art-directed `illustration` node with six style
+  presets (`editorial_tech`, `isometric_3d`, `flat_vector`,
+  `blueprint_schematic`, `scientific_diagram`, `cinematic_keynote`) and optional
+  LLM prompt refinement.
 - **Multi-paradigm Creative Studio workflows (`episodic_drama_studio.yml`, `debate_podcast_show.yml`, `worldbuilding_bible.yml`), specialist `SKILL.md` bundles & multimodal reference seams.**
   Added three creative and deliberative Studio generators plus companion skill
   teams (`examples/skills/{drama-crew,debate-panel,worldbuilders,creative-producer}`),
@@ -373,7 +416,7 @@ _New entries go here. Will roll into the next tag (likely
   data-URI loading.
 - **Chinese README (`README_zh.md`) & refreshed `README.md` / crate metadata.**
   Added a full Simplified Chinese `README_zh.md` with bidirectional language
-  switching, refreshed `README.md` to cover all 15 Content Studio workflows,
+  switching, refreshed `README.md` to cover all 18 Content Studio workflows,
   three-way slide visual routing, the five-layer L0–L4 crate table, and current
   `RetryPolicy` / `ResourceLimits` / OS-sandbox surfaces (removing stale
   pre-W5.3 `StateMonitor` / `ErrorContext` snippets and the leftover mock
@@ -385,7 +428,7 @@ _New entries go here. Will roll into the next tag (likely
   routes at `https://yanshi.dev/` (`zh-CN`) and `https://yanshi.dev/en/` (`en`),
   featuring animated border-beam highlights, token-level syntax highlighting
   (YAML, Rust, CLI), a lazy-loaded in-page `<dialog>` YAML workflow inspector
-  bundling all 15 `examples/generators/*.yml` templates, the interactive
+  bundling all 18 `examples/generators/*.yml` templates, the interactive
   five-stage Content Studio workbench, three-way slide visual routing gallery,
   four execution paradigms, five-layer contract architecture, native `<details>`
   technical FAQ, `1200×630` Open Graph/Twitter card (`assets/og-card.png`),
@@ -393,7 +436,7 @@ _New entries go here. Will roll into the next tag (likely
   `sitemap.xml`, `robots.txt`, and `llms.txt`; published the mdBook manual at
   `https://yanshi.dev/docs/` assembled via `site/build.py`.
 - **GitHub Pages manual refresh (`docs/STUDIO_CATALOGUE.md`).** Added a
-  dedicated Content Studio & `Yanshi Studio` desktop chapter covering all 15
+  dedicated Content Studio & `Yanshi Studio` desktop chapter covering all 18
   generator templates and slide visual routing (`illustration` / `figure` /
   native OOXML `.pptx`), refreshed `TRIAL_GUIDE.md`, `WEB_UI.md`,
   `MULTIMODAL_GUIDE.md`, `README.md`, and `examples/README.md`, and updated
