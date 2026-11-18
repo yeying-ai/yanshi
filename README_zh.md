@@ -5,13 +5,13 @@
 [![Website](https://img.shields.io/badge/website-yanshi.dev-0f6e66.svg)](https://yanshi.dev/)
 [![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yanshi.dev/docs/)
 
-**[English](README.md)** | **简体中文** · **[产品官网](https://yanshi.dev/)** · **[在线文档手册](https://yanshi.dev/docs/)** · **[15 套 Studio 模板图谱](docs/STUDIO_CATALOGUE.md)** · **[10 分钟试用手册](docs/TRIAL_GUIDE.md)**
+**[English](README.md)** | **简体中文** · **[产品官网](https://yanshi.dev/)** · **[在线文档手册](https://yanshi.dev/docs/)** · **[18 套 Studio 模板图谱](docs/STUDIO_CATALOGUE.md)** · **[10 分钟试用手册](docs/TRIAL_GUIDE.md)**
 
 > **基于 Rust 构建的多模态内容生产与工作流/智能体运行时：原始素材输入（一句话想法、网页 URL、GitHub 代码库、学术 PDF 或音视频录音），成品交付物直接输出（原生可编辑 OOXML `.pptx` 演示文稿、`1080p` 逐页配音讲解视频、`16:9` Typst `.pdf`、Excel 实验对比表、双人深度播客、矢量信息图与自校验工程架构图/电路图）——底层统一承载于确定性 DAG 工作流、原生智能体循环、Skills、MCP 工具、RAG、全链路追踪与断点续跑机制之上。**
 
 **名字由来。** 《列子·汤问》记载能工巧匠**偃师**向周穆王献上能歌善舞的机关人；将其拆解开来，不过是革、木、胶、漆等构件按精密结构拼接而成，重新合拢后又“活动如初”。这是中国古籍中关于自主智能体最早的工程记载，也是本项目的核心理念：**以显式、可拆解、可审计的结构契约（`Flow` 有向无环图、`Tool` 契约、`Skill` 能力包）组装智能体与多模态流水线，让每一次运行都可追踪、可重放、可重组。**
 
-**产品定位（Content Studio Y0–Y10 已全面收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **15 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 仅负责规划*内容本身*（大纲、原文分块引用、页面视觉路由、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
+**产品定位（Content Studio Y0–Y10 已全面收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **18 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
 
 - **一等公民媒体与交付物契约**：`FlowValue::File` 在节点间类型安全地传递多媒体与文档产物，自动生成 SHA-256 校验清单，支持 CLI `--output-dir` 落盘导出与网关 `/v1/runs/{id}/artifacts` 流式下载。
 - **纯 Rust 原生可编辑幻灯片与出版级排版**：内置纯 Rust OOXML `pptx_writer`，直接输出 PowerPoint / Keynote / WPS 原生可编辑形状、`<a:tbl>` 表格、`<p:cxnSp>` 连接线与演讲者备注（绝非整页截图贴图），同时输出 `16:9` 宽屏 Typst `.pdf` 与离线交互 `.html`。
@@ -22,9 +22,9 @@
 
 ---
 
-## 🎬 Content Studio 内置生成器模板（15 套开箱即用）
+## 🎬 Content Studio 内置生成器模板（18 套开箱即用）
 
-[`examples/generators/`](examples/generators/) 下的全部 15 套工作流均通过 `yanshi workflow validate --strict` 严格校验，可在 CLI、HTTP 网关（`/v1/runs`）、Web Studio（`/ui/studio` 与 `/ui/app`）以及 `Yanshi Studio` 桌面端一致运行。也可在 [产品官网 `yanshi.dev`](https://yanshi.dev/#catalogue) 点击任意模板卡片直接在线检视完整 YAML 源码与节点拓扑。
+[`examples/generators/`](examples/generators/) 下的全部 18 套工作流均通过 `yanshi workflow validate --strict` 严格校验，可在 CLI、HTTP 网关（`/v1/runs`）、Web Studio（`/ui/studio` 与 `/ui/app`）以及 `Yanshi Studio` 桌面端一致运行。也可在 [产品官网 `yanshi.dev`](https://yanshi.dev/#catalogue) 点击任意模板卡片直接在线检视完整 YAML 源码与节点拓扑。
 
 ### 1. 主题演讲 PPT、配音视频与双人播客
 
@@ -55,6 +55,14 @@
 | [`circuit_diagram.yml`](examples/generators/circuit_diagram.yml) | `description`, `text` | `.svg`, `.png` | 先抽取类型化元器件清单校验连接拓扑，再调用沙箱内 `circuitikz` + `lualatex` 编译精准电路原理图 |
 | [`flashcards.yml`](examples/generators/flashcards.yml) | `url` / `text` / `chunks`, `count` | `.html`, `.json` | 将技术文档或教材转化为单文件离线可翻转记忆闪卡与结构化 JSON 题集 |
 | [`quiz.yml`](examples/generators/quiz.yml) | `url` / `text` / `chunks`, `count` | `.html`, `.json` | 生成自评分单选测验页，提供即时选项解析反馈与得分统计 |
+
+### 4. 多智能体创意制片与思辨工坊
+
+| 模板文件 | 核心输入 | 交付产物 | 核心亮点 |
+| --- | --- | --- | --- |
+| [`episodic_drama_studio.yml`](examples/generators/episodic_drama_studio.yml) | `premise`, `episode_count`, `existing_cast_sheet`, `existing_series_bible` | `1080p .mp4`, `.srt`, `.pdf` | `multi_agent (blackboard)` 编剧室 + `while` + `image_understand` 定妆母图审片 + 跨集 `image_to_image` / I2V 锁脸与角色固定声纹，支持跨次无限续拍 |
+| [`debate_podcast_show.yml`](examples/generators/debate_podcast_show.yml) | `motion_topic`, `pro_position`, `con_position`, `turn_count` | `三声线 .mp3`, `.png`, `.pdf` | `multi_agent (debate)` 正反独立人格多轮真实攻防 + 主持人终审边界裁决，合成为广播级响度标准化播客与思辨特刊 |
+| [`worldbuilding_bible.yml`](examples/generators/worldbuilding_bible.yml) | `seed_idea`, `medium_target`, `art_direction`, `max_art_rounds` | `.pdf`, `.html`, `2x .svg`, `.png` | `multi_agent (handoff)` 三棒专家接力移交 + `while` VLM 主视觉打磨闭环 + D2 阵营制衡图与分支抉择状态图 |
 
 ### 三路幻灯片智能视觉路由（Slide Visual Routing）
 

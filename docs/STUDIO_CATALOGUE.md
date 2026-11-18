@@ -23,7 +23,7 @@ downloadable deliverables through a deterministic five-stage pipeline
 
 ---
 
-## Built-in Generator Catalogue (15 Workflows)
+## Built-in Generator Catalogue (18 Workflows)
 
 Every template in [`examples/generators/`](../examples/generators/) validates
 under `yanshi workflow validate --strict` and can be executed from the CLI, the
@@ -82,6 +82,16 @@ classify each slide's visual layout automatically:
 | [`flashcards.yml`](../examples/generators/flashcards.yml) | `url` / `text` / `chunks`, `count` | Interactive flip-card `.html` + JSON deck | Self-contained offline study page rendered by `render_study` (`kind: flashcards`) |
 | [`quiz.yml`](../examples/generators/quiz.yml) | `url` / `text` / `chunks`, `count` | Self-grading multiple-choice `.html` + JSON | Instant explanation and score tally via `render_study` (`kind: quiz`) |
 
+### 4. Multi-Agent Creative & Deliberative Studios
+
+| Template | Primary Inputs | Deliverables | Multi-Paradigm Highlights |
+| --- | --- | --- | --- |
+| [`episodic_drama_studio.yml`](../examples/generators/episodic_drama_studio.yml) | `premise`, `episode_count`, `scenes_per_episode`, `existing_cast_sheet`, `existing_series_bible` | 1080p multi-episode `.mp4`, `.srt`, Master Cast Sheet `.png`, Series Bible `.pdf` | `multi_agent (blackboard)` writers' room (`showrunner` + `casting_director` + `episode_writer`) + `while` + `image_understand` VLM cast-sheet critic + cross-episode `image_to_image` / I2V face lock + character-pinned `tts` + cross-run continuation |
+| [`debate_podcast_show.yml`](../examples/generators/debate_podcast_show.yml) | `motion_topic`, `pro_position`, `con_position`, `turn_count` | 3-voice loudness-normalised `.mp3`, cover `.png`, briefing `.pdf` | Genuine 2-round adversarial clash via `multi_agent (debate)` (`pro-advocate` vs `con-challenger` + `roundtable-moderator` judge) adapted into a 3-voice radio show |
+| [`worldbuilding_bible.yml`](../examples/generators/worldbuilding_bible.yml) | `seed_idea`, `medium_target`, `art_direction`, `max_art_rounds` | Illustrated Bible `.pdf`/`.html`, key art & region plates `.png`, 2x D2 `.svg`, mindmap | `multi_agent (handoff)` specialist relay (`lore_architect` → `faction_smith` → `quest_designer`) + `while` + `image_understand` key-art aesthetic critic + D2 faction & quest diagrams |
+
+In addition, [`examples/skills/creative-producer/skill.toml`](../examples/skills/creative-producer/skill.toml) exposes `episodic_drama`, `debate_podcast`, `worldbuilding_bible`, and `illustrated_slides` as callable **`WorkflowTool`s** so an autonomous executive producer agent can chain worldbuilding into episodic production on demand.
+
 ---
 
 ## Quickstart Commands
@@ -130,7 +140,7 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
 
 Start `yanshi-server` and open:
 
-- **`http://127.0.0.1:8080/ui/app`** — **App Runner**: pick any of the 15
+- **`http://127.0.0.1:8080/ui/app`** — **App Runner**: pick any of the 18
   templates, fill in the generated input form, answer inline `ask_user`
   clarification cards if prompted, and preview/download finished `.pptx`,
   `.pdf`, `.mp4`, `.xlsx`, and `.html` deliverables.

@@ -5,13 +5,13 @@
 [![Website](https://img.shields.io/badge/website-yanshi.dev-0f6e66.svg)](https://yanshi.dev/en/)
 [![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yanshi.dev/docs/)
 
-**English** | **[简体中文](README_zh.md)** · **[Product Website](https://yanshi.dev/en/)** · **[Online Manual](https://yanshi.dev/docs/)** · **[15 Studio Workflows](docs/STUDIO_CATALOGUE.md)** · **[Quick Trial Guide](docs/TRIAL_GUIDE.md)**
+**English** | **[简体中文](README_zh.md)** · **[Product Website](https://yanshi.dev/en/)** · **[Online Manual](https://yanshi.dev/docs/)** · **[18 Studio Workflows](docs/STUDIO_CATALOGUE.md)** · **[Quick Trial Guide](docs/TRIAL_GUIDE.md)**
 
 > **A multimodal content-production runtime in Rust: sources in (an idea, a URL, a repository, academic PDFs, or audio/video recordings), finished deliverables out (editable `.pptx` slides, narrated `1080p` videos, `16:9` Typst `.pdf` decks, Excel tables, podcasts, infographics, and validated architecture/circuit diagrams) — built on deterministic DAG workflows, agent-native loops, Skills, MCP tools, RAG, tracing, and checkpointed recovery.**
 
 **About the name.** In the *Liezi* (《列子·汤问》), the artificer Yanshi (偃师) presents King Mu of Zhou with a figure that sings, dances, and acts on its own — and, taken apart, turns out to be nothing but leather, wood, glue, and lacquer assembled by explicit structure, which "works again as before" once put back together. It is the oldest Chinese account of a built autonomous agent, and the principle behind this project: autonomous capabilities assembled from explicit, inspectable contracts (`Flow` graphs, `Tool` traits, `Skill` manifests) that can be traced, replayed, and recomposed.
 
-**Direction (Content Studio Y0–Y10 closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with a 15-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)) and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows execute deterministically:
+**Direction (Content Studio Y0–Y10 closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with an 18-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)) and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows and multi-agent supervisors execute deterministically:
 
 - **First-class media & artifacts**: `FlowValue::File` carries typed files across nodes with SHA-256 manifests, CLI `--output-dir` export, and streaming gateway downloads (`/v1/runs/{id}/artifacts`).
 - **Native editable slides & typesetting**: Pure-Rust OOXML `pptx_writer` emits genuinely editable PowerPoint shapes, `<a:tbl>` tables, `<p:cxnSp>` connectors, and speaker notes (not flat raster screenshots), alongside `16:9` widescreen Typst `.pdf` and interactive `.html` decks.
@@ -22,7 +22,7 @@ For the full design rationale, see [`docs/RFC_CONTENT_STUDIO.md`](docs/RFC_CONTE
 
 ---
 
-## 🎬 Content Studio Catalogue (15 Built-in Generators)
+## 🎬 Content Studio Catalogue (18 Built-in Generators)
 
 Every workflow under [`examples/generators/`](examples/generators/) passes `yanshi workflow validate --strict` and runs identically across the CLI, HTTP gateway (`/v1/runs`), Web Studio (`/ui/studio` & `/ui/app`), and `Yanshi Studio` desktop app.
 
@@ -55,6 +55,14 @@ Every workflow under [`examples/generators/`](examples/generators/) passes `yans
 | [`circuit_diagram.yml`](examples/generators/circuit_diagram.yml) | `description`, `text` | `.svg`, `.png` | Extracts a typed parts manifest first, verifies component topology in `circuitikz`, then compiles via `lualatex` |
 | [`flashcards.yml`](examples/generators/flashcards.yml) | `url` / `text` / `chunks`, `count` | `.html`, `.json` | Self-contained offline flip-card study deck rendered by embedded `render_study` |
 | [`quiz.yml`](examples/generators/quiz.yml) | `url` / `text` / `chunks`, `count` | `.html`, `.json` | Self-grading multiple-choice assessment with per-option explanations and live score tally |
+
+### 4. Multi-Agent Creative & Deliberative Studios
+
+| Workflow | Inputs | Deliverables | Highlights |
+| --- | --- | --- | --- |
+| [`episodic_drama_studio.yml`](examples/generators/episodic_drama_studio.yml) | `premise`, `episode_count`, `existing_cast_sheet`, `existing_series_bible` | `1080p .mp4`, `.srt`, `.pdf` | `multi_agent (blackboard)` writers' room + `while` + `image_understand` cast-sheet critic + cross-episode `image_to_image` / I2V face lock & pinned character voices |
+| [`debate_podcast_show.yml`](examples/generators/debate_podcast_show.yml) | `motion_topic`, `pro_position`, `con_position`, `turn_count` | `3-voice .mp3`, `.png`, `.pdf` | Genuine multi-round clash via `multi_agent (debate)` (`pro-advocate` vs `con-challenger` + `moderator` judge) normalized to EBU R128 MP3 |
+| [`worldbuilding_bible.yml`](examples/generators/worldbuilding_bible.yml) | `seed_idea`, `medium_target`, `art_direction`, `max_art_rounds` | `.pdf`, `.html`, `2x .svg`, `.png` | `multi_agent (handoff)` specialist relay (`lore_architect` → `faction_smith` → `quest_designer`) + `while` VLM key-art polish + D2 faction & quest diagrams |
 
 ### Three-Way Slide Visual Routing
 

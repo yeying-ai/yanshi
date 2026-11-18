@@ -353,6 +353,24 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Multi-paradigm Creative Studio workflows (`episodic_drama_studio.yml`, `debate_podcast_show.yml`, `worldbuilding_bible.yml`), specialist `SKILL.md` bundles & multimodal reference seams.**
+  Added three creative and deliberative Studio generators plus companion skill
+  teams (`examples/skills/{drama-crew,debate-panel,worldbuilders,creative-producer}`),
+  bringing the built-in catalogue to 18 workflows:
+  `episodic_drama_studio.yml` locks character likeness and voices across long
+  multi-episode runs via a `multi_agent (blackboard)` writers' room, a `while` +
+  `image_understand` Master Cast Sheet critic loop, cross-episode
+  `image_to_image` / I2V keyframe conditioning, pinned character TTS routing,
+  and reusable `continuation_state` for subsequent episode batches;
+  `debate_podcast_show.yml` runs a genuine multi-round `multi_agent (debate)`
+  clash adapted into a 3-voice EBU R128 `.mp3` show and `.pdf` briefing;
+  `worldbuilding_bible.yml` chains a 3-specialist `multi_agent (handoff)` relay
+  with a `while` VLM key-art atelier and dual D2 faction/quest diagrams; and
+  `creative-producer/skill.toml` exposes all four flagship studios as callable
+  `WorkflowTool`s. Extended `ImageToImageNode`, `ImageUnderstandNode`, and
+  `GoogleMediaProvider` with runtime input overrides (`model`, `size`,
+  `source_image`, `reference_images`, `reference_image`) and serialized file
+  data-URI loading.
 - **Chinese README (`README_zh.md`) & refreshed `README.md` / crate metadata.**
   Added a full Simplified Chinese `README_zh.md` with bidirectional language
   switching, refreshed `README.md` to cover all 15 Content Studio workflows,

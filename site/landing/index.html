@@ -105,8 +105,8 @@
             <span data-i18n-en>Paradigms</span>
           </a>
           <a href="#catalogue">
-            <span data-i18n-zh>15 套生成器</span>
-            <span data-i18n-en>15 Generators</span>
+            <span data-i18n-zh>18 套生成器</span>
+            <span data-i18n-en>18 Generators</span>
           </a>
           <a href="#architecture">
             <span data-i18n-zh>五层架构</span>
@@ -204,8 +204,8 @@
                 <span data-i18n-en>Read the Manual</span>
               </a>
               <a class="btn-secondary" href="#catalogue">
-                <span data-i18n-zh>在线预览 15 套 YAML 模板</span>
-                <span data-i18n-en>Inspect 15 YAML Workflows</span>
+                <span data-i18n-zh>在线预览 18 套 YAML 模板</span>
+                <span data-i18n-en>Inspect 18 YAML Workflows</span>
               </a>
               <a class="btn-secondary" href="docs/TRIAL_GUIDE.html">
                 <span data-i18n-zh>5 分钟试用指南</span>
@@ -222,7 +222,7 @@
                 </span>
               </div>
               <div class="fact-cell">
-                <span class="fact-value">15</span>
+                <span class="fact-value">18</span>
                 <span class="fact-label">
                   <span data-i18n-zh>开箱即用多模态生成器</span>
                   <span data-i18n-en>Built-in Generators</span>
@@ -919,14 +919,14 @@ let result = flow.run().await?;</code></pre>
         </div>
       </section>
 
-      <!-- 4. 15 BUILT-IN STUDIO GENERATORS MATRIX (IN-PAGE YAML PREVIEW) -->
+      <!-- 4. 18 BUILT-IN STUDIO GENERATORS MATRIX (IN-PAGE YAML PREVIEW) -->
       <section id="catalogue" class="section">
         <div class="container">
           <div class="section-header">
             <div class="section-heading-group">
               <h2 class="section-title">
-                <span data-i18n-zh>15 套开箱即用 Content Studio 生成器模板</span>
-                <span data-i18n-en>15 Built-in Content Studio Generator Workflows</span>
+                <span data-i18n-zh>18 套开箱即用 Content Studio 生成器模板</span>
+                <span data-i18n-en>18 Built-in Content Studio Generator Workflows</span>
               </h2>
               <p class="section-desc">
                 <span data-i18n-zh>点击任意模板卡片即可<strong>直接在页内展开完整语法高亮 YAML 源码、DAG 节点拓扑与运行命令</strong>，无需跳出当前页面。</span>
@@ -936,8 +936,12 @@ let result = flow.run().await?;</code></pre>
 
             <div class="filter-bar" role="group" aria-label="Filter templates by category">
               <button type="button" class="filter-btn" data-filter="all" aria-pressed="true">
-                <span data-i18n-zh>全部 (15)</span>
-                <span data-i18n-en>All (15)</span>
+                <span data-i18n-zh>全部 (18)</span>
+                <span data-i18n-en>All (18)</span>
+              </button>
+              <button type="button" class="filter-btn" data-filter="creative" aria-pressed="false">
+                <span data-i18n-zh>创意与多智能体 (3)</span>
+                <span data-i18n-en>Creative &amp; Multi-Agent (3)</span>
               </button>
               <button type="button" class="filter-btn" data-filter="media" aria-pressed="false">
                 <span data-i18n-zh>演示与视听 (5)</span>
@@ -955,6 +959,80 @@ let result = flow.run().await?;</code></pre>
           </div>
 
           <div class="catalogue-grid">
+            <!-- C1. episodic_drama_studio -->
+            <article class="tpl-item spotlight-card" data-cat="creative" data-workflow="episodic_drama_studio.yml">
+              <div class="tpl-top">
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/episodic_drama_studio.yml" data-workflow-link="episodic_drama_studio.yml">episodic_drama_studio.yml</a>
+                </h3>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>黑板编剧室 + 定妆母图 VLM 审片循环 + 跨集参考图锁脸（image_to_image / I2V）与角色固定声纹，支持跨次无限续拍长剧集。</span>
+                <span data-i18n-en>Blackboard writers' room, VLM-audited Master Cast Sheet, cross-episode image_to_image/I2V face lock, and pinned character voices.</span>
+              </p>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">1080p .mp4</span>
+                  <span class="ext-badge">.srt</span>
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">cast .png</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- C2. debate_podcast_show -->
+            <article class="tpl-item spotlight-card" data-cat="creative" data-workflow="debate_podcast_show.yml">
+              <div class="tpl-top">
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/debate_podcast_show.yml" data-workflow-link="debate_podcast_show.yml">debate_podcast_show.yml</a>
+                </h3>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>正反独立 SKILL.md 智能体真实多轮攻防辩论 + 主持人终审边界裁决，合成为三声线广播级响度标准化播客与思辨特刊。</span>
+                <span data-i18n-en>Genuine multi-round adversarial clash between independent SKILL.md debaters and a moderator judge, rendered as a 3-voice EBU R128 podcast.</span>
+              </p>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">3-voice .mp3</span>
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">cover .png</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- C3. worldbuilding_bible -->
+            <article class="tpl-item spotlight-card" data-cat="creative" data-workflow="worldbuilding_bible.yml">
+              <div class="tpl-top">
+                <h3 class="tpl-heading">
+                  <a class="tpl-trigger" href="workflows/worldbuilding_bible.yml" data-workflow-link="worldbuilding_bible.yml">worldbuilding_bible.yml</a>
+                </h3>
+                <span class="tpl-preview-pill">
+                  <span data-i18n-zh>查看 YAML</span>
+                  <span data-i18n-en>View YAML</span>
+                </span>
+              </div>
+              <p class="tpl-desc">
+                <span data-i18n-zh>三棒专家接力移交（handoff）锻造创世法则、阵营博弈与分支叙事，经 while + VLM 审片打磨主视觉原画并编译双 D2 图谱与设定集。</span>
+                <span data-i18n-en>3-specialist handoff relay (lore, factions, branching quests) with VLM key-art polish loop, D2 faction/quest graphs, and illustrated PDF bible.</span>
+              </p>
+              <div class="tpl-bottom">
+                <div class="tpl-outputs">
+                  <span class="ext-badge">.pdf</span>
+                  <span class="ext-badge">2x .svg</span>
+                  <span class="ext-badge">.png</span>
+                  <span class="ext-badge">.html</span>
+                </div>
+              </div>
+            </article>
+
             <!-- 1. illustrated_slides -->
             <article class="tpl-item spotlight-card" data-cat="media" data-workflow="illustrated_slides.yml">
               <div class="tpl-top">
