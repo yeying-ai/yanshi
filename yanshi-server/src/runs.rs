@@ -1603,6 +1603,11 @@ pub async fn submit_run(
     state
       .gateway_policy
       .check_workflow(&flow_def)
+      .and_then(|()| {
+        state
+          .gateway_policy
+          .check_run_inputs(&flow_def, &req.inputs)
+      })
       .map_err(ApiError::BadRequest)?;
   }
 

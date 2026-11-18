@@ -435,6 +435,23 @@ fn validate_plugin_node_type(
   }
 }
 
+/// Whether `node_type` consumes parameter `key` at build or execute time.
+///
+/// Used by `yanshi-server`'s `GatewayPolicy` when checking workflow-level
+/// `inputs:` (which broadcast to every node in the DAG) so reach checks only
+/// fire on nodes that actually accept `key`, while staying fail-closed (`true`)
+/// for unknown/unlisted node types. `template` renders Tera strings in memory
+/// rather than opening host paths or endpoints, so it returns `false`.
+pub fn node_accepts_parameter(node_type: &str, key: &str) -> bool {
+  if node_type == "template" {
+    return false;
+  }
+  match specs_for_node_type(node_type) {
+    Some(specs) => specs.iter().any(|spec| spec.name == key),
+    None => true,
+  }
+}
+
 fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
   match node_type {
     "llm" => Some(vec![

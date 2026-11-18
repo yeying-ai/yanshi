@@ -819,6 +819,10 @@ pub async fn generate(
   if definition.inputs.contains_key("chat_model") && !inputs.contains_key("chat_model") {
     inputs.insert("chat_model".to_string(), Value::String(model.clone()));
   }
+  state
+    .gateway_policy
+    .check_run_inputs(&definition, &inputs)
+    .map_err(ApiError::BadRequest)?;
 
   let run = crate::runs::admit_and_dispatch(
     &state,

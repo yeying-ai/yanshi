@@ -23,7 +23,10 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use yanshi_config::config::v2::{FlowDefinitionV2, HOST_NODE_TYPES, NodeDefinitionV2, walk_nodes};
+use yanshi_config::config::{
+  schema::node_accepts_parameter,
+  v2::{FlowDefinitionV2, HOST_NODE_TYPES, NodeDefinitionV2, walk_nodes},
+};
 
 pub const HOST_NODE_TYPES_ENV: &str = "YANSHI_GATEWAY_HOST_NODE_TYPES";
 pub const ALLOWED_COMMANDS_ENV: &str = "YANSHI_GATEWAY_ALLOWED_COMMANDS";
@@ -85,7 +88,52 @@ impl GatewayPolicy {
 
   /// Reject a workflow that reaches past the operator ceiling.
   pub fn check_workflow(&self, def: &FlowDefinitionV2) -> Result<(), String> {
-    walk_nodes(&def.nodes, &mut |node| self.check_node(node))
+    walk_nodes(&def.nodes, &mut |node| self.check_node(def, node))?;
+    let mut defaults = serde_json::Map::new();
+    for (key, spec) in &def.inputs {
+      if let Some(default_val) = &spec.default
+        && let Ok(json_val) = serde_json::to_value(default_val)
+      {
+        defaults.insert(key.clone(), json_val);
+      }
+    }
+    if !defaults.is_empty() {
+      self.check_run_inputs(def, &defaults)?;
+    }
+    Ok(())
+  }
+
+  /// Enforce the same host-path and endpoint ceilings on caller-supplied
+  /// workflow `inputs` (`POST /v1/runs`, `POST /v1/notebooks/{id}/generate`).
+  ///
+  /// Workflow inputs broadcast to every node unless shadowed by `input_mapping`,
+  /// so a path- or endpoint-reaching key (`save_to_file`, `qdrant_url`,
+  /// `audio_source`, `image_source`, ...) accepted by any node in `def` must
+  /// satisfy that node's reach ceiling.
+  pub fn check_run_inputs(
+    &self,
+    def: &FlowDefinitionV2,
+    inputs: &serde_json::Map<String, serde_json::Value>,
+  ) -> Result<(), String> {
+    if inputs.is_empty() {
+      return Ok(());
+    }
+    walk_nodes(&def.nodes, &mut |node| {
+      for (key, value) in inputs {
+        if value.is_null() || node.input_mapping.contains_key(key) {
+          continue;
+        }
+        if !node_accepts_parameter(&node.node_type, key) {
+          continue;
+        }
+        let Some(reach) = reach_of(&node.node_type, key) else {
+          continue;
+        };
+        let what = format!("input '{key}' (node '{}')", node.id);
+        self.check_json_reach(&what, reach, value)?;
+      }
+      Ok(())
+    })
   }
 
   /// `what` names the field in the error message (e.g. `workspace_root`).
@@ -113,7 +161,7 @@ impl GatewayPolicy {
     ))
   }
 
-  fn check_node(&self, node: &NodeDefinitionV2) -> Result<(), String> {
+  fn check_node(&self, def: &FlowDefinitionV2, node: &NodeDefinitionV2) -> Result<(), String> {
     let kind = node.node_type.as_str();
     let id = &node.id;
     let is_safe_inline_agent = (kind == "agent" && is_gateway_safe_inline_agent(node))
@@ -126,7 +174,7 @@ impl GatewayPolicy {
         "node '{id}': type '{kind}' is disabled on this gateway (operator enables it via {HOST_NODE_TYPES_ENV})"
       ));
     }
-    self.check_reach_parameters(node)?;
+    self.check_reach_parameters(def, node)?;
     match kind {
       "shell" => {
         for command in string_list(node, "allowed_commands") {
@@ -159,11 +207,13 @@ impl GatewayPolicy {
   }
 }
 
-/// What a parameter reaches, judged by its name (Y7.3).
-#[derive(Debug, PartialEq)]
+/// What a parameter reaches, judged by its name (Y7.3 / Z1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
   Path,
   Url,
+  MediaSource,
+  MediaSourceList,
 }
 
 fn reach_of(node_type: &str, key: &str) -> Option<Reach> {
@@ -180,6 +230,11 @@ fn reach_of(node_type: &str, key: &str) -> Option<Reach> {
     {
       None
     }
+    "audio_source" | "image_source" | "source_image" | "reference_image" => {
+      Some(Reach::MediaSource)
+    }
+    "image" if node_type == "text_to_video" => Some(Reach::MediaSource),
+    "reference_images" => Some(Reach::MediaSourceList),
     "url" | "endpoint" | "base_url" => Some(Reach::Url),
     "path" | "save_to_file" => Some(Reach::Path),
     _ if key.ends_with("_url") || key.ends_with("_endpoint") => Some(Reach::Url),
@@ -190,28 +245,156 @@ fn reach_of(node_type: &str, key: &str) -> Option<Reach> {
   }
 }
 
+fn is_identifier_key(text: &str) -> bool {
+  !text.is_empty()
+    && text
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 impl GatewayPolicy {
-  /// Y7.3 (SEC-2/3): every node parameter that names a host path or an
-  /// endpoint is held to the same ceiling as `allowed_paths` — whatever
-  /// the node type, since new nodes keep adding such parameters
-  /// (`markmap.save_to_file`, `rag.qdrant_url`).
-  fn check_reach_parameters(&self, node: &NodeDefinitionV2) -> Result<(), String> {
+  /// Y7.3 / Z1: every node parameter that names a host path, a media source,
+  /// or an endpoint is held to the same ceiling as `allowed_paths`.
+  fn check_reach_parameters(
+    &self,
+    def: &FlowDefinitionV2,
+    node: &NodeDefinitionV2,
+  ) -> Result<(), String> {
     let id = &node.id;
     for (key, value) in &node.parameters {
       let Some(reach) = reach_of(&node.node_type, key) else {
         continue;
       };
-      let Some(text) = value.as_str() else {
-        return Err(format!(
-          "node '{id}' {key}: must be a plain string on the gateway"
-        ));
-      };
+      let what = format!("node '{id}' {key}");
       match reach {
-        Reach::Path => self.check_path(&format!("node '{id}' {key}"), text)?,
-        Reach::Url => self.check_url(&format!("node '{id}' {key}"), text)?,
+        Reach::Path => {
+          let Some(text) = value.as_str() else {
+            return Err(format!("{what}: must be a plain string on the gateway"));
+          };
+          self.check_path(&what, text)?;
+        }
+        Reach::Url => {
+          let Some(text) = value.as_str() else {
+            return Err(format!("{what}: must be a plain string on the gateway"));
+          };
+          self.check_url(&what, text)?;
+        }
+        Reach::MediaSource => {
+          let Some(text) = value.as_str() else {
+            return Err(format!("{what}: must be a plain string on the gateway"));
+          };
+          self.check_media_source_param(&what, text, Some((def, node)))?;
+        }
+        Reach::MediaSourceList => {
+          let Some(seq) = value.as_sequence() else {
+            return Err(format!("{what}: must be a list of strings on the gateway"));
+          };
+          for (idx, item) in seq.iter().enumerate() {
+            let item_what = format!("{what}[{idx}]");
+            let Some(text) = item.as_str() else {
+              return Err(format!(
+                "{item_what}: must be a plain string on the gateway"
+              ));
+            };
+            self.check_media_source_param(&item_what, text, Some((def, node)))?;
+          }
+        }
       }
     }
     Ok(())
+  }
+
+  fn check_json_reach(
+    &self,
+    what: &str,
+    reach: Reach,
+    value: &serde_json::Value,
+  ) -> Result<(), String> {
+    match reach {
+      Reach::Path => {
+        let Some(text) = value.as_str() else {
+          return Err(format!("{what}: must be a plain string on the gateway"));
+        };
+        if text.trim().is_empty() {
+          return Ok(());
+        }
+        self.check_path(what, text)
+      }
+      Reach::Url => {
+        let Some(text) = value.as_str() else {
+          return Err(format!("{what}: must be a plain string on the gateway"));
+        };
+        if text.trim().is_empty() {
+          return Ok(());
+        }
+        self.check_url(what, text)
+      }
+      Reach::MediaSource => match value {
+        serde_json::Value::String(text) => self.check_media_source_param(what, text, None),
+        serde_json::Value::Object(obj) => {
+          if let Some(path_val) = obj.get("path") {
+            let Some(path_str) = path_val.as_str() else {
+              return Err(format!(
+                "{what}.path: must be a plain string on the gateway"
+              ));
+            };
+            if !path_str.trim().is_empty() {
+              self.check_path(&format!("{what}.path"), path_str.trim())?;
+            }
+            return Ok(());
+          }
+          if let Some(url_val) = obj.get("url") {
+            let Some(url_str) = url_val.as_str() else {
+              return Err(format!("{what}.url: must be a plain string on the gateway"));
+            };
+            return self.check_media_source_param(&format!("{what}.url"), url_str, None);
+          }
+          Err(format!(
+            "{what}: media source object must specify 'path' or 'url'"
+          ))
+        }
+        _ => Err(format!("{what}: must be a string or media source object")),
+      },
+      Reach::MediaSourceList => {
+        let Some(seq) = value.as_array() else {
+          return Err(format!("{what}: must be a list of media sources"));
+        };
+        for (idx, item) in seq.iter().enumerate() {
+          self.check_json_reach(&format!("{what}[{idx}]"), Reach::MediaSource, item)?;
+        }
+        Ok(())
+      }
+    }
+  }
+
+  /// Validate a single media-source string (`data:` URI, SSRF-filtered
+  /// `http(s)://` URL, `{{ ... }}` node-output placeholder, indirect input
+  /// key, or a host path subject to `path_roots`).
+  fn check_media_source_param(
+    &self,
+    what: &str,
+    raw: &str,
+    yaml_ctx: Option<(&FlowDefinitionV2, &NodeDefinitionV2)>,
+  ) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with("data:") {
+      return Ok(());
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+      url::Url::parse(trimmed).map_err(|e| format!("{what} '{trimmed}' is not a URL: {e}"))?;
+      return Ok(());
+    }
+    if let Some((def, node)) = yaml_ctx {
+      if trimmed.contains("{{") && trimmed.contains("}}") {
+        return Ok(());
+      }
+      if is_identifier_key(trimmed)
+        && (node.input_mapping.contains_key(trimmed) || def.inputs.contains_key(trimmed))
+      {
+        return Ok(());
+      }
+    }
+    self.check_path(what, trimmed)
   }
 
   /// `what` names the field in the error message.
@@ -522,6 +705,113 @@ mod tests {
       GatewayPolicy::default()
         .check_workflow(&shell_multi_agent)
         .is_err()
+    );
+  }
+
+  #[test]
+  fn modality_media_sources_are_capped_while_data_uris_urls_and_mappings_pass() {
+    let policy = operator_policy();
+    for (kind, field) in [
+      ("asr", "audio_source"),
+      ("image_understand", "image_source"),
+      ("image_understand", "reference_image"),
+      ("image_edit", "image_source"),
+      ("image_to_image", "source_image"),
+      ("text_to_video", "image"),
+    ] {
+      let host_escape = workflow(&format!(
+        "name: w\nnodes:\n  - id: m\n    type: {kind}\n    parameters:\n      {field}: /etc/hosts\n"
+      ));
+      let err = GatewayPolicy::default()
+        .check_workflow(&host_escape)
+        .expect_err("default gateway policy must reject host file media source");
+      assert!(err.contains(field), "{kind}.{field}: {err}");
+
+      let allowed_host = workflow(&format!(
+        "name: w\nnodes:\n  - id: m\n    type: {kind}\n    parameters:\n      {field}: /srv/work/sample.bin\n"
+      ));
+      assert!(
+        policy.check_workflow(&allowed_host).is_ok(),
+        "{kind}.{field} under allowed path_roots should pass"
+      );
+
+      for safe in [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "https://cdn.example.org/asset.png",
+        "\"{{ nodes.upstream.outputs.file }}\"",
+      ] {
+        let ok_def = workflow(&format!(
+          "name: w\nnodes:\n  - id: m\n    type: {kind}\n    parameters:\n      {field}: {safe}\n"
+        ));
+        assert!(
+          GatewayPolicy::default().check_workflow(&ok_def).is_ok(),
+          "{kind}.{field} = {safe} should pass default policy"
+        );
+      }
+    }
+
+    let indirect_mapping = workflow(
+      "name: w\nnodes:\n  - id: m\n    type: image_understand\n    parameters:\n      image_source: picture\n    input_mapping:\n      picture: \"{{ nodes.draw.outputs.image }}\"\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&indirect_mapping)
+        .is_ok()
+    );
+
+    let bad_refs = workflow(
+      "name: w\nnodes:\n  - id: m\n    type: image_to_image\n    parameters:\n      reference_images: [\"https://cdn.example.org/ok.png\", \"/etc/hosts\"]\n",
+    );
+    assert!(GatewayPolicy::default().check_workflow(&bad_refs).is_err());
+
+    // Declared workflow input defaults cannot smuggle host paths either.
+    let sneaky_default = workflow(
+      "name: w\ninputs:\n  audio_source:\n    default: /etc/passwd\nnodes:\n  - id: t\n    type: asr\n    parameters:\n      model: mock-asr\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&sneaky_default)
+        .is_err()
+    );
+
+    // Runtime `CreateRunRequest.inputs` are held to the same ceiling, while
+    // SSRF-filtered `http.url` broadcast across `llm`/`template` nodes passes.
+    let asr_def = workflow(
+      "name: w\ninputs:\n  audio_source:\n    required: true\nnodes:\n  - id: t\n    type: asr\n    parameters:\n      model: mock-asr\n",
+    );
+    assert!(GatewayPolicy::default().check_workflow(&asr_def).is_ok());
+    let mut bad_inputs = serde_json::Map::new();
+    bad_inputs.insert("audio_source".into(), serde_json::json!("/etc/passwd"));
+    assert!(
+      GatewayPolicy::default()
+        .check_run_inputs(&asr_def, &bad_inputs)
+        .is_err()
+    );
+    assert!(policy.check_run_inputs(&asr_def, &bad_inputs).is_err());
+
+    let mut ok_inputs = serde_json::Map::new();
+    ok_inputs.insert(
+      "audio_source".into(),
+      serde_json::json!("/srv/work/standup.mp3"),
+    );
+    assert!(policy.check_run_inputs(&asr_def, &ok_inputs).is_ok());
+    ok_inputs.insert(
+      "audio_source".into(),
+      serde_json::json!("https://cdn.example.org/standup.mp3"),
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_run_inputs(&asr_def, &ok_inputs)
+        .is_ok()
+    );
+
+    let report_def = workflow(include_str!("../../examples/generators/report.yml"));
+    let mut report_inputs = serde_json::Map::new();
+    report_inputs.insert("url".into(), serde_json::json!("https://example.org/post"));
+    assert!(
+      GatewayPolicy::default()
+        .check_run_inputs(&report_def, &report_inputs)
+        .is_ok()
     );
   }
 
