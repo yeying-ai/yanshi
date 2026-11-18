@@ -1,0 +1,378 @@
+# Creative & Deliberative Studio 2 — `debate_podcast_show`: True Multi-Agent Roundtable Debate Radio Show.
+#
+# Unlike `audio_overview.yml` (where a single LLM writes both speakers' lines in one pass),
+# this studio runs a genuine multi-round adversarial clash via `type: multi_agent` (`mode: debate`):
+#   1. Optional source grounding (`web_search` + optional `url` / `text`)
+#   2. Multi-Agent Roundtable (`DebateSupervisor`, 2 rounds):
+#      - `pro_advocate` (`SKILL.md` affirmative thinker with `web_search`)
+#      - `con_challenger` (`SKILL.md` red-team critic with `web_search`)
+#      - `moderator` (`SKILL.md` impartial roundtable host & chief judge)
+#   3. Three-voice broadcast radio adaptation (`moderator` / `pro` / `con`) with expressive
+#      vocal direction -> parallel `tts` -> EBU R128 loudness-normalized `.mp3` (`render_audio`)
+#   4. Show cover artwork (`illustration`) + Debate Briefing Special Issue `.pdf` (`render_document`)
+#
+#   yanshi workflow run examples/generators/debate_podcast_show.yml --timeout 15m \
+#     --input motion_topic "AI 原生电影与长剧集生成：会让独立创作者迎来黄金时代，还是导致审美同质化坍塌？" \
+#     --output-dir runs/debate-ai-cinema
+name: debate_podcast_show
+description: "真·多智能体圆桌交锋电台：由持不同立场的独立人格智能体（正方开拓派 vs 反方红军审慎派 + 金牌主持人）进行多轮真实攻防辩论，合成为三声线广播级响度标准化 MP3 播客与《圆桌思辨交锋特刊 PDF》"
+
+inputs:
+  motion_topic:
+    description: "圆桌交锋辩题（支持创意文化、技术路线抉择、商业战略或哲学思辨命题）"
+    default: "AI 原生影视与互动叙事：会让单人独立创作者迎来文艺复兴黄金时代，还是引发叙事套路与审美的同质化坍塌？"
+  pro_position:
+    description: "正方核心立场定义"
+    default: "技术平权开启独立叙事黄金时代：制片门槛归零让过去被工业资本筛掉的小众奇想得以诞生"
+  con_position:
+    description: "反方核心立场定义"
+    default: "概率均值导致审美熵增危机：缺乏肉身痛感与慢工留白的批量生成会稀释真正打动人心的艺术张力"
+  url:
+    description: "可选背景参考网页链接（带 SSRF 防护抓取）"
+    default: ""
+  source_text:
+    description: "可选补充背景材料或案例纪要"
+    default: ""
+  enable_web_search:
+    description: "是否在开辩前先联网检索最新行业事实与正反案例"
+    default: true
+  language:
+    description: "辩论与电台播音语言"
+    default: "中文"
+  turn_count:
+    description: "改编为三声线电台节目的总对话轮次数（8-18 轮）"
+    default: 12
+  chat_model:
+    description: "圆桌辩手、裁判与电台导播模型"
+    default: "gemini-2.5-flash"
+  tts_model:
+    description: "三声线语音合成模型"
+    default: "gemini-2.5-flash-preview-tts"
+  moderator_voice:
+    description: "圆桌主持人音色"
+    default: "Aoede"
+  pro_voice:
+    description: "正方辩手音色"
+    default: "Charon"
+  con_voice:
+    description: "反方辩手音色"
+    default: "Kore"
+  target_lufs:
+    description: "播客响度标准化目标值（播客平台标准为 -16 LUFS）"
+    default: -16
+  enable_cover_art:
+    description: "是否生成圆桌电台单集概念封面插画"
+    default: true
+  image_model:
+    description: "单集封面插画模型"
+    default: "gemini-3.1-flash-image"
+  export_pdf:
+    description: "是否同步导出《圆桌思辨交锋特刊 PDF》"
+    default: true
+
+nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: |
+        {
+          "has_url": {{ url != "" }},
+          "do_search": {{ enable_web_search }},
+          "do_cover": {{ enable_cover_art }},
+          "do_pdf": {{ export_pdf }},
+          "chat_model": {{ chat_model | json_encode() }},
+          "image_model": {{ image_model | json_encode() }}
+        }
+
+  - id: fetch_page
+    type: http
+    dependencies: ["options"]
+    run_if: "{{ nodes.options.outputs.has_url }}"
+
+  - id: search_query
+    type: template
+    parameters:
+      template: "{{ motion_topic }} 核心争议 真实案例 数据对比 深度评论"
+
+  - id: background_search
+    type: web_search
+    dependencies: ["options", "search_query"]
+    run_if: "{{ nodes.options.outputs.do_search }}"
+    input_mapping:
+      query: "{{ nodes.search_query.outputs.output }}"
+    parameters:
+      max_results: 5
+
+  - id: debate_dossier
+    type: template
+    dependencies: ["options"]
+    input_mapping:
+      page_body: "{{ nodes.fetch_page.outputs.body }}"
+      search_md: "{{ nodes.background_search.outputs.markdown }}"
+    parameters:
+      template: |
+        【圆桌思想交锋电台 · 辩题卷宗】
+        - 核心辩题：{{ motion_topic }}
+        - 正方立场（`pro_advocate`）：{{ pro_position }}
+        - 反方立场（`con_challenger`）：{{ con_position }}
+        - 表达语言：{{ language }}
+
+        请正反双方严格站在各自立场展开 2 轮针锋相对的硬核辩论（第 1 轮立论举证，第 2 轮直接拆解对方上一轮漏洞并深化推演），最后由 `moderator` 主持人兼终审评委完整复盘双方攻防交锋并给出结构化分界裁决。
+
+        {% if source_text != "" %}
+        补充背景资料：
+        {{ source_text | truncate(length=10000) }}
+        {% endif %}
+        {% if page_body is defined and page_body %}
+        参考网页正文：
+        {{ page_body | striptags | truncate(length=10000) }}
+        {% endif %}
+        {% if search_md is defined and search_md %}
+        最新检索事实参考：
+        {{ search_md | truncate(length=10000) }}
+        {% endif %}
+
+  - id: roundtable_debate
+    type: multi_agent
+    dependencies: ["debate_dossier", "options"]
+    input_mapping:
+      message: "{{ nodes.debate_dossier.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      mode: debate
+      rounds: 2
+      participants:
+        - name: pro_advocate
+          skill: examples/skills/debate-panel/pro-advocate
+        - name: con_challenger
+          skill: examples/skills/debate-panel/con-challenger
+      judge:
+        name: moderator
+        skill: examples/skills/debate-panel/roundtable-moderator
+      judge_prompt: "请作为圆桌思想电台主持人兼终审评委，用中文完整梳理正方（pro_advocate）与反方（con_challenger）在每一轮的真实交锋重点、最犀利的反驳回合、成立边界条件与终审洞察。"
+
+  - id: radio_script_prompt
+    type: template
+    dependencies: ["roundtable_debate"]
+    input_mapping:
+      judge_summary: "{{ nodes.roundtable_debate.outputs.response }}"
+      raw_debate: "{{ nodes.roundtable_debate.outputs.agent_result }}"
+    parameters:
+      template: |
+        请根据以下真实多智能体多轮辩论的完整交锋记录与裁判总结，将其剪辑改编为一期节奏紧凑、火药味与思想深度兼备的三声线圆桌播客台本（语言：{{ language }}，共约 {{ turn_count }} 轮发言）。
+
+        改编要求：
+        1. 忠实保留正方（`pro`）与反方（`con`）在真实多轮辩论中抛出的核心论据、反例与针锋相对的追问，绝不弱化冲突；
+        2. 由主持人（`moderator`）开场破题、在中途关键分水岭处精准串场追问、并在结尾给出高维边界总结；
+        3. 每轮 `text` 为纯粹的自然口语播音词（2-4 句，严禁包含括号动作、笑声提示或说话人前缀），并为每轮附上英文配音情绪指令 `emotion_en`；
+        4. 同时提炼 `key_clashes`（3-4 个核心交锋焦点对比表）与 `boundary_verdict`（正反命题各自成立的边界条件），供《圆桌思辨特刊 PDF》排版。
+
+        主持人终审总结：
+        {{ judge_summary }}
+
+        多轮辩论原始步骤记录：
+        {{ raw_debate | json_encode() | truncate(length=18000) }}
+
+  - id: radio_script
+    type: llm
+    dependencies: ["radio_script_prompt", "options"]
+    input_mapping:
+      prompt: "{{ nodes.radio_script_prompt.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      max_tokens: 8192
+      system: "你是顶尖思想播客导播，仅输出符合 JSON Schema 的有效 JSON。"
+      json_schema:
+        type: object
+        required: [show_title, subtitle, cover_concept_en, key_clashes, boundary_verdict, turns]
+        properties:
+          show_title: { type: string }
+          subtitle: { type: string }
+          cover_concept_en:
+            type: string
+            description: "Conceptual editorial illustration metaphor in English representing the philosophical tension between the two stances, strictly NO text or letters"
+          key_clashes:
+            type: array
+            minItems: 2
+            maxItems: 5
+            items:
+              type: object
+              required: [dimension, pro_argument, con_rebuttal, takeaway]
+              properties:
+                dimension: { type: string }
+                pro_argument: { type: string }
+                con_rebuttal: { type: string }
+                takeaway: { type: string }
+          boundary_verdict: { type: string }
+          turns:
+            type: array
+            minItems: 6
+            maxItems: 20
+            items:
+              type: object
+              required: [speaker, speaker_label, text, emotion_en]
+              properties:
+                speaker:
+                  type: string
+                  enum: [moderator, pro, con]
+                speaker_label: { type: string }
+                text: { type: string }
+                emotion_en: { type: string }
+
+  - id: voice_items
+    type: template
+    dependencies: ["radio_script"]
+    input_mapping:
+      plan: "{{ nodes.radio_script.outputs.output }}"
+    parameters:
+      output_format: json
+      template: |
+        {
+          "cover_concept": {{ plan.cover_concept_en | json_encode() }},
+          "items": [{% for t in plan.turns %}{
+            "text": {{ t.text | json_encode() }},
+            "voice": {% if t.speaker == "pro" %}{{ pro_voice | json_encode() }}{% elif t.speaker == "con" %}{{ con_voice | json_encode() }}{% else %}{{ moderator_voice | json_encode() }}{% endif %},
+            "instructions": {{ t.emotion_en | json_encode() }},
+            "model": {{ tts_model | json_encode() }}
+          }{% if not loop.last %},{% endif %}{% endfor %}]
+        }
+
+  - id: cover_art
+    type: illustration
+    dependencies: ["voice_items", "options"]
+    run_if: "{{ nodes.options.outputs.do_cover }}"
+    input_mapping:
+      concept: "{{ nodes.voice_items.outputs.cover_concept }}"
+      model: "{{ nodes.options.outputs.image_model }}"
+    parameters:
+      style_preset: "editorial_tech"
+      theme: "dark"
+      size: "1:1"
+      refine_prompt: true
+
+  - id: synthesize_turns
+    type: map
+    dependencies: ["voice_items"]
+    input_mapping:
+      input_list: "{{ nodes.voice_items.outputs.items }}"
+    parameters:
+      parallel: true
+      max_concurrent: 4
+      template:
+        - id: turn_tts
+          type: tts
+          input_mapping:
+            model: "{{ item.model }}"
+            voice: "{{ item.voice }}"
+            instructions: "{{ item.instructions }}"
+            input_template: "{{ item.text }}"
+
+  - id: audio_clips
+    type: template
+    dependencies: ["synthesize_turns"]
+    input_mapping:
+      voiced: "{{ nodes.synthesize_turns.outputs.results }}"
+    parameters:
+      output_format: json
+      template: |
+        {"paths": [{% for r in voiced %}{{ r.turn_tts.Ok.turn_tts_output.path | json_encode() }}{% if not loop.last %},{% endif %}{% endfor %}]}
+
+  - id: podcast_master
+    type: render_audio
+    dependencies: ["audio_clips"]
+    input_mapping:
+      clips: "{{ nodes.audio_clips.outputs.paths }}"
+    parameters:
+      format: mp3
+
+  - id: briefing_markdown_tpl
+    type: template
+    dependencies: ["radio_script", "roundtable_debate"]
+    input_mapping:
+      plan: "{{ nodes.radio_script.outputs.output }}"
+      judge_raw: "{{ nodes.roundtable_debate.outputs.response }}"
+      cover_img: "{{ nodes.cover_art.outputs.cover_art_image }}"
+    parameters:
+      template: |
+        # {{ plan.show_title }}
+
+        > **{{ plan.subtitle }}**
+        >
+        > **辩题**：{{ motion_topic }}
+
+        {% if cover_img is defined and cover_img %}
+        ![单集概念封面]({{ cover_img }})
+        {% endif %}
+
+        ## 一、正反核心交锋矩阵
+
+        | 交锋维度 | 正方立论（开拓派） | 反方反击（红军审慎派） | 关键洞察 |
+        | --- | --- | --- | --- |
+        {% for c in plan.key_clashes %}| **{{ c.dimension }}** | {{ c.pro_argument }} | {{ c.con_rebuttal }} | {{ c.takeaway }} |
+        {% endfor %}
+
+        ## 二、终审边界裁决（When Each Side Wins）
+
+        {{ plan.boundary_verdict }}
+
+        ## 三、三声线圆桌电台完整实录
+
+        {% for t in plan.turns %}
+        **【{{ t.speaker_label }}】**：{{ t.text }}
+
+        {% endfor %}
+
+        ---
+
+        ## 附录：终审评委深度复盘原稿
+
+        {{ judge_raw }}
+
+  - id: briefing_md
+    type: render_markdown
+    dependencies: ["briefing_markdown_tpl"]
+    input_mapping:
+      markdown: "{{ nodes.briefing_markdown_tpl.outputs.output }}"
+
+  - id: briefing_pdf
+    type: render_document
+    dependencies: ["briefing_markdown_tpl", "options"]
+    run_if: "{{ nodes.options.outputs.do_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.briefing_markdown_tpl.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: false
+
+  - id: deliverable
+    type: template
+    dependencies: ["radio_script", "podcast_master", "briefing_md", "options"]
+    input_mapping:
+      plan: "{{ nodes.radio_script.outputs.output }}"
+      mp3: "{{ nodes.podcast_master.outputs.podcast_master_output }}"
+      lufs: "{{ nodes.podcast_master.outputs.podcast_master_lufs }}"
+      md_file: "{{ nodes.briefing_md.outputs.briefing_md_output }}"
+      pdf_file: "{{ nodes.briefing_pdf.outputs.briefing_pdf_output }}"
+      cover_img: "{{ nodes.cover_art.outputs.cover_art_image }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "audio_overview",
+          "title": {{ plan.show_title | json_encode() }},
+          "content": {
+            "subtitle": {{ plan.subtitle | json_encode() }},
+            "loudness_lufs": {{ lufs | json_encode() }},
+            "key_clashes": {{ plan.key_clashes | json_encode() }},
+            "boundary_verdict": {{ plan.boundary_verdict | json_encode() }},
+            "script": {{ plan.turns | json_encode() }}
+          },
+          "citations": [],
+          "files": [
+            {"node_id": "podcast_master", "name": {{ mp3 | split(pat="/") | last | json_encode() }}, "mime_type": "audio/mpeg", "role": "primary"},
+            {"node_id": "briefing_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"}{% if cover_img is defined and cover_img %},
+            {"node_id": "cover_art", "name": {{ cover_img | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "preview"}{% endif %}{% if pdf_file is defined and pdf_file %},
+            {"node_id": "briefing_pdf", "name": {{ pdf_file | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "asset"}{% endif %}
+          ]
+        }}

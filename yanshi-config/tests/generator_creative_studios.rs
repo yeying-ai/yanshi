@@ -69,3 +69,15 @@ fn episodic_drama_studio_and_crew_skills_validate_strictly() {
   }
   assert_strict_valid_and_builds("episodic_drama_studio.yml");
 }
+
+#[test]
+fn debate_podcast_show_and_panel_skills_validate_strictly() {
+  for skill in [
+    "examples/skills/debate-panel/pro-advocate",
+    "examples/skills/debate-panel/con-challenger",
+    "examples/skills/debate-panel/roundtable-moderator",
+  ] {
+    assert_skill_valid(skill);
+  }
+  assert_strict_valid_and_builds("debate_podcast_show.yml");
+}
