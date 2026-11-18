@@ -1,0 +1,537 @@
+# Creative Studio 3 — `worldbuilding_bible`: Multi-Agent Handoff Worldbuilding & Visual Atelier.
+#
+# Showcases specialist relay (`multi_agent: handoff`) + iterative VLM art-critic loop (`while`):
+#   1. Optional HITL Creative Co-Design (`type: agent` with `ask_user`)
+#   2. Specialist Relay (`type: multi_agent`, `mode: handoff`):
+#      `lore_architect` (cosmology, timeline, magic/tech cost laws, regions) ->
+#      `faction_smith` (power blocs, economy, iconic characters) ->
+#      `quest_designer` (inciting incident & moral branching questlines)
+#   3. Key-Art Aesthetic Atelier (`type: while` + `text_to_image` + `image_understand`):
+#      VLM Art Director critiques hero key-art composition, lighting & zero-text purity
+#   4. Parallel D2 Engineering/Lore Graphs (`figure`): Faction Power Topology + Quest State Machine,
+#      World Taxonomy Mindmap (`render_mindmap`), Region Concept Plates (`illustration`),
+#      and illustrated Worldbuilding Bible `.pdf` + `.html` (`render_document`)
+#
+#   yanshi workflow run examples/generators/worldbuilding_bible.yml --timeout 15m \
+#     --input seed_idea "东方蒸汽机关与古星象术交织的浮空群岛世界《天工残历》：每次驱动巨型机关都会消耗使用者的生辰记忆" \
+#     --output-dir runs/tiangong-worldbible
+name: worldbuilding_bible
+description: "多智能体接力世界观与概念美术工坊：通过专家接力移交（handoff）依次锻造创世法则、阵营人物与分支任务链，经 while + VLM 审片循环打磨主视觉原画，并同步编译 D2 阵营关系图、分支剧情状态图、全景导图与精装《世界观设定集 PDF》"
+
+inputs:
+  seed_idea:
+    description: "世界观核心奇想、题材混搭或一句话种子设定"
+    default: "东方青铜星象机关与云海浮空群岛交织的幻想世界《天工残历》：工匠以自身某一段真实记忆作为燃料驱动巨型星晷机关，越强大的机关师越接近彻底遗忘自己是谁"
+  medium_target:
+    description: "目标载体形态（如独立单机 RPG、长篇幻想小说、桌面跑团设定集、动画剧集宇宙）"
+    default: "叙事驱动动作 RPG 游戏与跨媒体动画设定集"
+  art_direction:
+    description: "概念原画统一艺术风格"
+    default: "epic fantasy concept art, intricate bronze astrolabe clockwork and misty celadon cloud archipelagos, painterly atmospheric rim lighting, museum artbook quality"
+  output_language:
+    description: "设定集撰写语言"
+    default: "中文"
+  interactive:
+    description: "是否在开篇启用 ask_user 创意分叉点问答（默认 false 直接自主接力创作）"
+    default: false
+  max_art_rounds:
+    description: "概念主视觉原画经 VLM 艺术总监审片打磨的最大轮数（1-3）"
+    default: 2
+  enable_concept_plates:
+    description: "是否为核心地理区域并行绘制概念场景原画"
+    default: true
+  chat_model:
+    description: "设定师接力组与结构化编纂模型"
+    default: "gemini-2.5-flash"
+  vision_model:
+    description: "概念主视觉审片多模态模型"
+    default: "gemini-2.5-flash"
+  image_model:
+    description: "主视觉与地域概念原画生成模型"
+    default: "gemini-3.1-flash-image"
+  image_size:
+    description: "概念原画画幅比例"
+    default: "16:9"
+  export_pdf:
+    description: "是否导出精装排版《世界观设定集 PDF》"
+    default: true
+
+nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: |
+        {
+          "is_interactive": {{ interactive }},
+          "do_plates": {{ enable_concept_plates }},
+          "do_pdf": {{ export_pdf }},
+          "chat_model": {{ chat_model | json_encode() }},
+          "vision_model": {{ vision_model | json_encode() }},
+          "image_model": {{ image_model | json_encode() }},
+          "image_size": {{ image_size | json_encode() }}
+        }
+
+  - id: spark_prompt
+    type: template
+    parameters:
+      template: |
+        创作者希望孵化以下原创世界观：
+        - 核心种子：{{ seed_idea }}
+        - 目标载体：{{ medium_target }}
+        - 美术基调：{{ art_direction }}
+
+        请作为首席世界观制作人调用 `ask_user` 工具进行 1 轮简洁共创提问（合并确认 2-3 个关键审美/基调分叉：残酷现实还是浪漫史诗、科技与超自然的比重、核心结局调性），整理为《世界观立项基调备忘》。
+
+  - id: spark_clarify
+    type: agent
+    dependencies: ["options", "spark_prompt"]
+    run_if: "{{ nodes.options.outputs.is_interactive }}"
+    input_mapping:
+      prompt: "{{ nodes.spark_prompt.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      system: "你是富有想象力的世界观制作人，擅长用精炼问题激发创作者灵感。"
+      max_steps: 4
+
+  - id: handoff_brief
+    type: template
+    dependencies: ["options"]
+    input_mapping:
+      clarified: "{{ nodes.spark_clarify.outputs.output }}"
+    parameters:
+      template: |
+        【世界观工坊专家接力任务单】
+        - 核心种子设定：{{ seed_idea }}
+        - 目标载体：{{ medium_target }}
+        - 视觉美学方向：{{ art_direction }}
+        - 输出语言：{{ output_language }}
+        {% if clarified is defined and clarified %}
+        - 创作者共创确认偏好：
+        {{ clarified }}
+        {% endif %}
+
+        请按三棒专家接力流程完成全套设定：
+        1. 第一棒 `lore_architect` 建立纪元历史、核心力量与代价法则、标志性地理区域，然后调用 `handoff(to="faction_smith", message=...)` 完整移交；
+        2. 第二棒 `faction_smith` 在此之上铸造 3-4 大制衡阵营与 3 位灵魂人物，调用 `handoff(to="quest_designer", message=...)` 连同第一卷全文一并移交；
+        3. 第三棒 `quest_designer` 设计开篇引爆事件与多分支抉择任务链，整合成完整的《世界观设定总集》直接输出定稿。
+
+  - id: worldbuilder_relay
+    type: multi_agent
+    dependencies: ["handoff_brief", "options"]
+    input_mapping:
+      message: "{{ nodes.handoff_brief.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      mode: handoff
+      initial_agent: lore_architect
+      max_handoffs: 4
+      agents:
+        - name: lore_architect
+          skill: examples/skills/worldbuilders/lore-architect
+        - name: faction_smith
+          skill: examples/skills/worldbuilders/faction-character-smith
+        - name: quest_designer
+          skill: examples/skills/worldbuilders/quest-narrative-designer
+
+  - id: codex_prompt
+    type: template
+    dependencies: ["worldbuilder_relay"]
+    input_mapping:
+      raw_bible: "{{ nodes.worldbuilder_relay.outputs.response }}"
+    parameters:
+      template: |
+        请基于以下三位世界观专家接力完成的《世界观设定总集》，将其汇编为结构化 JSON 设定法典（语言：{{ output_language }}），以驱动主视觉审片工坊、D2 拓扑图编译器与设定集排版。
+
+        结构要求：
+        1. `world_name`、`subtitle`、`elevator_pitch`、`cosmology_and_history`（纪元与历史脉络详述）、`power_system_and_cost`（核心力量体系与不可逆代价法则）；
+        2. `regions`（2-3 个最具视觉辨识度的标志性地域）：包含 `name`、`summary`、`concept_prompt_en`（纯英文场景原画描述，严禁任何文字字母）；
+        3. `factions`（3-4 大核心阵营）与 `iconic_characters`（3 位灵魂人物）；
+        4. `branching_quest`：主线引爆事件与多分支道德抉择详述；
+        5. `hero_key_art_prompt_en`：代表整个宇宙灵魂的 16:9 史诗主视觉原画英文描述（焦点主体明确、光影层次丰富、严禁任何文字标题或水印）；
+        6. `faction_d2_brief`（200 字以内）：描述 3-4 大阵营与核心稀缺资源之间的控制/同盟/敌对单向或双向有向边关系，供 D2 编译器绘图；
+        7. `quest_d2_brief`（200 字以内）：描述从序章引爆点 -> 抉择分叉点 -> 不同阵营路线 -> 2-3 种结局状态机的节点与转移流向，供 D2 编译器绘图；
+        8. `mindmap_tree`：世界观全景分类树（根节点 `label` 为世界名，2-3 层子节点涵盖纪元法则、地理版图、阵营势力、灵魂人物、主线分支）。
+
+        专家接力定稿全文：
+        {{ raw_bible }}
+
+  - id: world_codex
+    type: llm
+    dependencies: ["codex_prompt", "options"]
+    input_mapping:
+      prompt: "{{ nodes.codex_prompt.outputs.output }}"
+      model: "{{ nodes.options.outputs.chat_model }}"
+    parameters:
+      max_tokens: 8192
+      system: "你是首席设定集总编，仅输出符合 JSON Schema 的合法 JSON。"
+      json_schema:
+        type: object
+        required:
+          - world_name
+          - subtitle
+          - elevator_pitch
+          - cosmology_and_history
+          - power_system_and_cost
+          - regions
+          - factions
+          - iconic_characters
+          - branching_quest
+          - hero_key_art_prompt_en
+          - faction_d2_brief
+          - quest_d2_brief
+          - mindmap_tree
+        properties:
+          world_name: { type: string }
+          subtitle: { type: string }
+          elevator_pitch: { type: string }
+          cosmology_and_history: { type: string }
+          power_system_and_cost: { type: string }
+          regions:
+            type: array
+            minItems: 2
+            maxItems: 3
+            items:
+              type: object
+              required: [name, summary, concept_prompt_en]
+              properties:
+                name: { type: string }
+                summary: { type: string }
+                concept_prompt_en: { type: string }
+          factions:
+            type: array
+            minItems: 3
+            maxItems: 5
+            items:
+              type: object
+              required: [name, creed, resource, relations]
+              properties:
+                name: { type: string }
+                creed: { type: string }
+                resource: { type: string }
+                relations: { type: string }
+          iconic_characters:
+            type: array
+            minItems: 2
+            maxItems: 4
+            items:
+              type: object
+              required: [name, faction, public_goal, hidden_flaw, visual_portrait]
+              properties:
+                name: { type: string }
+                faction: { type: string }
+                public_goal: { type: string }
+                hidden_flaw: { type: string }
+                visual_portrait: { type: string }
+          branching_quest: { type: string }
+          hero_key_art_prompt_en: { type: string }
+          faction_d2_brief: { type: string }
+          quest_d2_brief: { type: string }
+          mindmap_tree:
+            type: object
+            required: [label, children]
+            properties:
+              label: { type: string }
+              children:
+                type: array
+                items: { type: object }
+
+  # Unpack structured fields for parallel diagram/mindmap/atelier nodes.
+  - id: codex_parts
+    type: template
+    dependencies: ["world_codex"]
+    input_mapping:
+      codex: "{{ nodes.world_codex.outputs.output }}"
+    parameters:
+      output_format: json
+      template: |
+        {% set init_art = codex.hero_key_art_prompt_en ~ ". Art direction: " ~ art_direction ~ ". Masterpiece widescreen key visual, dramatic focal hierarchy, strictly NO text, NO title letters, NO logos, NO watermarks." %}{% set fac_desc = "为世界观《" ~ codex.world_name ~ "》绘制清晰的 D2 阵营权力与资源制衡拓扑图（direction: right，5-8 个节点，标注同盟、敌对与资源控制连线，严禁使用不存在的 container 关键字）：" ~ codex.faction_d2_brief %}{% set qst_desc = "为世界观《" ~ codex.world_name ~ "》绘制清晰的 D2 分支叙事抉择与多结局状态流转图（direction: down，6-9 个节点，清晰呈现两难分叉与结局走向）：" ~ codex.quest_d2_brief %}{
+          "needs_polish": true,
+          "art_round": 0,
+          "key_art_prompt": {{ init_art | json_encode() }},
+          "key_art_path": "",
+          "art_critique": "",
+          "faction_desc": {{ fac_desc | json_encode() }},
+          "quest_desc": {{ qst_desc | json_encode() }},
+          "mindmap_tree": {{ codex.mindmap_tree | json_encode() }},
+          "region_items": [{% for r in codex.regions %}{% set r_vis = r.concept_prompt_en ~ ". Art direction: " ~ art_direction ~ ". Strictly NO text or letters." %}{
+            "name": {{ r.name | json_encode() }},
+            "prompt": {{ r_vis | json_encode() }},
+            "image_model": {{ image_model | json_encode() }},
+            "image_size": {{ image_size | json_encode() }}
+          }{% if not loop.last %},{% endif %}{% endfor %}]
+        }
+
+  # `while` + `image_understand` Key-Art Aesthetic Critic Loop.
+  - id: key_art_atelier
+    type: while
+    dependencies: ["codex_parts", "options"]
+    input_mapping:
+      needs_polish: "{{ nodes.codex_parts.outputs.needs_polish }}"
+      art_round: "{{ nodes.codex_parts.outputs.art_round }}"
+      key_art_prompt: "{{ nodes.codex_parts.outputs.key_art_prompt }}"
+      key_art_path: "{{ nodes.codex_parts.outputs.key_art_path }}"
+      art_critique: "{{ nodes.codex_parts.outputs.art_critique }}"
+    parameters:
+      condition: "{{ needs_polish }}"
+      max_iterations: 3
+      do:
+        - id: art_ctx
+          type: template
+          parameters:
+            output_format: json
+            template: |
+              {% set critic_q = "You are the Chief Concept Art Director reviewing this hero key visual for art direction (" ~ art_direction ~ "). Evaluate: (1) Focal composition and silhouette clarity; (2) Lighting depth and color harmony; (3) Absence of garbled text/logos. State any weaknesses and how to refine the prompt if needed." %}{
+                "art_round": {{ art_round }},
+                "max_rounds": {{ max_art_rounds }},
+                "art_direction": {{ art_direction | json_encode() }},
+                "key_art_prompt": {{ key_art_prompt | json_encode() }},
+                "critic_q": {{ critic_q | json_encode() }},
+                "image_model": {{ image_model | json_encode() }},
+                "image_size": {{ image_size | json_encode() }},
+                "vision_model": {{ vision_model | json_encode() }},
+                "chat_model": {{ chat_model | json_encode() }}
+              }
+
+        - id: paint_key_art
+          type: text_to_image
+          dependencies: ["art_ctx"]
+          input_mapping:
+            prompt: "{{ nodes.art_ctx.outputs.key_art_prompt }}"
+            model: "{{ nodes.art_ctx.outputs.image_model }}"
+            size: "{{ nodes.art_ctx.outputs.image_size }}"
+
+        - id: critique_key_art
+          type: image_understand
+          dependencies: ["art_ctx", "paint_key_art"]
+          input_mapping:
+            model: "{{ nodes.art_ctx.outputs.vision_model }}"
+            text_prompt: "{{ nodes.art_ctx.outputs.critic_q }}"
+            image_source: "{{ nodes.paint_key_art.outputs.paint_key_art_image }}"
+
+        - id: art_decision_prompt
+          type: template
+          dependencies: ["art_ctx", "critique_key_art"]
+          input_mapping:
+            notes: "{{ nodes.critique_key_art.outputs.critique_key_art_output }}"
+            prev_p: "{{ nodes.art_ctx.outputs.key_art_prompt }}"
+          parameters:
+            template: |
+              Based on the Art Director's critique below, output a JSON decision.
+              Set `approved: true` if composition, lighting, and visual cleanliness are strong; set `approved: false` if garbled text appeared or focal hierarchy is muddy.
+
+              Previous Prompt: {{ prev_p }}
+              Critique: {{ notes }}
+
+        - id: art_decision
+          type: llm
+          dependencies: ["art_ctx", "art_decision_prompt"]
+          input_mapping:
+            prompt: "{{ nodes.art_decision_prompt.outputs.output }}"
+            model: "{{ nodes.art_ctx.outputs.chat_model }}"
+          parameters:
+            system: "Output valid JSON matching the schema only."
+            json_schema:
+              type: object
+              required: [approved, summary, refined_prompt_en]
+              properties:
+                approved: { type: boolean }
+                summary: { type: string }
+                refined_prompt_en: { type: string }
+
+        - id: art_step
+          type: template
+          dependencies: ["art_ctx", "paint_key_art", "art_decision"]
+          input_mapping:
+            r_idx: "{{ nodes.art_ctx.outputs.art_round }}"
+            max_r: "{{ nodes.art_ctx.outputs.max_rounds }}"
+            art_dir: "{{ nodes.art_ctx.outputs.art_direction }}"
+            prev_p: "{{ nodes.art_ctx.outputs.key_art_prompt }}"
+            painted: "{{ nodes.paint_key_art.outputs.paint_key_art_image }}"
+            dec: "{{ nodes.art_decision.outputs.output }}"
+          parameters:
+            output_format: json
+            template: |
+              {% set next_r = r_idx + 1 %}{% if not dec.approved and next_r < max_r %}{% set polish = true %}{% else %}{% set polish = false %}{% endif %}{% set next_p = dec.refined_prompt_en ~ ". Art direction: " ~ art_dir ~ ". Strictly NO text, NO letters, NO watermarks." %}{
+                "art_round": {{ next_r }},
+                "needs_polish": {{ polish }},
+                "key_art_prompt": {% if polish and dec.refined_prompt_en != "" %}{{ next_p | json_encode() }}{% else %}{{ prev_p | json_encode() }}{% endif %},
+                "key_art_path": {{ painted | json_encode() }},
+                "art_critique": {{ dec.summary | json_encode() }}
+              }
+
+  - id: faction_diagram
+    type: figure
+    dependencies: ["codex_parts"]
+    input_mapping:
+      description: "{{ nodes.codex_parts.outputs.faction_desc }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1600
+      max_attempts: 4
+
+  - id: quest_diagram
+    type: figure
+    dependencies: ["codex_parts"]
+    input_mapping:
+      description: "{{ nodes.codex_parts.outputs.quest_desc }}"
+    parameters:
+      language: d2
+      png: true
+      png_width: 1600
+      max_attempts: 4
+
+  - id: lore_mindmap
+    type: render_mindmap
+    dependencies: ["codex_parts"]
+    input_mapping:
+      tree: "{{ nodes.codex_parts.outputs.mindmap_tree }}"
+    parameters:
+      format: svg
+
+  - id: region_plates
+    type: map
+    dependencies: ["codex_parts", "options"]
+    run_if: "{{ nodes.options.outputs.do_plates }}"
+    input_mapping:
+      input_list: "{{ nodes.codex_parts.outputs.region_items }}"
+    parameters:
+      parallel: true
+      max_concurrent: 3
+      template:
+        - id: plate
+          type: text_to_image
+          input_mapping:
+            prompt: "{{ item.prompt }}"
+            model: "{{ item.image_model }}"
+            size: "{{ item.image_size }}"
+
+  - id: bible_markdown_tpl
+    type: template
+    dependencies: ["world_codex", "key_art_atelier", "faction_diagram", "quest_diagram", "lore_mindmap"]
+    input_mapping:
+      codex: "{{ nodes.world_codex.outputs.output }}"
+      hero_art: "{{ nodes.key_art_atelier.outputs.key_art_path }}"
+      hero_note: "{{ nodes.key_art_atelier.outputs.art_critique }}"
+      fac_png: "{{ nodes.faction_diagram.outputs.faction_diagram_png }}"
+      qst_png: "{{ nodes.quest_diagram.outputs.quest_diagram_png }}"
+      plates: "{{ nodes.region_plates.outputs.results }}"
+    parameters:
+      template: |
+        # 《{{ codex.world_name }}》世界观设定总集
+
+        > **{{ codex.subtitle }}**
+        >
+        > **载体定位**：{{ medium_target }} ｜ **一句话概念**：{{ codex.elevator_pitch }}
+
+        ![世界观概念主视觉]({{ hero_art }})
+
+        > *VLM 艺术总监审片评注：{{ hero_note }}*
+
+        ## 一、创世纪元与历史脉络
+
+        {{ codex.cosmology_and_history }}
+
+        ## 二、核心力量体系与不可逆代价法则
+
+        {{ codex.power_system_and_cost }}
+
+        ## 三、地理疆域与场景概念图谱
+
+        {% for r in codex.regions %}
+        ### {{ loop.index }}. {{ r.name }}
+
+        {{ r.summary }}
+
+        {% if plates is defined and plates %}{% set p_item = plates | nth(n=loop.index0) %}{% if p_item and p_item.plate and p_item.plate.Ok %}
+        ![{{ r.name }} 概念原画]({{ p_item.plate.Ok.plate_image.path }})
+        {% endif %}{% endif %}
+        {% endfor %}
+
+        ## 四、核心阵营制衡拓扑与灵魂人物
+
+        ![阵营权力与资源制衡图]({{ fac_png }})
+
+        | 阵营名称 | 核心信条 | 掌控稀缺资源 | 对外同盟与暗战关系 |
+        | --- | --- | --- | --- |
+        {% for f in codex.factions %}| **{{ f.name }}** | {{ f.creed }} | {{ f.resource }} | {{ f.relations }} |
+        {% endfor %}
+
+        ### 代表性灵魂人物
+
+        {% for ch in codex.iconic_characters %}
+        - **{{ ch.name }}**（所属：{{ ch.faction }}）
+          - **公开目标**：{{ ch.public_goal }}
+          - **隐秘软肋**：{{ ch.hidden_flaw }}
+          - **视觉形象**：{{ ch.visual_portrait }}
+        {% endfor %}
+
+        ## 五、主线序章与多分支抉择任务链
+
+        ![分支剧情抉择状态图]({{ qst_png }})
+
+        {{ codex.branching_quest }}
+
+  - id: world_md
+    type: render_markdown
+    dependencies: ["bible_markdown_tpl"]
+    input_mapping:
+      markdown: "{{ nodes.bible_markdown_tpl.outputs.output }}"
+
+  - id: world_html
+    type: render_document
+    dependencies: ["bible_markdown_tpl"]
+    input_mapping:
+      markdown: "{{ nodes.bible_markdown_tpl.outputs.output }}"
+    parameters:
+      format: html
+      toc: true
+
+  - id: world_pdf
+    type: render_document
+    dependencies: ["bible_markdown_tpl", "options"]
+    run_if: "{{ nodes.options.outputs.do_pdf }}"
+    input_mapping:
+      markdown: "{{ nodes.bible_markdown_tpl.outputs.output }}"
+    parameters:
+      format: pdf
+      toc: true
+
+  - id: deliverable
+    type: template
+    dependencies: ["world_codex", "key_art_atelier", "faction_diagram", "quest_diagram", "lore_mindmap", "world_md", "world_html", "options"]
+    input_mapping:
+      codex: "{{ nodes.world_codex.outputs.output }}"
+      hero_art: "{{ nodes.key_art_atelier.outputs.key_art_path }}"
+      art_rounds: "{{ nodes.key_art_atelier.outputs.iterations_used }}"
+      fac_svg: "{{ nodes.faction_diagram.outputs.faction_diagram_svg }}"
+      qst_svg: "{{ nodes.quest_diagram.outputs.quest_diagram_svg }}"
+      mm_svg: "{{ nodes.lore_mindmap.outputs.lore_mindmap_output }}"
+      md_file: "{{ nodes.world_md.outputs.world_md_output }}"
+      html_file: "{{ nodes.world_html.outputs.world_html_output }}"
+      pdf_file: "{{ nodes.world_pdf.outputs.world_pdf_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "report",
+          "title": {{ codex.world_name | json_encode() }},
+          "content": {
+            "subtitle": {{ codex.subtitle | json_encode() }},
+            "elevator_pitch": {{ codex.elevator_pitch | json_encode() }},
+            "art_polish_rounds": {{ art_rounds | default(value=1) }},
+            "factions": {{ codex.factions | json_encode() }},
+            "iconic_characters": {{ codex.iconic_characters | json_encode() }},
+            "regions": {{ codex.regions | json_encode() }}
+          },
+          "citations": [],
+          "files": [
+            {"node_id": "world_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
+            {"node_id": "world_html", "name": {{ html_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
+            {"node_id": "faction_diagram", "name": {{ fac_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "quest_diagram", "name": {{ qst_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
+            {"node_id": "lore_mindmap", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% if pdf_file is defined and pdf_file %},
+            {"node_id": "world_pdf", "name": {{ pdf_file | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
+          ]
+        }}

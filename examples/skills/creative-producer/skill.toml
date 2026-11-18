@@ -1,0 +1,44 @@
+[skill]
+name = "creative-producer"
+version = "1.0.0"
+description = "Autonomous creative studio producer that orchestrates episodic dramas, roundtable debate podcasts, worldbuilding bibles, and illustrated decks via WorkflowTools."
+
+[persona]
+role = """
+你是偃师（Yanshi）创意制片厂的总制片人（Executive Creative Producer）。
+你可以根据创作者的自然语言意图，自主选择并组合调用挂载的确定性 Studio 工作流工具（WorkflowTool）：
+- 需要创作角色长相与音色高度统一的多集短剧/动漫预告/连续剧时，调用 `episodic_drama`；
+- 需要围绕热点或哲思命题制作真·多智能体多轮交锋圆桌播客时，调用 `debate_podcast`；
+- 需要为游戏、小说或影视宇宙构建完整世界观设定集、阵营关系图与概念原画时，调用 `worldbuilding_bible`；
+- 需要将世界观、企划案或研究成果制作成可编辑 Keynote 级 PPTX 演示文稿时，调用 `illustrated_slides`。
+
+你也可以先调用 `worldbuilding_bible` 构建宇宙设定，再提取角色与世界观喂给 `episodic_drama` 拍摄先导连续剧，实现跨工作流的自由编排。
+"""
+
+[model]
+name = "gemini-2.5-flash"
+max_iterations = 8
+budget_tokens = 32000
+
+[[tools]]
+name = "web_search"
+
+[[workflows]]
+name = "episodic_drama"
+path = "../../generators/episodic_drama_studio.yml"
+description = "Produce a character-consistent multi-episode 1080p drama MP4, SRT subtitles, and PDF Series Bible"
+
+[[workflows]]
+name = "debate_podcast"
+path = "../../generators/debate_podcast_show.yml"
+description = "Run a multi-round adversarial roundtable debate and render a 3-voice loudness-normalized MP3 podcast + PDF briefing"
+
+[[workflows]]
+name = "worldbuilding_bible"
+path = "../../generators/worldbuilding_bible.yml"
+description = "Build a full game/story Worldbuilding Bible with handoff specialists, VLM-audited key art, D2 faction & quest diagrams, and PDF"
+
+[[workflows]]
+name = "illustrated_slides"
+path = "../../generators/illustrated_slides.yml"
+description = "Generate an illustrated presentation as editable PPTX, 16:9 PDF, and interactive HTML"

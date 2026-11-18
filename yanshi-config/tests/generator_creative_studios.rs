@@ -81,3 +81,16 @@ fn debate_podcast_show_and_panel_skills_validate_strictly() {
   }
   assert_strict_valid_and_builds("debate_podcast_show.yml");
 }
+
+#[test]
+fn worldbuilding_bible_and_producer_skills_validate_strictly() {
+  for skill in [
+    "examples/skills/worldbuilders/lore-architect",
+    "examples/skills/worldbuilders/faction-character-smith",
+    "examples/skills/worldbuilders/quest-narrative-designer",
+    "examples/skills/creative-producer",
+  ] {
+    assert_skill_valid(skill);
+  }
+  assert_strict_valid_and_builds("worldbuilding_bible.yml");
+}
