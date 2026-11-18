@@ -11,7 +11,7 @@ import {
 import { inspectYamlLocally, WORKFLOW_PRESETS } from './presets';
 
 describe('generatorCatalog & WORKFLOW_PRESETS', () => {
-  it('loads all 15 official Content Studio generator templates from examples/generators', () => {
+  it('loads all 18 official Content Studio generator templates from examples/generators', () => {
     const expectedIds = [
       'illustrated_slides',
       'repo_architecture',
@@ -19,6 +19,9 @@ describe('generatorCatalog & WORKFLOW_PRESETS', () => {
       'paper_reader',
       'video_summarizer',
       'tech_slides_video',
+      'episodic_drama_studio',
+      'debate_podcast_show',
+      'worldbuilding_bible',
       'slides',
       'video_overview',
       'report',
@@ -39,6 +42,13 @@ describe('generatorCatalog & WORKFLOW_PRESETS', () => {
       expect(inspected.nodes.length).toBeGreaterThan(0);
       expect(inspected.execution_order.length).toBe(inspected.nodes.length);
     }
+
+    const drama = inspectYamlLocally(
+      OFFICIAL_GENERATOR_PRESETS.find((p) => p.id === 'episodic_drama_studio')!.yaml,
+    );
+    const castLoop = drama.nodes.find((n) => n.id === 'cast_sheet_atelier');
+    expect(castLoop?.type).toBe('while');
+    expect((castLoop?.sub_nodes ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   it('exposes official generators plus zero-key instant demos in WORKFLOW_PRESETS', () => {
@@ -46,11 +56,14 @@ describe('generatorCatalog & WORKFLOW_PRESETS', () => {
     expect(allIds).toContain('illustrated_slides');
     expect(allIds).toContain('backend_project_planner');
     expect(allIds).toContain('tech_slides_video');
+    expect(allIds).toContain('episodic_drama_studio');
+    expect(allIds).toContain('debate_podcast_show');
+    expect(allIds).toContain('worldbuilding_bible');
     expect(allIds).toContain('report');
     expect(allIds).toContain('audio_overview');
     expect(allIds).toContain('instant_slide_render_demo');
     expect(allIds).toContain('instant_step_debug_demo');
-    expect(WORKFLOW_PRESETS.length).toBe(17);
+    expect(WORKFLOW_PRESETS.length).toBe(20);
   });
 
   it('builds safe .yml download filenames from workflow names', () => {

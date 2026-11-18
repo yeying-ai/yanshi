@@ -3912,6 +3912,7 @@ button.studio-upload-btn:hover {
 }
 
 .studio-cat-pill {
+  position: relative;
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid #e2e8f0;
@@ -3927,10 +3928,18 @@ button.studio-upload-btn:hover {
   color: #0f172a;
 }
 
-.studio-cat-pill--active {
+.studio-cat-pill--active,
+.studio-cat-pill[aria-selected='true'] {
   background: #0f766e;
   border-color: #0f766e;
   color: #ffffff;
+}
+
+.studio-cat-pill[role='tab'][aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  inset: auto 7px 1px;
+  border-block-end: 2px solid currentColor;
 }
 
 .studio-preset-list {

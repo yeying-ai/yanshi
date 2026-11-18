@@ -2105,6 +2105,7 @@ export function WorkflowStudioPage({
                       [
                         '全部',
                         '课件与视频',
+                        '创意制片与设定',
                         '研究报告与信息图',
                         '导图与工程图',
                         '播客音频',

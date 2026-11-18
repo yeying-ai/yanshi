@@ -1,6 +1,8 @@
 import audioOverviewYaml from '../../../examples/generators/audio_overview.yml?raw';
 import backendProjectPlannerYaml from '../../../examples/generators/backend_project_planner.yml?raw';
 import circuitDiagramYaml from '../../../examples/generators/circuit_diagram.yml?raw';
+import debatePodcastShowYaml from '../../../examples/generators/debate_podcast_show.yml?raw';
+import episodicDramaStudioYaml from '../../../examples/generators/episodic_drama_studio.yml?raw';
 import flashcardsYaml from '../../../examples/generators/flashcards.yml?raw';
 import illustratedSlidesYaml from '../../../examples/generators/illustrated_slides.yml?raw';
 import infographicYaml from '../../../examples/generators/infographic.yml?raw';
@@ -13,9 +15,11 @@ import slidesYaml from '../../../examples/generators/slides.yml?raw';
 import techSlidesVideoYaml from '../../../examples/generators/tech_slides_video.yml?raw';
 import videoOverviewYaml from '../../../examples/generators/video_overview.yml?raw';
 import videoSummarizerYaml from '../../../examples/generators/video_summarizer.yml?raw';
+import worldbuildingBibleYaml from '../../../examples/generators/worldbuilding_bible.yml?raw';
 
 export type PresetCategory =
   | '课件与视频'
+  | '创意制片与设定'
   | '研究报告与信息图'
   | '导图与工程图'
   | '播客音频'
@@ -103,6 +107,30 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
     badge: '旗舰工作流',
     category: '课件与视频',
     yaml: techSlidesVideoYaml,
+  },
+  {
+    id: 'episodic_drama_studio',
+    title: '角色一致多集连续剧制片厂 (Episodic Drama Studio)',
+    subtitle: '黑板编剧室 → VLM 闭环定妆母图 → 跨集图生图/图生视频锚定角色外观 + 专属声纹配音 → 连续剧成片 MP4 + 设定圣经 PDF',
+    badge: '多范式创意',
+    category: '创意制片与设定',
+    yaml: episodicDramaStudioYaml,
+  },
+  {
+    id: 'debate_podcast_show',
+    title: '多智能体三声线圆桌辩论播客 (Debate Podcast Show)',
+    subtitle: '正反双方 2 轮对抗辩论 + 主持终审裁决 → 三声线 TTS + EBU R128 响度母带 MP3 + 概念封面 + 思辨特刊 PDF',
+    badge: '多范式思辨',
+    category: '播客音频',
+    yaml: debatePodcastShowYaml,
+  },
+  {
+    id: 'worldbuilding_bible',
+    title: '多专家接力原创世界观设定圣经 (Worldbuilding Bible)',
+    subtitle: '三专家 Handoff 接力（纪元法则 → 阵营人物 → 分支任务）→ VLM 审片主视觉 + D2 势力/叙事状态图 + 导图 + 精装设定集 PDF',
+    badge: '多范式创意',
+    category: '创意制片与设定',
+    yaml: worldbuildingBibleYaml,
   },
   {
     id: 'slides',
