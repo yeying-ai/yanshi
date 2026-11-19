@@ -402,6 +402,33 @@ impl ServerClient {
     expect_empty_success(response).await
   }
 
+  /// `GET /v1/notebooks/{id}/export` — export a portable `NotebookExportBundle`.
+  pub async fn export_notebook(&self, notebook_id: &str) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/export", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/export")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/import` — import a portable `NotebookExportBundle`.
+  pub async fn import_notebook(&self, body: &Value) -> Result<Value> {
+    let response = self
+      .http
+      .post(self.url("/v1/notebooks/import"))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/import")?;
+    expect_success(response).await
+  }
+
   /// `POST /v1/notebooks/{id}/sources` — submit a URL, text, file, or recording source.
   pub async fn add_notebook_source(&self, notebook_id: &str, payload: &Value) -> Result<Value> {
     let path = format!("/v1/notebooks/{}/sources", encode_uri_segment(notebook_id));
@@ -549,6 +576,26 @@ impl ServerClient {
       .await
       .context("failed to DELETE /v1/notebooks/{id}/artifacts/{artifact_id}")?;
     expect_empty_success(response).await
+  }
+
+  /// `GET /v1/notebooks/{id}/artifacts.zip` — download all deliverables of a notebook as a `.zip` bundle.
+  pub async fn download_notebook_artifacts_zip(&self, notebook_id: &str) -> Result<Vec<u8>> {
+    let path = format!(
+      "/v1/notebooks/{}/artifacts.zip",
+      encode_uri_segment(notebook_id)
+    );
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .timeout(std::time::Duration::from_secs(300))
+      .build()
+      .context("failed to build notebook zip download HTTP client")?;
+    let response = client
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/artifacts.zip")?;
+    expect_bytes_success(response).await
   }
 
   /// `GET /v1/runs/{id}/artifacts` — list artifacts produced by a run.

@@ -153,12 +153,53 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
         async move {
           assert_eq!(body["kind"], "data_table");
           assert_eq!(body["params"]["max_rows"], 10);
+          assert_eq!(body["cost_limit_usd"], 2.5);
           Json(json!({
             "run_id": run_gen,
             "kind": "data_table",
             "status": "queued"
           }))
         }
+      }),
+    )
+    .route(
+      "/v1/notebooks/:id/export",
+      get(move |Path(id): Path<String>| async move {
+        Json(json!({
+          "version": 1,
+          "notebook": { "id": id, "title": "Macrotidal Estuaries" },
+          "sources": [{
+            "kind": "file",
+            "title": "Basins CSV",
+            "status": "ready",
+            "chunks": [{ "ordinal": 0, "content": "basin: BayOfFundy | peak_m: 16.3", "metadata": {} }]
+          }],
+          "deliverables": [],
+          "markdown_brief": "# Macrotidal Estuaries\n\n## Sources (1)\n"
+        }))
+      }),
+    )
+    .route(
+      "/v1/notebooks/import",
+      post(|Json(body): Json<Value>| async move {
+        assert_eq!(body["title"], "Imported Tidal Copy");
+        assert_eq!(body["bundle"]["version"], 1);
+        Json(json!({
+          "notebook": { "id": Uuid::new_v4(), "title": "Imported Tidal Copy" },
+          "imported_sources": 1,
+          "imported_chunks": 1
+        }))
+      }),
+    )
+    .route(
+      "/v1/notebooks/:id/artifacts.zip",
+      get(|| async {
+        (
+          StatusCode::OK,
+          [("content-type", "application/zip")],
+          b"PK\x03\x04mockzip".to_vec(),
+        )
+          .into_response()
       }),
     )
     .route(
@@ -328,7 +369,7 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
       .expect("parse turns 2");
   assert_eq!(saved_turns2.len(), 2);
 
-  // 5. `generate` with `--input max_rows=10` and `--output-dir`
+  // 5. `generate` with `--input max_rows=10`, `--cost-limit-usd 2.5`, and `--output-dir`
   let generated = bin_run(vec![
     "generate".into(),
     nb_id.clone(),
@@ -337,6 +378,8 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
     "mock-ask".into(),
     "--input".into(),
     "max_rows=10".into(),
+    "--cost-limit-usd".into(),
+    "2.5".into(),
     "--source-id".into(),
     src_id.clone(),
     "--output-dir".into(),
@@ -349,6 +392,47 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
     .expect("downloaded artifact file");
   assert!(downloaded_csv.contains("Bay of Fundy,16.3"));
   assert!(out_dir.join("artifacts.json").is_file());
+
+  // 5b. `export`, `import`, and `download-artifacts`
+  let bundle_path = temp.path().join("exported-notebook.json");
+  let brief_path = temp.path().join("BRIEFING.md");
+  let exported_receipt = bin_run(vec![
+    "export".into(),
+    nb_id.clone(),
+    "--out".into(),
+    bundle_path.display().to_string(),
+    "--brief-out".into(),
+    brief_path.display().to_string(),
+  ])
+  .await
+  .expect("export");
+  assert_eq!(exported_receipt["version"], 1);
+  assert!(
+    std::fs::read_to_string(&brief_path)
+      .expect("brief")
+      .contains("# Macrotidal Estuaries")
+  );
+  let imported = bin_run(vec![
+    "import".into(),
+    bundle_path.display().to_string(),
+    "--title".into(),
+    "Imported Tidal Copy".into(),
+  ])
+  .await
+  .expect("import");
+  assert_eq!(imported["notebook"]["title"], "Imported Tidal Copy");
+
+  let zip_dest = temp.path().join("nb-archive.zip");
+  let zip_receipt = bin_run(vec![
+    "download-artifacts".into(),
+    nb_id.clone(),
+    "--out".into(),
+    zip_dest.display().to_string(),
+  ])
+  .await
+  .expect("download-artifacts");
+  assert!(zip_receipt["size_bytes"].as_u64().is_some_and(|n| n > 0));
+  assert!(zip_dest.is_file());
 
   // 6. Remove artifact, remove source & delete notebook
   let removed_art = bin_run(vec!["remove-artifact".into(), nb_id.clone(), art_id])
@@ -496,6 +580,56 @@ async fn notebook_cli_runs_against_live_postgres_gateway_when_configured() {
   assert_eq!(
     nb_arts["artifacts"][0]["deliverable"]["title"],
     "Severn Tidal Table"
+  );
+
+  // Live PG round-trip: `download-artifacts` (.zip) + `export` -> `import` -> `search`
+  let live_zip = temp.path().join("live-nb.zip");
+  let zip_meta = run_cli(vec![
+    "download-artifacts".into(),
+    nb_id.clone(),
+    "--out".into(),
+    live_zip.display().to_string(),
+  ])
+  .await
+  .expect("live download-artifacts");
+  assert!(zip_meta["size_bytes"].as_u64().is_some_and(|n| n > 0));
+  let live_zip_bytes = std::fs::read(&live_zip).expect("read live zip");
+  assert!(live_zip_bytes.starts_with(b"PK\x03\x04"));
+  assert!(
+    live_zip_bytes
+      .windows(b"BRIEFING.md".len())
+      .any(|w| w == b"BRIEFING.md"),
+    "notebook zip central directory must contain BRIEFING.md"
+  );
+
+  let live_bundle = temp.path().join("live-bundle.json");
+  let _ = run_cli(vec![
+    "export".into(),
+    nb_id.clone(),
+    "--out".into(),
+    live_bundle.display().to_string(),
+  ])
+  .await
+  .expect("live export");
+  let imported = run_cli(vec![
+    "import".into(),
+    live_bundle.display().to_string(),
+    "--title".into(),
+    "Live PG Imported".into(),
+  ])
+  .await
+  .expect("live import");
+  let imported_id = imported["notebook"]["id"]
+    .as_str()
+    .expect("imported id")
+    .to_string();
+  let imported_search = run_cli(vec!["search".into(), imported_id, "Severn".into()])
+    .await
+    .expect("search imported");
+  assert!(
+    imported_search["chunks"]
+      .as_array()
+      .is_some_and(|arr| !arr.is_empty())
   );
 
   let deleted = run_cli(vec!["delete".into(), nb_id]).await.expect("delete");

@@ -70,6 +70,31 @@ pub enum NotebookCommands {
     /// Notebook UUID
     notebook_id: String,
   },
+  /// Export a portable JSON bundle (and optional Markdown research dossier) of a notebook
+  Export {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Optional path to write the portable JSON bundle (prints to stdout when omitted)
+    #[arg(
+      short = 'f',
+      long = "out",
+      visible_alias = "bundle-out",
+      value_name = "PATH"
+    )]
+    out: Option<PathBuf>,
+    /// Optional path to write the cited Markdown research dossier (`markdown_brief`)
+    #[arg(long, value_name = "PATH")]
+    brief_out: Option<PathBuf>,
+  },
+  /// Import a portable notebook JSON bundle (`POST /v1/notebooks/import`)
+  Import {
+    /// Path to a `.json` bundle produced by `yanshi notebook export` or `/ui/notebooks`
+    #[arg(value_name = "BUNDLE_JSON")]
+    file: PathBuf,
+    /// Optional title override for the imported notebook
+    #[arg(long)]
+    title: Option<String>,
+  },
   /// Add a URL, pasted text, local document (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html), or audio recording
   AddSource {
     /// Notebook UUID
@@ -163,6 +188,9 @@ pub enum NotebookCommands {
     /// Restrict generation to specific source UUIDs (repeatable)
     #[arg(long = "source-id", value_name = "UUID")]
     source_ids: Vec<String>,
+    /// Optional USD spend cap for this generation run (`> 0`)
+    #[arg(long, value_name = "USD")]
+    cost_limit_usd: Option<f64>,
     /// Poll `/v1/runs/{run_id}` until the generator run finishes
     #[arg(long)]
     wait: bool,
@@ -184,6 +212,14 @@ pub enum NotebookCommands {
     notebook_id: String,
     /// Artifact UUID
     artifact_id: String,
+  },
+  /// Download all deliverables attached to a notebook as a single `.zip` bundle (with `BRIEFING.md`)
+  DownloadArtifacts {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Destination `.zip` file path (defaults to `yanshi-notebook-<short_id>-artifacts.zip`)
+    #[arg(short = 'f', long = "out", value_name = "ZIP_PATH")]
+    out: Option<PathBuf>,
   },
 }
 
@@ -315,6 +351,84 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         );
       } else {
         println!("Deleted notebook {notebook_id}");
+      }
+    }
+    NotebookCommands::Export {
+      notebook_id,
+      out,
+      brief_out,
+    } => {
+      let bundle = client.export_notebook(&notebook_id).await?;
+      if let Some(path) = &out {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+          std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&bundle)?)
+          .with_context(|| format!("failed to write bundle {}", path.display()))?;
+      }
+      if let Some(path) = &brief_out {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+          std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let brief = bundle["markdown_brief"].as_str().unwrap_or("");
+        std::fs::write(path, brief.as_bytes())
+          .with_context(|| format!("failed to write markdown brief {}", path.display()))?;
+      }
+      if json_mode {
+        if out.is_some() || brief_out.is_some() {
+          println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+              "notebook_id": notebook_id,
+              "version": bundle["version"],
+              "bundle_path": out.as_ref().map(|p| p.display().to_string()),
+              "brief_path": brief_out.as_ref().map(|p| p.display().to_string()),
+              "sources": bundle["sources"].as_array().map(Vec::len).unwrap_or(0),
+              "deliverables": bundle["deliverables"].as_array().map(Vec::len).unwrap_or(0),
+            }))?
+          );
+        } else {
+          println!("{}", serde_json::to_string_pretty(&bundle)?);
+        }
+      } else if out.is_none() && brief_out.is_none() {
+        println!("{}", bundle["markdown_brief"].as_str().unwrap_or(""));
+      } else {
+        if let Some(path) = &out {
+          println!("Exported notebook bundle -> {}", path.display());
+        }
+        if let Some(path) = &brief_out {
+          println!("Exported markdown brief -> {}", path.display());
+        }
+      }
+    }
+    NotebookCommands::Import { file, title } => {
+      let raw = std::fs::read_to_string(&file)
+        .with_context(|| format!("failed to read notebook bundle {}", file.display()))?;
+      let parsed: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("{} is not valid JSON", file.display()))?;
+      let body = match title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+      {
+        Some(override_title) => json!({
+          "bundle": parsed,
+          "title": override_title,
+        }),
+        None => parsed,
+      };
+      let imported = client.import_notebook(&body).await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&imported)?);
+      } else {
+        println!(
+          "Imported notebook {}  {} ({} sources, {} chunks)",
+          imported["notebook"]["id"].as_str().unwrap_or("?"),
+          imported["notebook"]["title"].as_str().unwrap_or(""),
+          imported["imported_sources"].as_u64().unwrap_or(0),
+          imported["imported_chunks"].as_u64().unwrap_or(0)
+        );
       }
     }
     NotebookCommands::AddSource {
@@ -520,10 +634,14 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
       model,
       input,
       source_ids,
+      cost_limit_usd,
       wait,
       output_dir,
       timeout_secs,
     } => {
+      if let Some(limit) = cost_limit_usd {
+        yanshi_config::config::v2::validate_cost_limit(limit).map_err(anyhow::Error::msg)?;
+      }
       let pairs = parse_input_flag_tokens(&input)?;
       let mut params = serde_json::Map::new();
       for (k, v) in pairs {
@@ -540,6 +658,11 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
           "source_ids".to_string(),
           Value::Array(source_ids.into_iter().map(Value::String).collect()),
         );
+      }
+      if let Some(limit) = cost_limit_usd
+        && let Some(num) = serde_json::Number::from_f64(limit)
+      {
+        req_body.insert("cost_limit_usd".to_string(), Value::Number(num));
       }
 
       let gen_resp = client
@@ -697,6 +820,36 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         );
       } else {
         println!("Removed artifact {artifact_id} from notebook {notebook_id}");
+      }
+    }
+    NotebookCommands::DownloadArtifacts { notebook_id, out } => {
+      let zip_bytes = client.download_notebook_artifacts_zip(&notebook_id).await?;
+      let short_id: String = notebook_id.chars().take(8).collect();
+      let dest =
+        out.unwrap_or_else(|| PathBuf::from(format!("yanshi-notebook-{short_id}-artifacts.zip")));
+      if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+          .with_context(|| format!("failed to create {}", parent.display()))?;
+      }
+      let sha256 = format!("{:x}", Sha256::digest(&zip_bytes));
+      std::fs::write(&dest, &zip_bytes)
+        .with_context(|| format!("failed to write {}", dest.display()))?;
+      if json_mode {
+        println!(
+          "{}",
+          serde_json::to_string_pretty(&json!({
+            "notebook_id": notebook_id,
+            "path": dest.display().to_string(),
+            "size_bytes": zip_bytes.len(),
+            "sha256": sha256,
+          }))?
+        );
+      } else {
+        println!(
+          "Saved notebook archive -> {} ({} bytes)",
+          dest.display(),
+          zip_bytes.len()
+        );
       }
     }
   }

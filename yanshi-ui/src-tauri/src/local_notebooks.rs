@@ -3,8 +3,10 @@
 //! Mirrors `yanshi-server/src/notebooks.rs` 1:1 on top of local JSON files
 //! under `<base_dir>/_notebooks/<notebook_id>/`:
 //! - `POST   /v1/notebooks`
+//! - `POST   /v1/notebooks/import`
 //! - `GET    /v1/notebooks`
 //! - `GET    /v1/notebooks/:id`
+//! - `GET    /v1/notebooks/:id/export`
 //! - `PATCH  /v1/notebooks/:id`
 //! - `DELETE /v1/notebooks/:id`
 //! - `POST   /v1/notebooks/:id/sources` (`url` | `text` | `file` | `recording`)
@@ -12,8 +14,9 @@
 //! - `GET    /v1/notebooks/:id/chunks/:chunk_id`
 //! - `GET    /v1/notebooks/:id/search?q=&top_k=&source_ids=`
 //! - `POST   /v1/notebooks/:id/ask` (including multi-turn `history`)
-//! - `POST   /v1/notebooks/:id/generate` (all 12 compiled-in Studio generators)
+//! - `POST   /v1/notebooks/:id/generate` (all 12 compiled-in Studio generators + `cost_limit_usd`)
 //! - `GET    /v1/notebooks/:id/artifacts` (including `deliverable` JSON)
+//! - `GET    /v1/notebooks/:id/artifacts.zip` (`<kind>/<file>` + `BRIEFING.md` + manifest)
 //! - `DELETE /v1/notebooks/:id/artifacts/:artifact_id`
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -22,8 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
   Json, Router,
+  body::Body,
   extract::{DefaultBodyLimit, Path as RoutePath, Query, State},
-  http::{HeaderMap, StatusCode},
+  http::{HeaderMap, HeaderValue, StatusCode, header},
   response::{IntoResponse, Response},
   routing::{delete, get, post},
 };
@@ -32,6 +36,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 use yanshi_rag::{
   Bm25KnowledgeBackend, KnowledgeBackend,
@@ -410,11 +415,16 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
   Router::new()
     .route("/v1/notebooks", get(list_notebooks).post(create_notebook))
     .route(
+      "/v1/notebooks/import",
+      post(import_notebook).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+    )
+    .route(
       "/v1/notebooks/:id",
       get(get_notebook)
         .patch(update_notebook)
         .delete(delete_notebook),
     )
+    .route("/v1/notebooks/:id/export", get(export_notebook))
     .route(
       "/v1/notebooks/:id/sources",
       post(add_source).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
@@ -431,6 +441,10 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
     .route("/v1/notebooks/:id/ask", post(ask_notebook))
     .route("/v1/notebooks/:id/generate", post(generate_from_notebook))
     .route("/v1/notebooks/:id/artifacts", get(list_notebook_artifacts))
+    .route(
+      "/v1/notebooks/:id/artifacts.zip",
+      get(download_notebook_artifacts_zip),
+    )
     .route(
       "/v1/notebooks/:id/artifacts/:artifact_id",
       delete(delete_notebook_artifact),
@@ -2461,6 +2475,8 @@ struct GenerateRequest {
   source_ids: Option<Vec<Uuid>>,
   #[serde(default)]
   model: Option<String>,
+  #[serde(default)]
+  cost_limit_usd: Option<f64>,
 }
 
 async fn generate_from_notebook(
@@ -2500,6 +2516,11 @@ async fn generate_from_notebook(
     Ok(m) => m,
     Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
   };
+  if let Some(limit) = req.cost_limit_usd
+    && let Err(msg) = yanshi_config::config::v2::validate_cost_limit(limit)
+  {
+    return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
+  }
 
   let definition = match yanshi_config::executor::parse_workflow_definition(template) {
     Ok(def) => def,
@@ -2584,7 +2605,7 @@ async fn generate_from_notebook(
       workflow: (*template).to_string(),
       inputs,
       model: Some(model),
-      cost_limit_usd: None,
+      cost_limit_usd: req.cost_limit_usd,
       debug_controller: None,
       on_complete: Some(hook),
     })
@@ -2757,6 +2778,706 @@ async fn delete_notebook_artifact(
   entry.notebook.updated_at = Utc::now();
   let _ = write_notebook_bundle_sync(&nb_dir, entry);
   StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Portable bundle export / import & deliverables `.zip` (AD2) ─────────
+
+const NOTEBOOK_BUNDLE_VERSION: u32 = 1;
+const MAX_IMPORT_SOURCES: usize = 200;
+const MAX_IMPORT_CHUNKS_PER_SOURCE: usize = 2_000;
+
+fn default_json_object() -> Value {
+  json!({})
+}
+
+fn default_ready_status() -> String {
+  "ready".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportedNotebookMeta {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  id: Option<Uuid>,
+  title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  created_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportedSourceChunk {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  chunk_id: Option<String>,
+  #[serde(default)]
+  ordinal: i32,
+  content: String,
+  #[serde(default = "default_json_object")]
+  metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportedNotebookSource {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  id: Option<Uuid>,
+  kind: String,
+  title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  uri: Option<String>,
+  #[serde(default = "default_ready_status")]
+  status: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  error: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  sha256: Option<String>,
+  #[serde(default)]
+  chunks: Vec<ExportedSourceChunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportedNotebookDeliverable {
+  artifact_id: Uuid,
+  run_id: Uuid,
+  kind: String,
+  name: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  mime_type: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  size_bytes: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  sha256: Option<String>,
+  created_at: DateTime<Utc>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  deliverable: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NotebookExportBundle {
+  version: u32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  exported_at: Option<DateTime<Utc>>,
+  notebook: ExportedNotebookMeta,
+  #[serde(default)]
+  sources: Vec<ExportedNotebookSource>,
+  #[serde(default)]
+  deliverables: Vec<ExportedNotebookDeliverable>,
+  #[serde(default)]
+  markdown_brief: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ImportNotebookRequest {
+  Wrapped {
+    bundle: NotebookExportBundle,
+    #[serde(default)]
+    title: Option<String>,
+  },
+  Direct(NotebookExportBundle),
+}
+
+fn render_local_notebook_markdown_brief(
+  title: &str,
+  sources: &[LocalSource],
+  chunks: &[LocalSourceChunk],
+  artifacts: &[LocalNotebookArtifact],
+) -> String {
+  let mut chunk_counts: HashMap<Uuid, usize> = HashMap::new();
+  let mut chunk_lookup: HashMap<&str, (Uuid, i32)> = HashMap::with_capacity(chunks.len());
+  for c in chunks {
+    *chunk_counts.entry(c.source_id).or_insert(0) += 1;
+    chunk_lookup.insert(c.chunk_id.as_str(), (c.source_id, c.ordinal));
+  }
+  let source_titles: HashMap<Uuid, &str> =
+    sources.iter().map(|s| (s.id, s.title.as_str())).collect();
+
+  let mut lines = vec![
+    format!("# {title}"),
+    String::new(),
+    format!("## Sources ({})", sources.len()),
+  ];
+  if sources.is_empty() {
+    lines.push("- *(no sources ingested)*".to_string());
+  } else {
+    for src in sources {
+      let count = chunk_counts.get(&src.id).copied().unwrap_or(0);
+      let uri_suffix = src
+        .uri
+        .as_deref()
+        .filter(|u| !u.is_empty() && *u != src.title)
+        .map(|u| format!(" — `{u}`"))
+        .unwrap_or_default();
+      lines.push(format!(
+        "- **{}** (`{}`, status: `{}`, {} chunks){}",
+        src.title, src.kind, src.status, count, uri_suffix
+      ));
+    }
+  }
+  lines.push(String::new());
+
+  let mut group_order: Vec<(Uuid, String)> = Vec::new();
+  let mut groups: HashMap<(Uuid, String), Vec<&LocalNotebookArtifact>> = HashMap::new();
+  for item in artifacts {
+    let key = (item.run_id, item.kind.clone());
+    let entry = groups.entry(key.clone()).or_insert_with(|| {
+      group_order.push(key);
+      Vec::new()
+    });
+    entry.push(item);
+  }
+
+  lines.push(format!("## Deliverables ({})", group_order.len()));
+  if group_order.is_empty() {
+    lines.push("- *(no deliverables generated)*".to_string());
+  } else {
+    for key in group_order {
+      let Some(items) = groups.get(&key) else {
+        continue;
+      };
+      let first = items[0];
+      let deliverable = items.iter().find_map(|a| a.deliverable.as_ref());
+      let heading = deliverable
+        .and_then(|d| d.get("title"))
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(first.kind.as_str());
+      lines.push(String::new());
+      lines.push(format!("### {heading} (`{}`)", first.kind));
+      let files_list: Vec<String> = items.iter().map(|a| format!("`{}`", a.name)).collect();
+      lines.push(format!("- Files: {}", files_list.join(", ")));
+
+      if let Some(citations) = deliverable
+        .and_then(|d| d.get("citations"))
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+      {
+        lines.push("- Citations:".to_string());
+        let mut seen_quotes: HashSet<(String, String)> = HashSet::new();
+        for cit in citations {
+          let cid = cit
+            .get("chunk_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+          let quote = cit
+            .get("quote")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+          if cid.is_empty() && quote.is_empty() {
+            continue;
+          }
+          if !seen_quotes.insert((cid.to_string(), quote.to_string())) {
+            continue;
+          }
+          let provenance = if let Some(&(src_id, ordinal)) = chunk_lookup.get(cid) {
+            let src_title = source_titles.get(&src_id).copied().unwrap_or("source");
+            format!("{src_title} #{ordinal} (`{cid}`)")
+          } else {
+            format!("`{cid}`")
+          };
+          if quote.is_empty() {
+            lines.push(format!("  - {provenance}"));
+          } else {
+            lines.push(format!("  - \"{quote}\" — *{provenance}*"));
+          }
+        }
+      }
+    }
+  }
+  lines.push(String::new());
+  lines.join("\n")
+}
+
+async fn export_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let bundle = {
+    let guard = engine.notebooks().lock_entries();
+    let Some(entry) = guard.get(&id).filter(|e| e.notebook.tenant_id == tenant) else {
+      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+    };
+    let ready_chunks = ready_chunks_for_entry(entry, None);
+    let mut chunks_by_source: HashMap<Uuid, Vec<ExportedSourceChunk>> = HashMap::new();
+    for chunk in &ready_chunks {
+      chunks_by_source
+        .entry(chunk.source_id)
+        .or_default()
+        .push(ExportedSourceChunk {
+          chunk_id: Some(chunk.chunk_id.clone()),
+          ordinal: chunk.ordinal,
+          content: chunk.content.clone(),
+          metadata: chunk.metadata.clone(),
+        });
+    }
+    for list in chunks_by_source.values_mut() {
+      list.sort_by_key(|c| c.ordinal);
+    }
+
+    let exported_sources: Vec<ExportedNotebookSource> = entry
+      .sources
+      .iter()
+      .map(|src| ExportedNotebookSource {
+        id: Some(src.id),
+        kind: src.kind.clone(),
+        title: src.title.clone(),
+        uri: src.uri.clone(),
+        status: src.status.clone(),
+        error: src.error.clone(),
+        sha256: src.sha256.clone(),
+        chunks: chunks_by_source.remove(&src.id).unwrap_or_default(),
+      })
+      .collect();
+
+    let exported_deliverables: Vec<ExportedNotebookDeliverable> = entry
+      .artifacts
+      .iter()
+      .map(|item| ExportedNotebookDeliverable {
+        artifact_id: item.id,
+        run_id: item.run_id,
+        kind: item.kind.clone(),
+        name: item.name.clone(),
+        mime_type: item.mime_type.clone(),
+        size_bytes: item.size_bytes,
+        sha256: item.sha256.clone(),
+        created_at: item.created_at,
+        deliverable: item.deliverable.clone(),
+      })
+      .collect();
+
+    let markdown_brief = render_local_notebook_markdown_brief(
+      &entry.notebook.title,
+      &entry.sources,
+      &ready_chunks,
+      &entry.artifacts,
+    );
+
+    NotebookExportBundle {
+      version: NOTEBOOK_BUNDLE_VERSION,
+      exported_at: Some(Utc::now()),
+      notebook: ExportedNotebookMeta {
+        id: Some(entry.notebook.id),
+        title: entry.notebook.title.clone(),
+        created_at: Some(entry.notebook.created_at),
+        updated_at: Some(entry.notebook.updated_at),
+      },
+      sources: exported_sources,
+      deliverables: exported_deliverables,
+      markdown_brief,
+    }
+  };
+  (StatusCode::OK, Json(bundle)).into_response()
+}
+
+async fn import_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  Json(req): Json<ImportNotebookRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let (bundle, title_override) = match req {
+    ImportNotebookRequest::Wrapped { bundle, title } => (bundle, title),
+    ImportNotebookRequest::Direct(bundle) => (bundle, None),
+  };
+  if bundle.version != NOTEBOOK_BUNDLE_VERSION {
+    return notebook_error_json(
+      StatusCode::BAD_REQUEST,
+      &format!(
+        "unsupported notebook bundle version {} (expected {})",
+        bundle.version, NOTEBOOK_BUNDLE_VERSION
+      ),
+    );
+  }
+  let resolved_title = title_override
+    .as_deref()
+    .map(str::trim)
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| bundle.notebook.title.trim())
+    .to_string();
+  if resolved_title.is_empty() {
+    return notebook_error_json(StatusCode::BAD_REQUEST, "notebook title must not be empty");
+  }
+  if bundle.sources.len() > MAX_IMPORT_SOURCES {
+    return notebook_error_json(
+      StatusCode::BAD_REQUEST,
+      &format!(
+        "bundle contains {} sources, exceeding limit of {MAX_IMPORT_SOURCES}",
+        bundle.sources.len()
+      ),
+    );
+  }
+
+  let now = Utc::now();
+  let notebook_id = Uuid::new_v4();
+  let notebook = LocalNotebook {
+    id: notebook_id,
+    tenant_id: tenant.clone(),
+    title: resolved_title,
+    created_at: now,
+    updated_at: now,
+  };
+
+  let mut total_bytes: usize = 0;
+  let mut sources: Vec<LocalSource> = Vec::with_capacity(bundle.sources.len());
+  let mut chunks_by_source: HashMap<Uuid, Vec<LocalSourceChunk>> = HashMap::new();
+  let mut imported_chunks: usize = 0;
+
+  for (idx, src) in bundle.sources.iter().enumerate() {
+    let kind = src.kind.trim();
+    if !matches!(kind, "url" | "file" | "text" | "recording") {
+      return notebook_error_json(
+        StatusCode::BAD_REQUEST,
+        &format!(
+          "source #{idx} has unsupported kind '{}': expected url, file, text, or recording",
+          src.kind
+        ),
+      );
+    }
+    if src.chunks.len() > MAX_IMPORT_CHUNKS_PER_SOURCE {
+      return notebook_error_json(
+        StatusCode::BAD_REQUEST,
+        &format!(
+          "source #{idx} contains {} chunks, exceeding limit of {MAX_IMPORT_CHUNKS_PER_SOURCE}",
+          src.chunks.len()
+        ),
+      );
+    }
+    let source_id = Uuid::new_v4();
+    let source_title = {
+      let t = src.title.trim();
+      if !t.is_empty() {
+        t.to_string()
+      } else if let Some(uri) = src.uri.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        uri.to_string()
+      } else {
+        format!("source-{}", idx + 1)
+      }
+    };
+
+    let mut ordered_raw: Vec<(i32, String, Value)> = Vec::with_capacity(src.chunks.len());
+    for chunk in &src.chunks {
+      let content = chunk.content.trim().to_string();
+      if content.is_empty() {
+        continue;
+      }
+      total_bytes = total_bytes.saturating_add(content.len());
+      if total_bytes > MAX_SOURCE_BYTES {
+        return notebook_error_json(
+          StatusCode::PAYLOAD_TOO_LARGE,
+          &format!("imported chunk text exceeds {MAX_SOURCE_BYTES} bytes"),
+        );
+      }
+      let meta = if chunk.metadata.is_object() {
+        chunk.metadata.clone()
+      } else {
+        json!({})
+      };
+      ordered_raw.push((chunk.ordinal, content, meta));
+    }
+    ordered_raw.sort_by_key(|(ord, _, _)| *ord);
+
+    let local_chunks: Vec<LocalSourceChunk> = ordered_raw
+      .into_iter()
+      .enumerate()
+      .map(|(pos, (_, content, metadata))| {
+        let ordinal = i32::try_from(pos).unwrap_or(0);
+        LocalSourceChunk {
+          chunk_id: format!("{source_id}:{ordinal}"),
+          source_id,
+          notebook_id,
+          tenant_id: tenant.clone(),
+          ordinal,
+          content,
+          metadata,
+        }
+      })
+      .collect();
+
+    let (status, error, sha256) = if !local_chunks.is_empty() {
+      let digest = src
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+          let mut hasher = Sha256::new();
+          for c in &local_chunks {
+            hasher.update(c.content.as_bytes());
+            hasher.update(b"\n");
+          }
+          format!("{:x}", hasher.finalize())
+        });
+      imported_chunks += local_chunks.len();
+      chunks_by_source.insert(source_id, local_chunks);
+      ("ready".to_string(), None, Some(digest))
+    } else {
+      let reason = src
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "imported source had no text chunks".to_string());
+      ("failed".to_string(), Some(reason), None)
+    };
+
+    sources.push(LocalSource {
+      id: source_id,
+      notebook_id,
+      tenant_id: tenant.clone(),
+      kind: kind.to_string(),
+      title: source_title,
+      uri: src
+        .uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string),
+      status,
+      error,
+      sha256,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  let imported_sources = sources.len();
+  let entry = NotebookEntry {
+    notebook: notebook.clone(),
+    sources,
+    chunks_by_source,
+    artifacts: Vec::new(),
+  };
+
+  let notebooks = engine.notebooks();
+  let nb_dir = notebooks.notebook_dir(notebook_id);
+  if let Err(err) = write_notebook_bundle_sync(&nb_dir, &entry) {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to persist imported notebook: {err}"),
+    );
+  }
+  for (sid, clist) in &entry.chunks_by_source {
+    if let Err(err) = write_source_chunks_sync(&nb_dir, *sid, clist) {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("failed to persist imported source chunks: {err}"),
+      );
+    }
+  }
+  notebooks.lock_entries().insert(notebook_id, entry);
+
+  (
+    StatusCode::OK,
+    Json(json!({
+      "notebook": notebook,
+      "imported_sources": imported_sources,
+      "imported_chunks": imported_chunks,
+    })),
+  )
+    .into_response()
+}
+
+fn sanitize_local_zip_segment(raw: &str, fallback: &str) -> String {
+  let cleaned: String = raw
+    .chars()
+    .map(|c| {
+      if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+        '_'
+      } else {
+        c
+      }
+    })
+    .collect::<String>()
+    .trim_matches(|c: char| c == '.' || c.is_whitespace())
+    .to_string();
+  if cleaned.is_empty() {
+    fallback.to_string()
+  } else {
+    cleaned
+  }
+}
+
+fn deduplicate_local_entry_path(seen: &mut HashSet<String>, dir: &str, filename: &str) -> String {
+  let primary = format!("{dir}/{filename}");
+  if seen.insert(primary.clone()) {
+    return primary;
+  }
+  let (stem, ext) = match filename.rsplit_once('.') {
+    Some((s, e)) if !s.is_empty() => (s, Some(e)),
+    _ => (filename, None),
+  };
+  let mut idx = 2usize;
+  loop {
+    let candidate = match ext {
+      Some(e) => format!("{dir}/{stem}_{idx}.{e}"),
+      None => format!("{dir}/{stem}_{idx}"),
+    };
+    if seen.insert(candidate.clone()) {
+      return candidate;
+    }
+    idx += 1;
+  }
+}
+
+fn pack_local_notebook_artifacts_zip_blocking(
+  notebook_id: Uuid,
+  notebook_title: String,
+  brief_markdown: String,
+  artifacts: Vec<LocalNotebookArtifact>,
+) -> std::io::Result<Option<(std::fs::File, u64)>> {
+  use std::io::{Read, Seek, SeekFrom, Write};
+
+  let tmp = tempfile::tempfile()?;
+  let mut writer = zip::ZipWriter::new(tmp);
+  let options =
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+  let mut seen_paths = HashSet::new();
+  seen_paths.insert("BRIEFING.md".to_string());
+  seen_paths.insert("notebook_artifacts.json".to_string());
+
+  let mut manifest_items = Vec::new();
+  let mut buf = vec![0u8; 64 * 1024];
+
+  for item in artifacts {
+    let disk_path = PathBuf::from(&item.path_or_url);
+    let mut file = match std::fs::File::open(&disk_path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    let safe_kind = sanitize_local_zip_segment(&item.kind, "deliverable");
+    let safe_name = sanitize_local_zip_segment(&item.name, "output.bin");
+    let entry_path = deduplicate_local_entry_path(&mut seen_paths, &safe_kind, &safe_name);
+
+    writer
+      .start_file(&entry_path, options)
+      .map_err(std::io::Error::other)?;
+    let mut hasher = Sha256::new();
+    let mut size_bytes: u64 = 0;
+    loop {
+      let n = file.read(&mut buf)?;
+      if n == 0 {
+        break;
+      }
+      writer.write_all(&buf[..n])?;
+      hasher.update(&buf[..n]);
+      size_bytes += n as u64;
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    manifest_items.push(json!({
+      "artifact_id": item.id,
+      "run_id": item.run_id,
+      "kind": item.kind,
+      "name": safe_name,
+      "entry_path": entry_path,
+      "mime_type": item.mime_type,
+      "size_bytes": size_bytes,
+      "sha256": sha256,
+      "deliverable": item.deliverable,
+    }));
+  }
+
+  if manifest_items.is_empty() {
+    return Ok(None);
+  }
+
+  writer
+    .start_file("BRIEFING.md", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(brief_markdown.as_bytes())?;
+
+  let manifest = json!({
+    "notebook_id": notebook_id,
+    "title": notebook_title,
+    "artifacts": manifest_items,
+  });
+  let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+  writer
+    .start_file("notebook_artifacts.json", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(&manifest_bytes)?;
+
+  let mut finished = writer.finish().map_err(std::io::Error::other)?;
+  let total_len = finished.seek(SeekFrom::End(0))?;
+  finished.seek(SeekFrom::Start(0))?;
+  Ok(Some((finished, total_len)))
+}
+
+async fn download_notebook_artifacts_zip(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let (title, brief_md, artifacts) = {
+    let guard = engine.notebooks().lock_entries();
+    let Some(entry) = guard.get(&id).filter(|e| e.notebook.tenant_id == tenant) else {
+      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+    };
+    if entry.artifacts.is_empty() {
+      return notebook_error_json(
+        StatusCode::NOT_FOUND,
+        &format!("notebook {id} has no downloadable artifacts"),
+      );
+    }
+    let ready_chunks = ready_chunks_for_entry(entry, None);
+    let brief = render_local_notebook_markdown_brief(
+      &entry.notebook.title,
+      &entry.sources,
+      &ready_chunks,
+      &entry.artifacts,
+    );
+    (entry.notebook.title.clone(), brief, entry.artifacts.clone())
+  };
+
+  let packed = match tokio::task::spawn_blocking(move || {
+    pack_local_notebook_artifacts_zip_blocking(id, title, brief_md, artifacts)
+  })
+  .await
+  {
+    Ok(Ok(packed)) => packed,
+    Ok(Err(err)) => {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("failed to build notebook zip: {err}"),
+      );
+    }
+    Err(err) => {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("notebook zip task failed: {err}"),
+      );
+    }
+  };
+
+  let Some((std_file, total_len)) = packed else {
+    return notebook_error_json(
+      StatusCode::NOT_FOUND,
+      &format!("notebook {id} has no readable artifact files on disk"),
+    );
+  };
+
+  let async_file = tokio::fs::File::from_std(std_file);
+  let short_id = &id.to_string()[..8];
+  let disposition = format!("attachment; filename=\"yanshi-notebook-{short_id}-artifacts.zip\"");
+
+  let mut res = Response::new(Body::from_stream(ReaderStream::new(async_file)));
+  res.headers_mut().insert(
+    header::CONTENT_TYPE,
+    HeaderValue::from_static("application/zip"),
+  );
+  res
+    .headers_mut()
+    .insert(header::CONTENT_LENGTH, HeaderValue::from(total_len));
+  if let Ok(val) = HeaderValue::from_str(&disposition) {
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, val);
+  }
+  res
 }
 
 #[cfg(test)]
@@ -3328,6 +4049,105 @@ mod tests {
     assert_eq!(
       arts_after_detach["artifacts"].as_array().map(Vec::len),
       Some(2)
+    );
+
+    // AD2: `cost_limit_usd <= 0` rejected, `.zip` archive download + portable export/import parity.
+    let bad_cost = client
+      .post(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/generate"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "kind": "data_table",
+        "model": "mock-desktop-nb",
+        "cost_limit_usd": 0.0
+      }))
+      .send()
+      .await
+      .expect("bad cost_limit_usd");
+    assert_eq!(bad_cost.status(), StatusCode::BAD_REQUEST);
+
+    let cross_zip = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts.zip"
+      ))
+      .header("X-Yanshi-Tenant", "studio-b")
+      .send()
+      .await
+      .expect("cross-tenant zip");
+    assert_eq!(cross_zip.status(), StatusCode::NOT_FOUND);
+
+    let nb_zip_resp = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts.zip"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("owner notebook zip");
+    assert_eq!(nb_zip_resp.status(), StatusCode::OK);
+    let nb_zip_bytes = nb_zip_resp.bytes().await.expect("nb zip bytes");
+    {
+      use std::io::Read as _;
+      let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(nb_zip_bytes)).expect("open desktop nb zip");
+      let mut brief = String::new();
+      archive
+        .by_name("BRIEFING.md")
+        .expect("BRIEFING.md in desktop zip")
+        .read_to_string(&mut brief)
+        .expect("read desktop BRIEFING.md");
+      assert!(
+        brief.contains("Macrotidal Basin Metrics"),
+        "desktop BRIEFING.md must include deliverable title: {brief}"
+      );
+      assert!(archive.by_name("notebook_artifacts.json").is_ok());
+    }
+
+    let exported: Value = client
+      .get(format!("{restarted_url}/v1/notebooks/{notebook_id}/export"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("export desktop notebook")
+      .json()
+      .await
+      .expect("export json");
+    assert_eq!(exported["version"], 1);
+
+    let imported: Value = client
+      .post(format!("{restarted_url}/v1/notebooks/import"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "bundle": exported,
+        "title": "Desktop Cloned Notebook"
+      }))
+      .send()
+      .await
+      .expect("import desktop notebook")
+      .json()
+      .await
+      .expect("import json");
+    assert_eq!(imported["notebook"]["title"], "Desktop Cloned Notebook");
+    let imported_nb_id = imported["notebook"]["id"]
+      .as_str()
+      .expect("imported desktop id");
+    let imported_hits: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{imported_nb_id}/search?q=BayOfFundy"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("search imported desktop nb")
+      .json()
+      .await
+      .expect("search imported json");
+    assert!(
+      imported_hits["chunks"]
+        .as_array()
+        .is_some_and(|arr| !arr.is_empty()),
+      "imported desktop notebook must be immediately searchable: {imported_hits}"
     );
 
     let del_src = client

@@ -2120,6 +2120,11 @@ fn infer_mime(path: &Path) -> &'static str {
     "vtt" => "text/vtt; charset=utf-8",
     "pdf" => "application/pdf",
     "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "csv" => "text/csv; charset=utf-8",
+    "tsv" => "text/tab-separated-values; charset=utf-8",
+    "md" | "txt" | "log" | "yml" | "yaml" => "text/plain; charset=utf-8",
     "json" => "application/json; charset=utf-8",
     _ => "application/octet-stream",
   }
