@@ -14,6 +14,7 @@ use crate::{
 };
 
 const MAX_REDIRECTS: usize = 10;
+const DEFAULT_MAX_TEXT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const CLOUD_METADATA_HOSTS: &[&str] = &[
   "metadata.google.internal",
   "metadata",
@@ -22,7 +23,18 @@ const CLOUD_METADATA_HOSTS: &[&str] = &[
 ];
 const CLOUD_METADATA_IPS: &[IpAddr] = &[
   IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 169, 254)),
+  IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 170, 2)),
   IpAddr::V4(std::net::Ipv4Addr::new(100, 100, 100, 200)),
+  IpAddr::V6(std::net::Ipv6Addr::new(
+    0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254,
+  )),
+];
+const SENSITIVE_REDIRECT_HEADERS: &[&str] = &[
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "x-api-key",
+  "x-goog-api-key",
 ];
 
 /// Final status and full body of a request made by [`HttpTool::send`].
@@ -46,6 +58,8 @@ pub struct HttpTool {
   policy: Arc<SandboxPolicy>,
   /// Maximum response body size to return (truncate beyond this).
   max_response_chars: usize,
+  /// Hard upper bound on response bytes buffered by `send` to prevent OOM.
+  max_response_bytes: usize,
   user_agent: String,
   timeout: Duration,
   no_proxy: bool,
@@ -58,7 +72,9 @@ impl HttpTool {
   /// that need the real status code (the workflow `http` node) use it
   /// directly.
   pub async fn send(&self, params: &Value) -> Result<HttpResponse, ToolError> {
-    let raw = self.send_bytes(params, None).await?;
+    let raw = self
+      .send_bytes(params, Some(self.max_response_bytes))
+      .await?;
     Ok(HttpResponse {
       status: raw.status,
       body: String::from_utf8_lossy(&raw.body).into_owned(),
@@ -83,7 +99,9 @@ impl HttpTool {
       message: format!("Invalid URL '{}': {}", url, error),
     })?;
 
-    let method = params["method"].as_str().unwrap_or("GET");
+    let initial_origin = url_origin_key(&current_url);
+    let mut active_method = params["method"].as_str().unwrap_or("GET").to_uppercase();
+    let mut include_body = true;
 
     for redirect_count in 0..=MAX_REDIRECTS {
       let validated_addrs = self.validate_url_allowed(&current_url).await?;
@@ -96,9 +114,22 @@ impl HttpTool {
         .ok_or_else(|| ToolError::InvalidParams {
           message: format!("Cannot parse host from URL: {}", current_url),
         })?;
-      let client = self.build_pinned_client(host, &validated_addrs)?;
+      let is_ip_literal = matches!(
+        current_url.host(),
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_))
+      );
+      let client = if is_ip_literal {
+        self
+          .base_client_builder()
+          .build()
+          .map_err(|err| ToolError::ExecutionFailed {
+            message: format!("failed to build reqwest client for literal '{host}': {err}"),
+          })?
+      } else {
+        self.build_pinned_client(host, &validated_addrs)?
+      };
 
-      let mut builder = match method.to_uppercase().as_str() {
+      let mut builder = match active_method.as_str() {
         "GET" => client.get(current_url.clone()),
         "POST" => client.post(current_url.clone()),
         "PUT" => client.put(current_url.clone()),
@@ -115,18 +146,26 @@ impl HttpTool {
         }
       };
 
-      // Attach custom headers
+      let same_origin = url_origin_key(&current_url) == initial_origin;
       if let Some(headers) = params["headers"].as_object() {
         for (k, v) in headers {
+          if !same_origin
+            && SENSITIVE_REDIRECT_HEADERS
+              .iter()
+              .any(|sensitive| k.eq_ignore_ascii_case(sensitive))
+          {
+            continue;
+          }
           if let Some(v_str) = v.as_str() {
             builder = builder.header(k.as_str(), v_str);
           }
         }
       }
 
-      // Attach body for methods that can carry one (POST/PUT/PATCH).
-      let method_upper = method.to_uppercase();
-      if matches!(method_upper.as_str(), "POST" | "PUT" | "PATCH")
+      // Attach body for methods that can carry one (POST/PUT/PATCH), unless
+      // a prior redirect rewrote the method to GET/HEAD.
+      if include_body
+        && matches!(active_method.as_str(), "POST" | "PUT" | "PATCH")
         && let Some(body) = params["body"].as_str()
       {
         builder = builder.body(body.to_string());
@@ -137,6 +176,7 @@ impl HttpTool {
       })?;
 
       if is_redirect(response.status()) {
+        let status = response.status();
         let location = response
           .headers()
           .get(LOCATION)
@@ -155,6 +195,18 @@ impl HttpTool {
           return Err(ToolError::HttpError {
             message: format!("Too many redirects after {}", MAX_REDIRECTS),
           });
+        }
+
+        if status == StatusCode::SEE_OTHER {
+          if active_method != "HEAD" {
+            active_method = "GET".to_string();
+          }
+          include_body = false;
+        } else if matches!(status, StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND)
+          && active_method == "POST"
+        {
+          active_method = "GET".to_string();
+          include_body = false;
         }
 
         current_url = current_url
@@ -220,6 +272,7 @@ impl HttpTool {
     let tool = Self {
       policy,
       max_response_chars: 8_000,
+      max_response_bytes: DEFAULT_MAX_TEXT_RESPONSE_BYTES,
       user_agent: "Yanshi/0.1".to_string(),
       timeout: Duration::from_secs(30),
       no_proxy: false,
@@ -249,6 +302,12 @@ impl HttpTool {
   /// disable truncation by setting `usize::MAX`.
   pub fn with_max_response_chars(mut self, max_response_chars: usize) -> Self {
     self.max_response_chars = max_response_chars;
+    self
+  }
+
+  /// Override the hard byte ceiling buffered by [`Self::send`] (default: 8 MiB).
+  pub fn with_max_response_bytes(mut self, max_response_bytes: usize) -> Self {
+    self.max_response_bytes = max_response_bytes;
     self
   }
 
@@ -455,6 +514,14 @@ fn is_redirect(status: StatusCode) -> bool {
   )
 }
 
+fn url_origin_key(url: &Url) -> (String, String, Option<u16>) {
+  (
+    url.scheme().to_ascii_lowercase(),
+    url.host_str().unwrap_or_default().to_ascii_lowercase(),
+    url.port_or_known_default(),
+  )
+}
+
 async fn resolve_host_ips(url: &Url, host: &str) -> Result<Vec<SocketAddr>, ToolError> {
   let port = url
     .port_or_known_default()
@@ -462,7 +529,13 @@ async fn resolve_host_ips(url: &Url, host: &str) -> Result<Vec<SocketAddr>, Tool
       message: format!("Cannot infer port for URL: {}", url),
     })?;
 
-  if let Ok(address) = host.parse::<IpAddr>() {
+  match url.host() {
+    Some(url::Host::Ipv4(v4)) => return Ok(vec![SocketAddr::new(IpAddr::V4(v4), port)]),
+    Some(url::Host::Ipv6(v6)) => return Ok(vec![SocketAddr::new(IpAddr::V6(v6), port)]),
+    _ => {}
+  }
+
+  if let Ok(address) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
     return Ok(vec![SocketAddr::new(address, port)]);
   }
 
@@ -494,14 +567,21 @@ fn is_cloud_metadata_host(host: &str) -> bool {
     .any(|metadata_host| lower == *metadata_host || lower.ends_with(&format!(".{}", metadata_host)))
 }
 
+fn is_non_global_private_v4(address: std::net::Ipv4Addr) -> bool {
+  let octets = address.octets();
+  address.is_private()
+    || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64) // RFC 6598 CGNAT 100.64.0.0/10
+    || address.is_broadcast()
+    || address.is_multicast()
+    || address.is_documentation()
+    || (octets[0] == 198 && (octets[1] & 0xfe) == 18) // RFC 2544 benchmarking 198.18.0.0/15
+    || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // IETF protocol assignments 192.0.0.0/24
+    || (octets[0] & 0xf0) == 240 // Reserved Class E 240.0.0.0/4
+}
+
 fn classify_network_address(address: IpAddr) -> Vec<NetworkAddressClass> {
   // V3.3: normalize IPv4-mapped IPv6 (`::ffff:a.b.c.d`, RFC 4291
-  // §2.5.5.2) to its IPv4 form first. Left un-normalized, an address
-  // like `::ffff:169.254.169.254` falls into the `V6` match arm below,
-  // which has no `CLOUD_METADATA_IPS`-equivalent check and whose range
-  // checks don't cover this form either (its first segment is `0000`,
-  // not the `fe80::/10` or `fc00::/7` prefixes) — classification comes
-  // back empty and the cloud-metadata request is allowed through.
+  // §2.5.5.2) to its IPv4 form first.
   let address = match address {
     IpAddr::V6(v6) => v6
       .to_ipv4_mapped()
@@ -510,32 +590,37 @@ fn classify_network_address(address: IpAddr) -> Vec<NetworkAddressClass> {
     v4 => v4,
   };
 
-  let mut classes = Vec::new();
-
   if CLOUD_METADATA_IPS.contains(&address) {
-    classes.push(NetworkAddressClass::CloudMetadata);
+    return vec![NetworkAddressClass::CloudMetadata];
   }
+
+  let mut classes = Vec::new();
 
   match address {
     IpAddr::V4(address) => {
-      if address.is_loopback() {
+      // RFC 1122 §3.2.1.3: `0.0.0.0/8` ("this host on this network") connects
+      // to local listeners on Linux and macOS, so treat it identically to Loopback.
+      if address.is_loopback() || address.octets()[0] == 0 {
         classes.push(NetworkAddressClass::Loopback);
       }
       if address.is_link_local() {
         classes.push(NetworkAddressClass::LinkLocal);
       }
-      if address.is_private() {
+      if is_non_global_private_v4(address) {
         classes.push(NetworkAddressClass::Private);
       }
     }
     IpAddr::V6(address) => {
-      if address.is_loopback() {
+      if address.is_loopback() || address.is_unspecified() {
         classes.push(NetworkAddressClass::Loopback);
       }
       if (address.segments()[0] & 0xffc0) == 0xfe80 {
         classes.push(NetworkAddressClass::LinkLocal);
       }
-      if (address.segments()[0] & 0xfe00) == 0xfc00 {
+      if (address.segments()[0] & 0xfe00) == 0xfc00
+        || address.is_multicast()
+        || (address.segments()[0] == 0x2001 && address.segments()[1] == 0x0db8)
+      {
         classes.push(NetworkAddressClass::Private);
       }
     }
@@ -836,6 +921,133 @@ mod tests {
 
     assert_eq!(output.content, "ok");
     server_task.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn blocks_unspecified_cgnat_bracketed_ipv6_and_aws_ipv6_imds() {
+    let tool = test_tool_default_policy();
+    for (url, expected_class) in [
+      ("http://0.0.0.0:3000/health", "Loopback"),
+      ("http://[::]:3000/health", "Loopback"),
+      ("http://[::1]:3000/health", "Loopback"),
+      ("http://[::ffff:0.0.0.0]:3000/health", "Loopback"),
+      ("http://100.64.0.1:8080/internal", "Private"),
+      ("http://[fd00:ec2::254]/latest/meta-data/", "CloudMetadata"),
+    ] {
+      let err = tool.execute(json!({ "url": url })).await.unwrap_err();
+      assert!(
+        err.to_string().contains(expected_class),
+        "url={url} expected {expected_class}, got {err}"
+      );
+    }
+
+    // Even when Private network access is allowed, AWS IPv6 IMDS (`fd00:ec2::254`)
+    // must still be blocked unless `allow_cloud_metadata_access` is explicitly true.
+    let private_allowed = test_tool(Arc::new(SandboxPolicy {
+      allow_private_network_access: true,
+      allow_cloud_metadata_access: false,
+      ..SandboxPolicy::default()
+    }));
+    let imds_err = private_allowed
+      .execute(json!({ "url": "http://[fd00:ec2::254]/latest/meta-data/" }))
+      .await
+      .unwrap_err();
+    assert!(
+      imds_err.to_string().contains("CloudMetadata"),
+      "got {imds_err}"
+    );
+  }
+
+  #[tokio::test]
+  async fn send_enforces_max_response_bytes_ceiling() {
+    let body = "x".repeat(2048);
+    let response = format!(
+      "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+      body.len(),
+      body
+    );
+    let (url, server_task) = spawn_one_response_server(Box::leak(response.into_boxed_str())).await;
+    let policy = Arc::new(SandboxPolicy {
+      allow_loopback_network_access: true,
+      ..SandboxPolicy::default()
+    });
+    let tool = test_tool(policy)
+      .with_max_response_chars(usize::MAX)
+      .with_max_response_bytes(512);
+
+    let err = tool.send(&json!({ "url": url })).await.unwrap_err();
+    assert!(
+      err.to_string().contains("exceeds maximum allowed"),
+      "got {err}"
+    );
+    server_task.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn cross_origin_redirect_strips_credentials_and_rewrites_post_302_to_get() {
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target_listener.local_addr().unwrap();
+    let target_task = tokio::spawn(async move {
+      let (mut stream, _) = target_listener.accept().await.unwrap();
+      let mut buf = [0_u8; 2048];
+      let n = stream.read(&mut buf).await.unwrap();
+      let raw_req = String::from_utf8_lossy(&buf[..n]).to_string();
+      stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone")
+        .await
+        .unwrap();
+      raw_req
+    });
+
+    let redirect_resp = format!(
+      "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/landed\r\nContent-Length: 0\r\n\r\n"
+    );
+    let (origin_url, origin_task) =
+      spawn_one_response_server(Box::leak(redirect_resp.into_boxed_str())).await;
+
+    let policy = Arc::new(SandboxPolicy {
+      allow_loopback_network_access: true,
+      ..SandboxPolicy::default()
+    });
+    let tool = test_tool(policy);
+    let res = tool
+      .send(&json!({
+        "url": origin_url,
+        "method": "POST",
+        "headers": {
+          "Authorization": "Bearer top-secret",
+          "Cookie": "sid=abc",
+          "X-Custom": "safe-header"
+        },
+        "body": "secret-post-payload"
+      }))
+      .await
+      .unwrap();
+    assert_eq!(res.body, "done");
+
+    origin_task.await.unwrap();
+    let landed_req = target_task.await.unwrap();
+    let lower = landed_req.to_ascii_lowercase();
+    assert!(
+      landed_req.starts_with("GET /landed HTTP/1.1"),
+      "expected POST->GET on 302, got: {landed_req}"
+    );
+    assert!(
+      !lower.contains("authorization:") && !lower.contains("top-secret"),
+      "Authorization leaked across origins: {landed_req}"
+    );
+    assert!(
+      !lower.contains("cookie:"),
+      "Cookie leaked across origins: {landed_req}"
+    );
+    assert!(
+      lower.contains("x-custom: safe-header"),
+      "non-sensitive header should stay: {landed_req}"
+    );
+    assert!(
+      !landed_req.contains("secret-post-payload"),
+      "POST body leaked after 302->GET: {landed_req}"
+    );
   }
 
   async fn spawn_one_response_server(

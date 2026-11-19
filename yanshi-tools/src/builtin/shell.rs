@@ -147,20 +147,23 @@ impl Tool for ShellTool {
       })?;
     scrub_inherited_env(&mut cmd);
 
-    let output = tokio::time::timeout(timeout, cmd.output())
-      .await
-      .map_err(|_| ToolError::ExecutionFailed {
-        message: format!(
-          "Command timed out after {} seconds",
-          self.policy.max_exec_time_secs
-        ),
-      })?
-      .map_err(ToolError::IoError)?;
+    let (status, stdout_bytes, stderr_bytes) =
+      run_command_bounded(&mut cmd, None, timeout, MAX_SUBPROCESS_OUTPUT_BYTES)
+        .await
+        .map_err(|err| match err {
+          BoundedRunError::TimedOut => ToolError::ExecutionFailed {
+            message: format!(
+              "Command timed out after {} seconds",
+              self.policy.max_exec_time_secs
+            ),
+          },
+          BoundedRunError::Spawn(io) | BoundedRunError::Io(io) => ToolError::IoError(io),
+        })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
-    if output.status.success() {
+    if status.success() {
       let result = if stdout.trim().is_empty() {
         "(no output)".to_string()
       } else {
@@ -175,11 +178,95 @@ impl Tool for ShellTool {
       };
       Ok(ToolOutput::error(format!(
         "Exit code {}: {}",
-        output.status.code().unwrap_or(-1),
+        status.code().unwrap_or(-1),
         msg
       )))
     }
   }
+}
+
+pub(crate) const MAX_SUBPROCESS_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) enum BoundedRunError {
+  Spawn(std::io::Error),
+  Io(std::io::Error),
+  TimedOut,
+}
+
+pub(crate) async fn read_stream_capped<R: tokio::io::AsyncRead + Unpin>(
+  mut reader: R,
+  max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+  use tokio::io::AsyncReadExt;
+  let mut captured = Vec::new();
+  let mut buf = [0_u8; 8192];
+  loop {
+    let n = reader.read(&mut buf).await?;
+    if n == 0 {
+      break;
+    }
+    if captured.len() < max_bytes {
+      let keep = (max_bytes - captured.len()).min(n);
+      captured.extend_from_slice(&buf[..keep]);
+    }
+  }
+  Ok(captured)
+}
+
+/// Spawn `cmd` with `kill_on_drop(true)` (configured *after* any sandbox
+/// `wrap_command` rewrite), optionally feed `stdin_bytes`, and drain
+/// `stdout`/`stderr` up to `max_output_bytes` each under a single overall
+/// `timeout_dur`. Dropping the future on timeout immediately `SIGKILL`s the
+/// child instead of detaching an orphan process.
+pub(crate) async fn run_command_bounded(
+  cmd: &mut tokio::process::Command,
+  stdin_bytes: Option<&[u8]>,
+  timeout_dur: Duration,
+  max_output_bytes: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), BoundedRunError> {
+  cmd
+    .kill_on_drop(true)
+    .stdin(if stdin_bytes.is_some() {
+      std::process::Stdio::piped()
+    } else {
+      std::process::Stdio::null()
+    })
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+
+  let mut child = cmd.spawn().map_err(BoundedRunError::Spawn)?;
+
+  tokio::time::timeout(timeout_dur, async {
+    if let Some(payload) = stdin_bytes
+      && !payload.is_empty()
+      && let Some(mut stdin) = child.stdin.take()
+    {
+      use tokio::io::AsyncWriteExt;
+      stdin.write_all(payload).await?;
+    } else {
+      let _ = child.stdin.take();
+    }
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_fut = async move {
+      match stdout_pipe {
+        Some(out) => read_stream_capped(out, max_output_bytes).await,
+        None => Ok(Vec::new()),
+      }
+    };
+    let stderr_fut = async move {
+      match stderr_pipe {
+        Some(err) => read_stream_capped(err, max_output_bytes).await,
+        None => Ok(Vec::new()),
+      }
+    };
+    let (stdout_res, stderr_res, status_res) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+    Ok::<_, std::io::Error>((status_res?, stdout_res?, stderr_res?))
+  })
+  .await
+  .map_err(|_| BoundedRunError::TimedOut)?
+  .map_err(BoundedRunError::Io)
 }
 
 impl ShellTool {
@@ -672,5 +759,29 @@ mod tests {
     assert_eq!(scope.read_paths, vec![PathBuf::from("/var/yanshi")]);
     assert_eq!(scope.write_paths, vec![PathBuf::from("/var/yanshi")]);
     assert!(scope.working_directory.is_none());
+  }
+
+  #[tokio::test]
+  async fn timeout_kills_child_process_and_caps_output_stream() {
+    let policy = SandboxPolicy {
+      allowed_commands: vec!["sleep".to_string(), "head".to_string()],
+      max_exec_time_secs: 1,
+      ..SandboxPolicy::default()
+    };
+    let tool = ShellTool::new(Arc::new(policy));
+    let start = std::time::Instant::now();
+    let err = tool
+      .execute(json!({"command": "sleep 30"}))
+      .await
+      .expect_err("sleep 30 must time out after 1s");
+    assert!(
+      err.to_string().contains("timed out"),
+      "unexpected error: {err}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+
+    let data = vec![b'a'; 2048];
+    let capped = read_stream_capped(&data[..], 256).await.unwrap();
+    assert_eq!(capped.len(), 256);
   }
 }

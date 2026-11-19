@@ -242,9 +242,10 @@ fn create_result(id: &str, content: &str, score: f32) -> SearchResult {
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
-  if s.len() <= max_len {
+  if s.chars().count() <= max_len {
     s.to_string()
   } else {
-    format!("{}...", &s[..max_len - 3])
+    let take = max_len.saturating_sub(3);
+    format!("{}...", s.chars().take(take).collect::<String>())
   }
 }

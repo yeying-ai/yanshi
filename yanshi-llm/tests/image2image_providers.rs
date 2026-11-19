@@ -56,6 +56,18 @@ async fn data_uris_decode_and_bad_sources_are_refused() {
     source_image_bytes("/etc/passwd", 1 << 20).await.is_err(),
     "no file paths"
   );
+  for internal_url in [
+    "http://127.0.0.1:9/secret.png",
+    "http://0.0.0.0:9/secret.png",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://[fd00:ec2::254]/latest/meta-data/",
+    "http://metadata.google.internal/computeMetadata/v1/",
+  ] {
+    assert!(
+      source_image_bytes(internal_url, 1 << 20).await.is_err(),
+      "expected SSRF rejection for {internal_url}"
+    );
+  }
 }
 
 #[tokio::test]

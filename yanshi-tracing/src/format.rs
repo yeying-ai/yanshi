@@ -77,17 +77,17 @@ pub fn format_trace_human_readable(trace: &ExecutionTrace) -> String {
       if let Some(ref system_prompt) = llm.system_prompt {
         output.push_str(&format!(
           "    System Prompt: {}\n",
-          truncate_string(system_prompt, 80)
+          truncate_chars(system_prompt, 80)
         ));
       }
 
       output.push_str(&format!(
         "    User Prompt: {}\n",
-        truncate_string(&llm.user_prompt, 80)
+        truncate_chars(&llm.user_prompt, 80)
       ));
       output.push_str(&format!(
         "    Response: {}\n",
-        truncate_string(&llm.response, 120)
+        truncate_chars(&llm.response, 120)
       ));
 
       if let Some(ref usage) = llm.usage {
@@ -107,17 +107,14 @@ pub fn format_trace_human_readable(trace: &ExecutionTrace) -> String {
     // Input/Output (truncated)
     if let Some(ref input) = node.input {
       let input_str = serde_json::to_string(input).unwrap_or_default();
-      output.push_str(&format!(
-        "    Input: {}\n",
-        truncate_string(&input_str, 100)
-      ));
+      output.push_str(&format!("    Input: {}\n", truncate_chars(&input_str, 100)));
     }
 
     if let Some(ref output_val) = node.output {
       let output_str = serde_json::to_string(output_val).unwrap_or_default();
       output.push_str(&format!(
         "    Output: {}\n",
-        truncate_string(&output_str, 100)
+        truncate_chars(&output_str, 100)
       ));
     }
 
@@ -177,15 +174,6 @@ pub fn export_trace_json_compact(trace: &ExecutionTrace) -> Result<String, anyho
   Ok(serde_json::to_string(&trace)?)
 }
 
-/// Truncate string with ellipsis
-fn truncate_string(s: &str, max_len: usize) -> String {
-  if s.len() <= max_len {
-    s.to_string()
-  } else {
-    format!("{}...", &s[..max_len - 3])
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -204,6 +192,8 @@ mod tests {
     trace.workflow_name = Some("Test Workflow".to_string());
 
     let mut node = NodeTrace::new("node1".to_string(), "TestNode".to_string());
+    node.input = Some(serde_json::json!({"query": "多模态内容工作台中文长输入测试".repeat(12)}));
+    node.output = Some(serde_json::json!({"answer": "🎉中文多字节边界测试输出".repeat(12)}));
     node.complete();
     trace.nodes.push(node);
 
@@ -211,15 +201,15 @@ mod tests {
     assert!(output.contains("Test Workflow"));
     assert!(output.contains("node1"));
     assert!(output.contains("TestNode"));
+    assert!(output.contains("..."));
   }
 
   #[test]
-  fn test_truncate_string() {
-    assert_eq!(truncate_string("hello", 10), "hello");
-    assert_eq!(
-      truncate_string("hello world this is long", 10),
-      "hello w..."
-    );
+  fn test_truncate_chars_utf8_and_tiny_limits() {
+    assert_eq!(truncate_chars("hello", 10), "hello");
+    assert_eq!(truncate_chars("hello world this is long", 10), "hello w...");
+    assert_eq!(truncate_chars("中文测试字符串截断", 6), "中文测...");
+    assert_eq!(truncate_chars("中文测试", 2), "...");
   }
 
   #[test]

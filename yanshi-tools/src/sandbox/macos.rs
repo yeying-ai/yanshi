@@ -6,7 +6,7 @@
 //! and rewrite the [`Command`] so that:
 //!
 //! ```text
-//! /usr/bin/sandbox-exec -f <profile.sb> <original_program> [args...]
+//! /usr/bin/sandbox-exec -p <profile> <original_program> [args...]
 //! ```
 //!
 //! Apple has marked the SBPL stable surface as deprecated for over a decade
@@ -35,7 +35,6 @@
 //!   semantics to what the field name implies.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 use tokio::process::Command;
 
@@ -97,21 +96,7 @@ impl SandboxBackend for MacosSandboxExecBackend {
     }
 
     let profile = build_profile(effective_capabilities, scope);
-    let mut profile_file = tempfile::Builder::new()
-      .prefix("yanshi-sandbox-")
-      .suffix(".sb")
-      .tempfile()?;
-    use std::io::Write;
-    profile_file.write_all(profile.as_bytes())?;
-    profile_file.flush()?;
-    // Persist and forget the path so the profile remains until after the
-    // child has read it. macOS leaks small temp files into /var/folders by
-    // design; callers can sweep `yanshi-sandbox-*.sb` if needed.
-    let (_, profile_path) = profile_file.keep().map_err(|err| SandboxError::Prepare {
-      message: format!("failed to persist sandbox profile: {err}"),
-    })?;
-
-    rewrite_command_with_sandbox_exec(command, &profile_path);
+    rewrite_command_with_sandbox_exec(command, &profile);
 
     // S3.2: attach the rlimit `pre_exec` *after* the rewrite above — that
     // rewrite fully replaces `*command` (see `rewrite_command_with_sandbox_exec`),
@@ -284,15 +269,17 @@ fn canonicalize_for_sbpl(path: &std::path::Path) -> std::path::PathBuf {
   path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn rewrite_command_with_sandbox_exec(command: &mut Command, profile_path: &PathBuf) {
+fn rewrite_command_with_sandbox_exec(command: &mut Command, profile: &str) {
   // Capture the original program and args.
   let std_cmd = command.as_std();
   let original_program = std_cmd.get_program().to_os_string();
   let original_args: Vec<OsString> = std_cmd.get_args().map(|s| s.to_os_string()).collect();
 
-  // Rebuild the command in place: sandbox-exec -f <profile> <program> [args...]
+  // Rebuild the command in place: sandbox-exec -p <profile> <program> [args...]
+  // Passing the SBPL profile inline via `-p` avoids writing and leaking
+  // temporary `yanshi-sandbox-*.sb` files on every tool execution.
   let mut new_cmd = Command::new(SANDBOX_EXEC_PATH);
-  new_cmd.arg("-f").arg(profile_path);
+  new_cmd.arg("-p").arg(profile);
   new_cmd.arg(original_program);
   for arg in original_args {
     new_cmd.arg(arg);

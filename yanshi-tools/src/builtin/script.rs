@@ -340,45 +340,34 @@ impl Tool for ScriptTool {
       })?;
     super::shell::scrub_inherited_env(&mut cmd);
 
-    // Stdio must be configured *after* `wrap_command`: an enforcing
-    // backend (e.g. macOS `sandbox-exec`) may rebuild the underlying
-    // `Command` wholesale to re-point it at a wrapper binary, which would
-    // silently discard any stdio configuration set beforehand.
-    cmd
-      .stdin(std::process::Stdio::piped())
-      .stdout(std::process::Stdio::piped())
-      .stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| ToolError::ExecutionFailed {
-      message: format!("Failed to spawn '{}': {}", interpreter, e),
-    })?;
-
-    // Write args to stdin if present.
-    if !stdin_json.is_empty()
-      && let Some(mut stdin) = child.stdin.take()
-    {
-      use tokio::io::AsyncWriteExt;
-      stdin
-        .write_all(stdin_json.as_bytes())
-        .await
-        .map_err(ToolError::IoError)?;
-      // stdin is dropped here, signalling EOF to the child.
-    }
-
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-      .await
-      .map_err(|_| ToolError::ExecutionFailed {
+    // Stdio + `kill_on_drop(true)` must be configured *after* `wrap_command`:
+    // an enforcing backend (e.g. macOS `sandbox-exec`) may rebuild the
+    // underlying `Command` wholesale to re-point it at a wrapper binary.
+    let stdin_payload = (!stdin_json.is_empty()).then_some(stdin_json.as_bytes());
+    let (status, stdout_bytes, stderr_bytes) = super::shell::run_command_bounded(
+      &mut cmd,
+      stdin_payload,
+      timeout,
+      super::shell::MAX_SUBPROCESS_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|err| match err {
+      super::shell::BoundedRunError::Spawn(e) => ToolError::ExecutionFailed {
+        message: format!("Failed to spawn '{}': {}", interpreter, e),
+      },
+      super::shell::BoundedRunError::TimedOut => ToolError::ExecutionFailed {
         message: format!(
           "Script '{}' timed out after {} seconds",
           script_name, self.policy.max_exec_time_secs
         ),
-      })?
-      .map_err(ToolError::IoError)?;
+      },
+      super::shell::BoundedRunError::Io(e) => ToolError::IoError(e),
+    })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
-    if output.status.success() {
+    if status.success() {
       let result = if stdout.trim().is_empty() {
         "(no output)".to_string()
       } else {
@@ -393,7 +382,7 @@ impl Tool for ScriptTool {
       };
       Ok(ToolOutput::error(format!(
         "Script exited with code {}: {}",
-        output.status.code().unwrap_or(-1),
+        status.code().unwrap_or(-1),
         msg
       )))
     }

@@ -307,7 +307,7 @@ fn mime_from_filename(filename: &str) -> &'static str {
   }
 }
 
-async fn resolve_source_image(client: &Client, source_url: &str) -> Result<(String, String)> {
+async fn resolve_source_image(_client: &Client, source_url: &str) -> Result<(String, String)> {
   if let Some(rest) = source_url.strip_prefix("data:") {
     let (header, data) =
       rest
@@ -323,16 +323,15 @@ async fn resolve_source_image(client: &Client, source_url: &str) -> Result<(Stri
     return Ok((mime.to_string(), data.to_string()));
   }
 
-  let bytes = super::modality::download_with_cap(
-    client,
-    source_url,
-    reqwest::header::HeaderMap::new(),
-    MAX_SOURCE_IMAGE_BYTES,
-  )
-  .await?;
+  let (bytes, content_type) =
+    super::modality::download_public_url_with_cap(source_url, MAX_SOURCE_IMAGE_BYTES).await?;
   let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-  let mime = mime_from_filename(source_url.split('?').next().unwrap_or(source_url));
-  Ok((mime.to_string(), b64))
+  let mime = content_type
+    .filter(|m| m.starts_with("image/"))
+    .unwrap_or_else(|| {
+      mime_from_filename(source_url.split('?').next().unwrap_or(source_url)).to_string()
+    });
+  Ok((mime, b64))
 }
 
 #[async_trait]

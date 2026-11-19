@@ -134,6 +134,10 @@ impl PendingTable {
     }
   }
 
+  async fn remove(&self, id: u64) {
+    let _ = self.inner.lock().await.remove(&id);
+  }
+
   async fn fail_all(&self, err: &JsonRpcError) {
     let drained: Vec<_> = {
       let mut guard = self.inner.lock().await;
@@ -142,6 +146,80 @@ impl PendingTable {
     for (_, tx) in drained {
       let _ = tx.send(Err(err.clone()));
     }
+  }
+}
+
+const MAX_PLUGIN_LINE_BYTES: usize = 4 * 1024 * 1024;
+const PLUGIN_ENV_ALLOWLIST: &[&str] = &[
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "SYSTEMROOT",
+  "RUST_LOG",
+];
+
+fn scrub_plugin_env(cmd: &mut Command) {
+  let explicit: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = cmd
+    .as_std()
+    .get_envs()
+    .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+    .collect();
+  cmd.env_clear();
+  for key in PLUGIN_ENV_ALLOWLIST {
+    if let Some(val) = std::env::var_os(key) {
+      cmd.env(key, val);
+    }
+  }
+  for (key, value) in explicit {
+    match value {
+      Some(value) => cmd.env(key, value),
+      None => cmd.env_remove(key),
+    };
+  }
+}
+
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+  reader: &mut R,
+  max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+  let mut buf = Vec::new();
+  loop {
+    let available = reader.fill_buf().await?;
+    if available.is_empty() {
+      if buf.is_empty() {
+        return Ok(None);
+      }
+      return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+    }
+    if let Some(nl_pos) = available.iter().position(|&b| b == b'\n') {
+      if buf.len().saturating_add(nl_pos) > max_bytes {
+        reader.consume(nl_pos + 1);
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          format!("plugin line exceeded {max_bytes}-byte cap"),
+        ));
+      }
+      buf.extend_from_slice(&available[..nl_pos]);
+      reader.consume(nl_pos + 1);
+      if buf.last() == Some(&b'\r') {
+        buf.pop();
+      }
+      return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+    }
+    let chunk_len = available.len();
+    if buf.len().saturating_add(chunk_len) > max_bytes {
+      reader.consume(chunk_len);
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("plugin line exceeded {max_bytes}-byte cap"),
+      ));
+    }
+    buf.extend_from_slice(available);
+    reader.consume(chunk_len);
   }
 }
 
@@ -154,6 +232,7 @@ struct Connection {
   outbound: Mutex<Option<mpsc::Sender<JsonRpcRequest>>>,
   reader_handle: Mutex<Option<JoinHandle<()>>>,
   writer_handle: Mutex<Option<JoinHandle<()>>>,
+  stderr_handle: Mutex<Option<JoinHandle<()>>>,
   child: Mutex<Option<Child>>,
 }
 
@@ -166,13 +245,13 @@ impl Connection {
     preparer: &dyn CommandPreparer,
   ) -> Result<Self, PluginError> {
     let mut command = Command::new(entrypoint);
+    preparer.prepare(&mut command, manifest, manifest_dir)?;
+    scrub_plugin_env(&mut command);
     command
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .kill_on_drop(true);
-
-    preparer.prepare(&mut command, manifest, manifest_dir)?;
 
     let mut child = command.spawn()?;
     let stdin = child.stdin.take().ok_or_else(|| {
@@ -251,10 +330,9 @@ impl Connection {
     let reader_pending = pending.clone();
     let plugin_name_for_reader = plugin_name.to_string();
     let reader_handle = tokio::spawn(async move {
-      let reader = BufReader::new(stdout);
-      let mut lines = reader.lines();
+      let mut reader = BufReader::new(stdout);
       loop {
-        match lines.next_line().await {
+        match read_line_capped(&mut reader, MAX_PLUGIN_LINE_BYTES).await {
           Ok(Some(line)) if line.trim().is_empty() => continue,
           Ok(Some(line)) => {
             handle_inbound_line(&plugin_name_for_reader, &line, &reader_pending).await;
@@ -284,16 +362,15 @@ impl Connection {
     });
 
     // Stderr forwarder (best-effort; plugin authors may use stderr for logs).
-    if let Some(stderr) = stderr {
+    let stderr_handle = stderr.map(|stderr| {
       let plugin_name = plugin_name.to_string();
       tokio::spawn(async move {
-        let reader = BufReader::new(stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stderr);
+        while let Ok(Some(line)) = read_line_capped(&mut reader, MAX_PLUGIN_LINE_BYTES).await {
           tracing::info!("[plugin::{plugin_name}] {line}");
         }
-      });
-    }
+      })
+    });
 
     Ok(Connection {
       next_id: AtomicU64::new(1),
@@ -301,6 +378,7 @@ impl Connection {
       outbound: Mutex::new(Some(outbound_tx)),
       reader_handle: Mutex::new(Some(reader_handle)),
       writer_handle: Mutex::new(Some(writer_handle)),
+      stderr_handle: Mutex::new(stderr_handle),
       child: Mutex::new(Some(child)),
     })
   }
@@ -352,10 +430,13 @@ impl Connection {
       Ok(Err(_canceled)) => Err(PluginError::Exited(format!(
         "response channel canceled for method '{method}'"
       ))),
-      Err(_elapsed) => Err(PluginError::Timeout {
-        method: method.to_string(),
-        timeout_ms: timeout_dur.as_millis() as u64,
-      }),
+      Err(_elapsed) => {
+        self.pending.remove(id).await;
+        Err(PluginError::Timeout {
+          method: method.to_string(),
+          timeout_ms: timeout_dur.as_millis() as u64,
+        })
+      }
     }
   }
 
@@ -381,6 +462,9 @@ impl Connection {
       let _ = timeout(SHUTDOWN_TIMEOUT, handle).await;
     }
     if let Some(handle) = self.reader_handle.lock().await.take() {
+      handle.abort();
+    }
+    if let Some(handle) = self.stderr_handle.lock().await.take() {
       handle.abort();
     }
 
