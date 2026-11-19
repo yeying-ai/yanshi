@@ -20,7 +20,11 @@ use async_trait::async_trait;
 use axum::{
   Extension, Json,
   extract::{Path, Query, State},
-  response::sse::{Event, KeepAlive, Sse},
+  http::HeaderValue,
+  response::{
+    IntoResponse, Response,
+    sse::{Event, KeepAlive, Sse},
+  },
 };
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -439,7 +443,7 @@ pub async fn stream_events(
   Extension(tenant): Extension<TenantId>,
   Path(run_id): Path<Uuid>,
   Query(params): Query<EventsQuery>,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
   let run = state
     .repos
     .runs
@@ -452,6 +456,12 @@ pub async fn stream_events(
   if run.tenant_id != tenant.as_str() {
     return Err(ApiError::NotFound(format!("run {} not found", run_id)));
   }
+
+  let filter = match params.filter.as_deref() {
+    Some(raw) => crate::events_filter::parse_filter(raw)
+      .map_err(|err| ApiError::BadRequest(format!("invalid filter: {err}")))?,
+    None => Default::default(),
+  };
 
   let mut after_seq = params.after_seq.unwrap_or(-1);
 
@@ -491,16 +501,27 @@ pub async fn stream_events(
   };
   let stream = backfill_stream
     .chain(live_stream)
+    .filter(move |item| {
+      let matches = match item {
+        BrokerItem::Event(ev) => filter.is_empty() || crate::events_filter::matches(ev, &filter),
+        BrokerItem::Lagged => true,
+      };
+      futures::future::ready(matches)
+    })
     .map(serialise_item)
     .map(Ok::<_, Infallible>);
 
-  Ok(
-    Sse::new(stream).keep_alive(
+  let mut response = Sse::new(stream)
+    .keep_alive(
       KeepAlive::new()
         .interval(Duration::from_secs(15))
         .text("keep-alive"),
-    ),
-  )
+    )
+    .into_response();
+  response
+    .headers_mut()
+    .insert("x-accel-buffering", HeaderValue::from_static("no"));
+  Ok(response)
 }
 
 /// The live tail of an SSE stream: broker events with `seq > last_seq`,

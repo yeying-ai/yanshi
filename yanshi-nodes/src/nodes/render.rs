@@ -711,6 +711,8 @@ impl RenderStudyNode {
 }
 
 const STUDY_STYLE: &str = "body{max-width:46rem;margin:2rem auto;padding:0 1rem;font:16px/1.5 -apple-system,'Segoe UI','PingFang SC',sans-serif;color:#1f2328}\
+.score-bar{display:flex;align-items:center;justify-content:space-between;gap:1rem;background:#f6f8fa;border:1px solid #d0d7de;border-radius:10px;padding:.65rem 1rem;margin:1rem 0;font-weight:600}\
+.score-bar button{border:1px solid #d0d7de;border-radius:6px;background:#fff;padding:.25rem .75rem;cursor:pointer;font:inherit;font-size:.9rem}\
 .card{border:1px solid #d0d7de;border-radius:10px;padding:1rem 1.25rem;margin:.75rem 0;cursor:pointer}\
 .card .back{display:none;color:#0b5394;margin-top:.5rem}.card.open .back{display:block}\
 .q{border:1px solid #d0d7de;border-radius:10px;padding:1rem 1.25rem;margin:1rem 0}\
@@ -718,9 +720,14 @@ const STUDY_STYLE: &str = "body{max-width:46rem;margin:2rem auto;padding:0 1rem;
 .q.done .why{display:block}.right{color:#1a7f37;font-weight:600}.wrong{color:#cf222e}";
 
 const STUDY_SCRIPT: &str = "document.querySelectorAll('.card').forEach(c=>c.addEventListener('click',()=>c.classList.toggle('open')));\
-document.querySelectorAll('.q').forEach(q=>q.querySelectorAll('input').forEach(i=>i.addEventListener('change',()=>{\
+const qs=document.querySelectorAll('.q'),sc=document.getElementById('quiz-score'),rs=document.getElementById('quiz-reset');\
+const tally=()=>{if(!sc)return;let r=0,a=0;qs.forEach(q=>{const c=q.querySelector('input:checked');if(c){a++;if(c.dataset.right==='1')r++;}});\
+sc.textContent=`得分 / Score: ${r} / ${qs.length} (已答 ${a}/${qs.length})`;};\
+qs.forEach(q=>q.querySelectorAll('input').forEach(i=>i.addEventListener('change',()=>{\
 q.classList.add('done');q.querySelectorAll('label').forEach(l=>{const o=l.querySelector('input');\
-l.classList.remove('right','wrong');if(o.dataset.right==='1')l.classList.add('right');else if(o.checked)l.classList.add('wrong');});})));";
+l.classList.remove('right','wrong');if(o.dataset.right==='1')l.classList.add('right');else if(o.checked)l.classList.add('wrong');});tally();})));\
+if(rs)rs.addEventListener('click',()=>{qs.forEach(q=>{q.classList.remove('done');q.querySelectorAll('input').forEach(i=>{i.checked=false;});\
+q.querySelectorAll('label').forEach(l=>l.classList.remove('right','wrong'));});tally();});";
 
 fn study_field<'a>(item: &'a Value, key: &str, index: usize) -> Result<&'a str, String> {
   item
@@ -746,6 +753,10 @@ fn study_page(kind: &str, title: &str, items: &[Value]) -> Result<String, String
       }
     }
     "quiz" => {
+      body.push_str(&format!(
+        "<div class=\"score-bar\"><span id=\"quiz-score\">得分 / Score: 0 / {total} (已答 0/{total})</span><button type=\"button\" id=\"quiz-reset\">重置 / Reset</button></div>\n",
+        total = items.len()
+      ));
       for (i, q) in items.iter().enumerate() {
         let options = q
           .get("options")
@@ -802,10 +813,15 @@ impl AsyncNode for RenderStudyNode {
       Some(FlowValue::Json(Value::Array(items))) => items.clone(),
       Some(FlowValue::Json(Value::String(text))) => serde_json::from_str::<Vec<Value>>(text)
         .map_err(|e| input_error(&self.id, format!("items is not a JSON array: {e}")))?,
+      Some(FlowValue::File { .. }) => {
+        let raw = text_input(&self.id, inputs, "items").await?;
+        serde_json::from_str::<Vec<Value>>(&raw)
+          .map_err(|e| input_error(&self.id, format!("items file is not a JSON array: {e}")))?
+      }
       _ => {
         return Err(input_error(
           &self.id,
-          "missing input 'items' (a JSON array)",
+          "missing input 'items' (a JSON array or File)",
         ));
       }
     };
@@ -2816,6 +2832,8 @@ mod tests {
       page.contains("data-right=\"1\"> The moon") && page.contains("data-right=\"0\"> The wind")
     );
     assert!(page.contains("<title>Tides &lt;quiz&gt;</title>"));
+    assert!(page.contains("id=\"quiz-score\">得分 / Score: 0 / 1"));
+    assert!(page.contains("id=\"quiz-reset\""));
     let cards = study_page(
       "flashcards",
       "Cards",
@@ -2823,6 +2841,27 @@ mod tests {
     )
     .expect("cards");
     assert!(cards.contains("<div class=\"front\">Neap tide</div>"));
+    assert!(!cards.contains("id=\"quiz-score\""));
+  }
+
+  #[tokio::test]
+  async fn study_node_accepts_file_input() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let json_path = dir.path().join("cards.json");
+    std::fs::write(&json_path, r#"[{"front":"Term","back":"Definition"}]"#)
+      .expect("write cards.json");
+    let mut map = inputs(&[("kind", json!("flashcards")), ("title", json!("Deck"))]);
+    map.insert(
+      "items".to_string(),
+      FlowValue::File {
+        path: json_path,
+        mime_type: Some("application/json".to_string()),
+      },
+    );
+    let (out_path, mime) = run(&RenderStudyNode::new("study"), map).await;
+    assert_eq!(mime, "text/html");
+    let html = std::fs::read_to_string(out_path).expect("read html");
+    assert!(html.contains("Term") && html.contains("Definition"));
   }
 
   #[test]

@@ -681,6 +681,8 @@ nodes:
     dependencies: ["series_bible_markdown_tpl"]
     input_mapping:
       markdown: "{{ nodes.series_bible_markdown_tpl.outputs.output }}"
+    parameters:
+      format: md
 
   - id: bible_pdf
     type: render_document

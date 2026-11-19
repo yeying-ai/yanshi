@@ -970,7 +970,7 @@ pub async fn post_harness_session_action(
   state: State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id_action): Path<String>,
-  body: Option<Json<ResumeHarnessSessionRequest>>,
+  body: axum::body::Bytes,
 ) -> Result<axum::response::Response, ApiError> {
   use axum::response::IntoResponse;
   if id_action.ends_with(":cancel") {
@@ -979,10 +979,25 @@ pub async fn post_harness_session_action(
       .map(IntoResponse::into_response);
   }
   if id_action.ends_with(":resume") {
-    let body = body.map(|Json(value)| value).unwrap_or_default();
-    return resume_harness_session(state, tenant, Path(id_action), Json(body))
-      .await
-      .map(IntoResponse::into_response);
+    let trimmed = body
+      .iter()
+      .copied()
+      .skip_while(u8::is_ascii_whitespace)
+      .count();
+    let parsed: ResumeHarnessSessionRequest = if trimmed == 0 {
+      ResumeHarnessSessionRequest::default()
+    } else {
+      serde_json::from_slice(&body)
+        .map_err(|err| ApiError::BadRequest(format!("invalid JSON body: {err}")))?
+    };
+    return resume_harness_session(
+      state,
+      tenant,
+      Path(id_action),
+      crate::error::JsonReq(parsed),
+    )
+    .await
+    .map(IntoResponse::into_response);
   }
   Err(ApiError::BadRequest(
     "harness session action route must end with :cancel or :resume".into(),
@@ -1141,7 +1156,7 @@ pub async fn resume_harness_session(
   State(state): State<AppState>,
   tenant: TenantId,
   Path(id_resume): Path<String>,
-  Json(body): Json<ResumeHarnessSessionRequest>,
+  crate::error::JsonReq(body): crate::error::JsonReq<ResumeHarnessSessionRequest>,
 ) -> Result<Json<ResumeHarnessSessionResponse>, ApiError> {
   let id_raw = id_resume.strip_suffix(":resume").ok_or_else(|| {
     ApiError::BadRequest("harness session resume route must end with :resume".into())
@@ -1493,7 +1508,7 @@ pub async fn stream_harness_events(
   Extension(tenant): Extension<TenantId>,
   Path(session_id): Path<Uuid>,
   Query(params): Query<HarnessEventsQuery>,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
   let session = state
     .repos
     .harness_sessions
@@ -1539,13 +1554,19 @@ pub async fn stream_harness_events(
     .map(serialise_item)
     .map(Ok::<_, Infallible>);
 
-  Ok(
-    Sse::new(stream).keep_alive(
+  use axum::response::IntoResponse as _;
+  let mut response = Sse::new(stream)
+    .keep_alive(
       KeepAlive::new()
         .interval(Duration::from_secs(15))
         .text("keep-alive"),
-    ),
-  )
+    )
+    .into_response();
+  response.headers_mut().insert(
+    "x-accel-buffering",
+    axum::http::HeaderValue::from_static("no"),
+  );
+  Ok(response)
 }
 
 /// `GET /v1/harness/sessions/{id}/events/history` — JSON list of events,

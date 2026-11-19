@@ -455,7 +455,6 @@ nodes:
       - mindmap_html
       - dossier_md
       - dossier_html
-      - dossier_pdf
     input_mapping:
       trans: "{{ nodes.translate_paper.outputs.output }}"
       thesis: "{{ nodes.analyze_thesis.outputs.output }}"
@@ -472,7 +471,7 @@ nodes:
       output_format: json
       template: |
         {"deliverable": {
-          "kind": "paper_reader",
+          "kind": "report",
           "title": {{ trans.paper_title_translated | json_encode() }},
           "content": {"thesis": {{ thesis | json_encode() }}, "experiments": {{ exp | json_encode() }}},
           "citations": [],
@@ -483,7 +482,7 @@ nodes:
             {"node_id": "experiments_csv", "name": {{ csv | split(pat="/") | last | json_encode() }}, "mime_type": "text/csv", "role": "asset"},
             {"node_id": "method_diagram", "name": {{ fig_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
             {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
-            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf is defined and pdf %},
             {"node_id": "dossier_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}

@@ -686,6 +686,61 @@ impl RunAdmissionRegistry {
 
     Ok(RunAdmissionGuard { _permit: permit })
   }
+
+  /// Atomically reserve `count` concurrency permits and `count` rate-window
+  /// submission slots for `tenant`. If either limit would be exceeded, every
+  /// acquired permit is dropped and `window.count` stays untouched so batch
+  /// requests never spawn orphaned partial runs.
+  pub fn try_admit_batch(
+    &self,
+    tenant: &str,
+    count: usize,
+  ) -> Result<Vec<RunAdmissionGuard>, RunAdmissionError> {
+    if count == 0 {
+      return Ok(Vec::new());
+    }
+    let state = self.tenant_state(tenant);
+    let mut permits = Vec::with_capacity(count);
+    for _ in 0..count {
+      match state.semaphore.clone().try_acquire_owned() {
+        Ok(permit) => permits.push(permit),
+        Err(_) => {
+          drop(permits);
+          return Err(RunAdmissionError::ConcurrencyLimitExceeded {
+            tenant: tenant.to_string(),
+            limit: self.max_concurrent_per_tenant,
+          });
+        }
+      }
+    }
+
+    let mut window = match state.window.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    let now = std::time::Instant::now();
+    if now.duration_since(window.started_at) >= self.window {
+      window.started_at = now;
+      window.count = 0;
+    }
+    let needed = count as u32;
+    if window.count.saturating_add(needed) > self.max_submissions_per_minute {
+      drop(permits);
+      return Err(RunAdmissionError::RateLimited {
+        tenant: tenant.to_string(),
+        limit_per_minute: self.max_submissions_per_minute,
+      });
+    }
+    window.count += needed;
+    drop(window);
+
+    Ok(
+      permits
+        .into_iter()
+        .map(|permit| RunAdmissionGuard { _permit: permit })
+        .collect(),
+    )
+  }
 }
 
 /// Default no-op executor used until the real Flow runner lands. Marks runs
@@ -906,23 +961,6 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     &artifact_base,
   )
   .await?;
-  if let Some(link) = &ctx.notebook {
-    use yanshi_db::{ArtifactRepo as _, NotebookRepo as _};
-    let deliverable = extract_run_deliverable(&state);
-    for artifact in ctx.repos.artifacts.list_for_run(ctx.run_id).await? {
-      ctx
-        .repos
-        .notebooks
-        .attach_artifact_with_deliverable(
-          &ctx.tenant_id,
-          link.notebook_id,
-          artifact.id,
-          &link.kind,
-          deliverable.as_ref(),
-        )
-        .await?;
-    }
-  }
 
   if let Some(error) = first_state_error(&state) {
     ctx
@@ -931,6 +969,23 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
       .update_status(ctx.run_id, RunStatus::Failed, Some(&error))
       .await?;
   } else {
+    if let Some(link) = &ctx.notebook {
+      use yanshi_db::{ArtifactRepo as _, NotebookRepo as _};
+      let deliverable = extract_run_deliverable(&state);
+      for artifact in ctx.repos.artifacts.list_for_run(ctx.run_id).await? {
+        ctx
+          .repos
+          .notebooks
+          .attach_artifact_with_deliverable(
+            &ctx.tenant_id,
+            link.notebook_id,
+            artifact.id,
+            &link.kind,
+            deliverable.as_ref(),
+          )
+          .await?;
+      }
+    }
     ctx
       .repos
       .runs
@@ -1762,6 +1817,25 @@ pub(crate) async fn admit_and_dispatch(
     .try_admit(&tenant_id)
     .map_err(|err| ApiError::TooManyRequests(err.to_string()))?;
 
+  admit_and_dispatch_with_guard(
+    state,
+    executor,
+    tenant_id,
+    workflow,
+    options,
+    local_admission_guard,
+  )
+  .await
+}
+
+pub(crate) async fn admit_and_dispatch_with_guard(
+  state: &AppState,
+  executor: Arc<dyn RunExecutor>,
+  tenant_id: String,
+  workflow: String,
+  options: RunOptions,
+  local_admission_guard: RunAdmissionGuard,
+) -> Result<Run, ApiError> {
   let run_id = Uuid::new_v4();
   let run_base_dir = run_base_dir_for_request();
   let run_dir = run_dir_for_run(&run_base_dir, run_id);

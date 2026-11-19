@@ -401,3 +401,103 @@ async fn cleanup_filesystem_sweep_removes_orphaned_dirs() {
   assert!(!orphan_dir.exists(), "orphan dir must be deleted");
   assert!(active_dir.exists(), "active run's dir must be retained");
 }
+
+#[tokio::test]
+async fn cleanup_preserves_notebook_attached_deliverables_until_detached() {
+  use yanshi_db::{ArtifactRepo as _, NewArtifact, NotebookRepo as _};
+
+  let _guard = CLEANUP_MUTEX.lock().await;
+  let Some(db) = fresh_db().await else {
+    eprintln!("skipping cleanup_preserves_notebook_attached_deliverables_until_detached");
+    return;
+  };
+
+  let tmp = TempDir::new().unwrap();
+  let run_id = insert_run(&db, RunStatus::Succeeded, Some(90)).await;
+  let run_dir = tmp.path().join(run_id.to_string());
+  fs::create_dir_all(run_dir.join("artifacts/report_md")).unwrap();
+  let artifact_path = run_dir.join("artifacts/report_md/1.md");
+  fs::write(&artifact_path, "# Deliverable\n").unwrap();
+
+  let run_dir_str = run_dir.display().to_string();
+  let touched = std::process::Command::new("touch")
+    .args(["-t", "200001010000", &run_dir_str])
+    .status();
+  if !touched.map(|s| s.success()).unwrap_or(false) {
+    eprintln!("skipping (couldn't backdate dir mtime via `touch`)");
+    return;
+  }
+
+  let rp = repos(&db);
+  let artifact_id = Uuid::new_v4();
+  rp.artifacts
+    .create(NewArtifact {
+      id: artifact_id,
+      run_id,
+      node_id: "report_md".into(),
+      name: "1.md".into(),
+      path_or_url: artifact_path.display().to_string(),
+      mime_type: Some("text/markdown".into()),
+      tenant_id: Some("default".into()),
+      size_bytes: Some(14),
+      sha256: Some("abc".into()),
+    })
+    .await
+    .unwrap();
+  sqlx::query("UPDATE artifacts SET created_at = $1 WHERE id = $2")
+    .bind(Utc::now() - Duration::days(90))
+    .bind(artifact_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+  let nb = rp
+    .notebooks
+    .create("default", "Retention Guard NB")
+    .await
+    .unwrap();
+  rp.notebooks
+    .attach_artifact("default", nb.id, artifact_id, "report")
+    .await
+    .unwrap();
+
+  let cfg = CleanupConfig::for_profile(SecurityProfile::Local);
+  cleanup_expired(&db, Some(tmp.path()), None, &cfg)
+    .await
+    .unwrap();
+
+  assert!(
+    rp.runs.get(run_id).await.unwrap().is_some(),
+    "90d run attached to active Notebook must survive cleanup"
+  );
+  assert!(
+    rp.artifacts.get(artifact_id).await.unwrap().is_some(),
+    "90d artifact attached to active Notebook must survive cleanup"
+  );
+  assert!(
+    artifact_path.exists(),
+    "run_dir holding Notebook deliverable must survive cleanup"
+  );
+
+  // Reverse verification: once detached from the Notebook, the expired run,
+  // artifact row, and backdated run_dir are swept cleanly on the next pass.
+  assert!(
+    rp.notebooks
+      .detach_artifact("default", nb.id, artifact_id)
+      .await
+      .unwrap()
+  );
+  cleanup_expired(&db, Some(tmp.path()), None, &cfg)
+    .await
+    .unwrap();
+
+  assert!(
+    rp.runs.get(run_id).await.unwrap().is_none(),
+    "detached expired run must be swept"
+  );
+  assert!(
+    rp.artifacts.get(artifact_id).await.unwrap().is_none(),
+    "detached expired artifact must be swept"
+  );
+  assert!(!run_dir.exists(), "detached expired run_dir must be swept");
+}

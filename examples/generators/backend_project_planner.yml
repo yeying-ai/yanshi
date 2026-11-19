@@ -484,7 +484,6 @@ nodes:
       - mindmap_html
       - spec_md
       - spec_html
-      - spec_pdf
     input_mapping:
       spec: "{{ nodes.structure_spec.outputs.output }}"
       arch_svg: "{{ nodes.arch_diagram.outputs.arch_diagram_svg }}"
@@ -502,7 +501,7 @@ nodes:
       output_format: json
       template: |
         {"deliverable": {
-          "kind": "backend_project_plan",
+          "kind": "report",
           "title": {{ spec.project_name | json_encode() }},
           "content": {{ spec | json_encode() }},
           "citations": [],
@@ -516,7 +515,7 @@ nodes:
             {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
             {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "spec_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
-            {"node_id": "spec_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "spec_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf is defined and pdf %},
             {"node_id": "spec_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}

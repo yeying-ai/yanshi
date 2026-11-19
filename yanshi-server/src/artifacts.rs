@@ -27,7 +27,7 @@ use axum::{
   Extension, Json,
   body::Body,
   extract::{Path as RoutePath, Query, State},
-  http::{HeaderValue, header},
+  http::{HeaderMap, HeaderValue, header},
   response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -177,12 +177,56 @@ pub async fn list_run_artifacts(
 
 /// Stream the artifact's bytes. `Content-Type` is the MIME recorded at
 /// registration (`application/octet-stream` when unknown); the file name
-/// goes out as an attachment with any quote / control characters
-/// stripped so it cannot break the header.
+#[derive(Debug, Default, Deserialize)]
+pub struct DownloadArtifactQuery {
+  /// When `"1"` or `"true"`, emit `Content-Disposition: inline; filename="..."`
+  /// with strict sandboxing headers so browsers can render `.html` / `.pdf` /
+  /// `.svg` deliverables inside `<iframe>` / `<img>` previews without triggering
+  /// an attachment download.
+  #[serde(default)]
+  pub inline: Option<String>,
+}
+
+pub(crate) fn is_inline_query(raw: Option<&str>) -> bool {
+  matches!(
+    raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+    Some("1" | "true" | "yes")
+  )
+}
+
+pub(crate) fn apply_artifact_security_headers(headers: &mut HeaderMap, mime: &str) {
+  headers.insert(
+    header::X_CONTENT_TYPE_OPTIONS,
+    HeaderValue::from_static("nosniff"),
+  );
+  let lowered = mime.trim().to_ascii_lowercase();
+  if lowered.starts_with("text/html") {
+    headers.insert(
+      header::CONTENT_SECURITY_POLICY,
+      HeaderValue::from_static("sandbox allow-scripts"),
+    );
+  } else if lowered.starts_with("image/svg+xml") {
+    headers.insert(
+      header::CONTENT_SECURITY_POLICY,
+      HeaderValue::from_static(
+        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+      ),
+    );
+  }
+}
+
+/// `GET /v1/runs/{id}/artifacts/{artifact_id}` — stream the file.
+///
+/// Both the run and the artifact must belong to the caller's tenant and
+/// the artifact must belong to `id`; any mismatch returns the same 404.
+/// By default `name` goes out as an `attachment` with any quote / control
+/// characters stripped; passing `?inline=1` switches to `inline` with
+/// strict CSP sandboxing for `.html` and `.svg` previews.
 pub async fn download_run_artifact(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   RoutePath((id, artifact_id)): RoutePath<(Uuid, Uuid)>,
+  Query(query): Query<DownloadArtifactQuery>,
 ) -> Result<Response, ApiError> {
   run_for_tenant(&state, id, &tenant).await?;
   let artifact = state
@@ -212,7 +256,12 @@ pub async fn download_run_artifact(
     .chars()
     .filter(|c| !c.is_control() && *c != '"' && *c != '\\' && *c != '/')
     .collect();
-  let disposition = format!("attachment; filename=\"{safe_name}\"");
+  let mode = if is_inline_query(query.inline.as_deref()) {
+    "inline"
+  } else {
+    "attachment"
+  };
+  let disposition = format!("{mode}; filename=\"{safe_name}\"");
 
   let mut response = Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response();
   let headers = response.headers_mut();
@@ -227,6 +276,7 @@ pub async fn download_run_artifact(
   if let Ok(value) = HeaderValue::from_str(&disposition) {
     headers.insert(header::CONTENT_DISPOSITION, value);
   }
+  apply_artifact_security_headers(headers, mime);
   Ok(response)
 }
 
@@ -380,12 +430,7 @@ pub async fn preview_run_file(
   if let Ok(value) = HeaderValue::from_str(&disposition) {
     headers.insert(header::CONTENT_DISPOSITION, value);
   }
-  if mime.starts_with("text/html") {
-    headers.insert(
-      header::CONTENT_SECURITY_POLICY,
-      HeaderValue::from_static("sandbox allow-scripts"),
-    );
-  }
+  apply_artifact_security_headers(headers, mime);
   Ok(response)
 }
 
@@ -779,5 +824,37 @@ mod tests {
     let manifest: serde_json::Value = serde_json::from_str(&manifest_raw).expect("valid json");
     assert_eq!(manifest["run_id"], run_id.to_string());
     assert_eq!(manifest["artifacts"].as_array().map(Vec::len), Some(2));
+  }
+
+  #[test]
+  fn security_headers_sandbox_svg_without_scripts_and_html_with_sandbox() {
+    let mut svg_headers = HeaderMap::new();
+    apply_artifact_security_headers(&mut svg_headers, "image/svg+xml");
+    assert_eq!(
+      svg_headers
+        .get(header::X_CONTENT_TYPE_OPTIONS)
+        .and_then(|v| v.to_str().ok()),
+      Some("nosniff")
+    );
+    let svg_csp = svg_headers
+      .get(header::CONTENT_SECURITY_POLICY)
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or("");
+    assert!(svg_csp.contains("sandbox") && svg_csp.contains("default-src 'none'"));
+    assert!(!svg_csp.contains("allow-scripts"));
+
+    let mut html_headers = HeaderMap::new();
+    apply_artifact_security_headers(&mut html_headers, "text/html; charset=utf-8");
+    assert_eq!(
+      html_headers
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok()),
+      Some("sandbox allow-scripts")
+    );
+
+    assert!(is_inline_query(Some("1")));
+    assert!(is_inline_query(Some("true")));
+    assert!(!is_inline_query(Some("0")));
+    assert!(!is_inline_query(None));
   }
 }

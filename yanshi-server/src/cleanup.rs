@@ -193,6 +193,7 @@ pub async fn cleanup_expired(
       root,
       &db.pool,
       config.run_dir_retention_days as i64,
+      config.artifacts_retention_days as i64,
       config.dry_run,
     )
     .await?;
@@ -259,16 +260,23 @@ async fn list_terminal_runs(pool: &PgPool, days: i64) -> Result<Vec<Uuid>, Clean
   // retention override stays alive until the longest of the three
   // windows expires. Otherwise the run row would cascade-DELETE
   // events/artifacts ahead of their own per-run cutoff and the
-  // override would do nothing.
+  // override would do nothing. Runs whose artifacts are still attached
+  // to an active Notebook (`notebook_artifacts`) are likewise exempt so
+  // `ON DELETE CASCADE` never yanks deliverables out of a Notebook.
   let rows = sqlx::query(
-    r#"SELECT id FROM runs
-       WHERE status IN ('succeeded', 'failed', 'cancelled')
-         AND finished_at IS NOT NULL
-         AND finished_at < NOW() - GREATEST(
+    r#"SELECT r.id FROM runs r
+       WHERE r.status IN ('succeeded', 'failed', 'cancelled')
+         AND r.finished_at IS NOT NULL
+         AND r.finished_at < NOW() - GREATEST(
            $1,
-           COALESCE(events_retention_days, 0),
-           COALESCE(artifacts_retention_days, 0)
-         )::INT * INTERVAL '1 day'"#,
+           COALESCE(r.events_retention_days, 0),
+           COALESCE(r.artifacts_retention_days, 0)
+         )::INT * INTERVAL '1 day'
+         AND NOT EXISTS (
+           SELECT 1 FROM artifacts a
+           JOIN notebook_artifacts na ON na.artifact_id = a.id
+           WHERE a.run_id = r.id
+         )"#,
   )
   .bind(days as i32)
   .fetch_all(pool)
@@ -334,7 +342,10 @@ async fn sweep_artifacts(pool: &PgPool, days: i64) -> Result<u64, CleanupError> 
          AND a.created_at < NOW() - GREATEST(
            $1,
            COALESCE(r.artifacts_retention_days, 0)
-         )::INT * INTERVAL '1 day'"#,
+         )::INT * INTERVAL '1 day'
+         AND NOT EXISTS (
+           SELECT 1 FROM notebook_artifacts na WHERE na.artifact_id = a.id
+         )"#,
   )
   .bind(days as i32)
   .execute(pool)
@@ -350,7 +361,10 @@ async fn preview_artifacts(pool: &PgPool, days: i64) -> Result<u64, CleanupError
          AND a.created_at < NOW() - GREATEST(
            $1,
            COALESCE(r.artifacts_retention_days, 0)
-         )::INT * INTERVAL '1 day'"#,
+         )::INT * INTERVAL '1 day'
+         AND NOT EXISTS (
+           SELECT 1 FROM notebook_artifacts na WHERE na.artifact_id = a.id
+         )"#,
   )
   .bind(days as i32)
   .fetch_one(pool)
@@ -359,12 +373,13 @@ async fn preview_artifacts(pool: &PgPool, days: i64) -> Result<u64, CleanupError
 }
 
 /// Walk `root` (one level deep) and delete directories whose names
-/// parse as UUIDs and whose owning run is **not** active. Returns
-/// `(deleted, skipped_active)`.
+/// parse as UUIDs and whose owning run is **not** active and holds no
+/// unexpired or Notebook-attached artifacts. Returns `(deleted, skipped_active)`.
 async fn sweep_run_dir(
   root: &Path,
   pool: &PgPool,
   days: i64,
+  artifacts_retention_days: i64,
   dry_run: bool,
 ) -> Result<(u64, u64), CleanupError> {
   if !root.exists() {
@@ -401,6 +416,29 @@ async fn sweep_run_dir(
     .is_some();
     if is_active {
       skipped += 1;
+      continue;
+    }
+    // Never delete `<run_dir>` while registered artifacts inside it are
+    // still within their retention window or linked to an active Notebook.
+    let has_retained_artifacts = sqlx::query(
+      r#"SELECT 1 AS present FROM artifacts a
+         LEFT JOIN runs r ON r.id = a.run_id
+         WHERE a.run_id = $1
+           AND (
+             EXISTS (SELECT 1 FROM notebook_artifacts na WHERE na.artifact_id = a.id)
+             OR a.created_at >= NOW() - GREATEST(
+               $2,
+               COALESCE(r.artifacts_retention_days, 0)
+             )::INT * INTERVAL '1 day'
+           )
+         LIMIT 1"#,
+    )
+    .bind(run_id)
+    .bind(artifacts_retention_days as i32)
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if has_retained_artifacts {
       continue;
     }
     // Age gate uses directory mtime.

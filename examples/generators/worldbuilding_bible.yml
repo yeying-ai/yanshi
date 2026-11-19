@@ -500,6 +500,8 @@ nodes:
     dependencies: ["bible_markdown_tpl"]
     input_mapping:
       markdown: "{{ nodes.bible_markdown_tpl.outputs.output }}"
+    parameters:
+      format: md
 
   - id: world_html
     type: render_document
@@ -549,7 +551,7 @@ nodes:
           },
           "citations": [],
           "files": [
-            {"node_id": "world_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"},
+            {"node_id": "world_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
             {"node_id": "world_html", "name": {{ html_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "faction_diagram", "name": {{ fac_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
             {"node_id": "quest_diagram", "name": {{ qst_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},

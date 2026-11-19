@@ -122,7 +122,7 @@ pub struct CreateNotebookRequest {
 pub async fn create_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
-  Json(req): Json<CreateNotebookRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<CreateNotebookRequest>,
 ) -> Result<Json<Notebook>, ApiError> {
   let title = req.title.trim();
   if title.is_empty() {
@@ -173,7 +173,7 @@ pub async fn update_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<UpdateNotebookRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<UpdateNotebookRequest>,
 ) -> Result<Json<Notebook>, ApiError> {
   let title = req.title.trim();
   if title.is_empty() {
@@ -341,7 +341,7 @@ pub async fn add_source(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<AddSourceRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<AddSourceRequest>,
 ) -> Result<Json<Source>, ApiError> {
   own_notebook(&state, &tenant, id).await?;
   let (kind, title, uri, payload) = match req {
@@ -1930,7 +1930,7 @@ pub async fn ask_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<AskNotebookRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<AskNotebookRequest>,
 ) -> Result<Json<AskNotebookResponse>, ApiError> {
   own_notebook(&state, &tenant, id).await?;
   let question = req.question.trim().to_string();
@@ -2256,7 +2256,7 @@ pub async fn generate(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<GenerateRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<GenerateRequest>,
 ) -> Result<Json<Value>, ApiError> {
   own_notebook(&state, &tenant, id).await?;
   let _ = find_generator_template(&req.kind)?;
@@ -2307,7 +2307,7 @@ pub async fn generate_batch(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<GenerateBatchRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<GenerateBatchRequest>,
 ) -> Result<Json<GenerateBatchResponse>, ApiError> {
   own_notebook(&state, &tenant, id).await?;
   if req.items.is_empty() {
@@ -2339,8 +2339,8 @@ pub async fn generate_batch(
   )
   .await?;
 
-  // All-or-nothing preflight: validate every item's kind, params, and gateway policy
-  // BEFORE creating or dispatching the first run row.
+  // All-or-nothing preflight: validate every item's kind, params, gateway policy,
+  // and active tenant concurrency/rate budget BEFORE creating or dispatching run #1.
   let mut prepared_items = Vec::with_capacity(req.items.len());
   for item in req.items {
     prepared_items.push(
@@ -2355,9 +2355,45 @@ pub async fn generate_batch(
     );
   }
 
+  use yanshi_db::RunRepo as _;
+  let queued_db = state
+    .repos
+    .runs
+    .list_filtered(
+      tenant.as_str(),
+      Some("queued"),
+      (max_concurrent + 1) as i64,
+      0,
+    )
+    .await?
+    .len();
+  let running_db = state
+    .repos
+    .runs
+    .list_filtered(
+      tenant.as_str(),
+      Some("running"),
+      (max_concurrent + 1) as i64,
+      0,
+    )
+    .await?
+    .len();
+  let active_db = queued_db + running_db;
+  if active_db + prepared_items.len() > max_concurrent {
+    return Err(ApiError::TooManyRequests(format!(
+      "batch of {} items plus {active_db} active run(s) exceeds tenant concurrency limit ({max_concurrent})",
+      prepared_items.len()
+    )));
+  }
+
+  let admission_guards = state
+    .run_admission_registry
+    .try_admit_batch(tenant.as_str(), prepared_items.len())
+    .map_err(|err| ApiError::TooManyRequests(err.to_string()))?;
+
   let mut runs = Vec::with_capacity(prepared_items.len());
-  for prepared in prepared_items {
-    let run = crate::runs::admit_and_dispatch(
+  for (prepared, guard) in prepared_items.into_iter().zip(admission_guards) {
+    let run = crate::runs::admit_and_dispatch_with_guard(
       &state,
       state.executor.clone(),
       tenant.as_str().to_string(),
@@ -2372,6 +2408,7 @@ pub async fn generate_batch(
         }),
         ..Default::default()
       },
+      guard,
     )
     .await?;
     runs.push(DispatchedNotebookRun {
@@ -2684,7 +2721,7 @@ pub async fn plan_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
   Path(id): Path<Uuid>,
-  Json(req): Json<PlanNotebookRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<PlanNotebookRequest>,
 ) -> Result<Json<PlanNotebookResponse>, ApiError> {
   own_notebook(&state, &tenant, id).await?;
   let goal = req.goal.trim().to_string();
@@ -3376,7 +3413,7 @@ pub async fn export_notebook(
 pub async fn import_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
-  Json(req): Json<ImportNotebookRequest>,
+  crate::error::JsonReq(req): crate::error::JsonReq<ImportNotebookRequest>,
 ) -> Result<Json<ImportNotebookResponse>, ApiError> {
   let (bundle, title_override) = match req {
     ImportNotebookRequest::Wrapped { bundle, title } => (bundle, title),

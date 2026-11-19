@@ -733,10 +733,11 @@ async fn expect_success(response: reqwest::Response) -> Result<Value> {
   if !status.is_success() {
     let parsed: Result<Value, _> = serde_json::from_str(&text);
     if let Ok(value) = parsed
-      && let Some(message) = value
-        .get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
+      && let Some(message) = value.get("error").and_then(|e| {
+        e.get("message")
+          .and_then(Value::as_str)
+          .or_else(|| e.as_str())
+      })
     {
       bail!(
         "server returned {} {}: {message}",

@@ -293,7 +293,6 @@ nodes:
       - mindmap_html
       - summary_md
       - summary_html
-      - summary_pdf
     input_mapping:
       srt_path: "{{ nodes.transcribe.outputs.srt_file }}"
       summary: "{{ nodes.summarize_video.outputs.output }}"
@@ -306,7 +305,7 @@ nodes:
       output_format: json
       template: |
         {"deliverable": {
-          "kind": "video_summarizer",
+          "kind": "report",
           "title": {{ summary.video_title | json_encode() }},
           "content": {{ summary | json_encode() }},
           "citations": [],
@@ -315,7 +314,7 @@ nodes:
             {"node_id": "summary_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "summary_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
             {"node_id": "mindmap_svg", "name": {{ mm_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"},
-            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf %},
+            {"node_id": "mindmap_html", "name": {{ mm_html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}{% if pdf is defined and pdf %},
             {"node_id": "summary_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}

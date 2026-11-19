@@ -462,7 +462,7 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
 }
 
 fn notebook_error_json(status: StatusCode, message: &str) -> Response {
-  (status, Json(json!({ "error": message }))).into_response()
+  crate::local_engine::error_json(status, message)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2676,17 +2676,19 @@ async fn dispatch_prepared_local_generator(
   let notebooks_for_hook = notebooks.clone();
   let hook = Arc::new(
     move |run_id: Uuid,
-          _status: &str,
+          status: &str,
           summaries: &[LocalArtifactSummary],
           deliverable: Option<&Value>| {
-      notebooks_for_hook.attach_run_artifacts(
-        &tenant_for_hook,
-        notebook_id,
-        &kind_for_hook,
-        run_id,
-        summaries,
-        deliverable,
-      );
+      if status == "succeeded" {
+        notebooks_for_hook.attach_run_artifacts(
+          &tenant_for_hook,
+          notebook_id,
+          &kind_for_hook,
+          run_id,
+          summaries,
+          deliverable,
+        );
+      }
     },
   );
 

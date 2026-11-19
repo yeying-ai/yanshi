@@ -370,6 +370,8 @@ nodes:
     dependencies: ["briefing_markdown_tpl"]
     input_mapping:
       markdown: "{{ nodes.briefing_markdown_tpl.outputs.output }}"
+    parameters:
+      format: md
 
   - id: briefing_pdf
     type: render_document
@@ -407,7 +409,7 @@ nodes:
           "citations": [],
           "files": [
             {"node_id": "podcast_master", "name": {{ mp3 | split(pat="/") | last | json_encode() }}, "mime_type": "audio/mpeg", "role": "primary"},
-            {"node_id": "briefing_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"}{% if cover_img is defined and cover_img %},
+            {"node_id": "briefing_md", "name": {{ md_file | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"}{% if cover_img is defined and cover_img %},
             {"node_id": "cover_art", "name": {{ cover_img | split(pat="/") | last | json_encode() }}, "mime_type": {% if cover_img is ending_with(".png") %}"image/png"{% else %}"image/jpeg"{% endif %}, "role": "preview"}{% endif %}{% if pdf_file is defined and pdf_file %},
             {"node_id": "briefing_pdf", "name": {{ pdf_file | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "asset"}{% endif %}
           ]

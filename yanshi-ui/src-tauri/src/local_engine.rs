@@ -80,6 +80,8 @@ pub struct LocalArtifactSummary {
   pub name: String,
   pub mime_type: String,
   pub size_bytes: u64,
+  #[serde(default)]
+  pub sha256: Option<String>,
   pub created_at: DateTime<Utc>,
   #[serde(skip)]
   pub file_path: PathBuf,
@@ -92,6 +94,8 @@ struct PersistedArtifactRecord {
   name: String,
   mime_type: String,
   size_bytes: u64,
+  #[serde(default)]
+  sha256: Option<String>,
   created_at: DateTime<Utc>,
   file_path: PathBuf,
 }
@@ -104,6 +108,7 @@ impl From<&LocalArtifactSummary> for PersistedArtifactRecord {
       name: value.name.clone(),
       mime_type: value.mime_type.clone(),
       size_bytes: value.size_bytes,
+      sha256: value.sha256.clone(),
       created_at: value.created_at,
       file_path: value.file_path.clone(),
     }
@@ -118,6 +123,7 @@ impl From<PersistedArtifactRecord> for LocalArtifactSummary {
       name: value.name,
       mime_type: value.mime_type,
       size_bytes: value.size_bytes,
+      sha256: value.sha256,
       created_at: value.created_at,
       file_path: value.file_path,
     }
@@ -718,6 +724,8 @@ async fn inspect_route(Json(req): Json<InspectRequest>) -> Json<InspectWorkflowR
 #[derive(Debug, Deserialize, Default)]
 struct ListRunsQuery {
   limit: Option<usize>,
+  offset: Option<usize>,
+  status: Option<String>,
 }
 
 async fn list_runs(
@@ -727,15 +735,24 @@ async fn list_runs(
 ) -> impl IntoResponse {
   let tenant = extract_tenant(&headers);
   let cap = query.limit.unwrap_or(20).clamp(1, 100);
+  let offset = query.offset.unwrap_or(0);
+  let status_filter = query
+    .status
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty());
   let mut list: Vec<LocalRunRecord> = state
     .lock_runs()
     .values()
-    .filter(|e| e.record.tenant_id == tenant)
+    .filter(|e| {
+      e.record.tenant_id == tenant
+        && status_filter.is_none_or(|st| e.record.status.eq_ignore_ascii_case(st))
+    })
     .map(|e| e.record.clone())
     .collect();
   list.sort_by_key(|a| std::cmp::Reverse(a.started_at));
-  list.truncate(cap);
-  Json(serde_json::json!({ "runs": list }))
+  let paged: Vec<LocalRunRecord> = list.into_iter().skip(offset).take(cap).collect();
+  Json(serde_json::json!({ "runs": paged }))
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -1030,6 +1047,10 @@ async fn execute_local_flow(
           .file_name()
           .map(|n| n.to_string_lossy().to_string())
           .unwrap_or_else(|| file_out.output_key.clone());
+        let sha256 = tokio::fs::read(&file_out.path).await.ok().map(|bytes| {
+          use sha2::{Digest as _, Sha256};
+          format!("{:x}", Sha256::digest(&bytes))
+        });
         discovered_artifacts.push(LocalArtifactSummary {
           id: Uuid::new_v4(),
           node_id: file_out.node_id,
@@ -1038,6 +1059,7 @@ async fn execute_local_flow(
             .mime_type
             .unwrap_or_else(|| infer_mime(&file_out.path).to_string()),
           size_bytes: meta.len(),
+          sha256,
           created_at: Utc::now(),
           file_path: file_out.path,
         });
@@ -1163,10 +1185,12 @@ fn push_synthetic_terminal_event(
 
 async fn get_run(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let guard = state.lock_runs();
-  match guard.get(&run_id) {
+  match guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) {
     Some(entry) => Json(entry.record.clone()).into_response(),
     None => error_json(StatusCode::NOT_FOUND, "run not found"),
   }
@@ -1415,10 +1439,12 @@ enum DebugControlRequest {
 
 async fn get_run_debug(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let guard = state.lock_runs();
-  let Some(entry) = guard.get(&run_id) else {
+  let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
     return error_json(StatusCode::NOT_FOUND, "run not found");
   };
   let snapshot = entry.debug_controller.as_ref().map(|c| c.snapshot());
@@ -1442,10 +1468,14 @@ async fn post_run_action(
     let Ok(run_id) = Uuid::parse_str(raw_id) else {
       return error_json(StatusCode::BAD_REQUEST, "invalid run UUID");
     };
+    let tenant = extract_tenant(&headers);
     let run_dir = state.base_dir.join(run_id.to_string());
     let (record, synthetic_ev) = {
       let mut guard = state.lock_runs();
-      let Some(entry) = guard.get_mut(&run_id) else {
+      let Some(entry) = guard
+        .get_mut(&run_id)
+        .filter(|e| e.record.tenant_id == tenant)
+      else {
         return error_json(StatusCode::NOT_FOUND, "run not found");
       };
       entry.cancel_token.cancel();
@@ -1583,12 +1613,13 @@ async fn post_run_action(
     let Ok(run_id) = Uuid::parse_str(raw_id) else {
       return error_json(StatusCode::BAD_REQUEST, "invalid run UUID");
     };
+    let tenant = extract_tenant(&headers);
     let req: DebugControlRequest = match serde_json::from_slice(&body) {
       Ok(parsed) => parsed,
       Err(err) => return error_json(StatusCode::BAD_REQUEST, &format!("invalid JSON: {err}")),
     };
     let guard = state.lock_runs();
-    let Some(entry) = guard.get(&run_id) else {
+    let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
       return error_json(StatusCode::NOT_FOUND, "run not found");
     };
     let Some(ctrl) = entry.debug_controller.clone() else {
@@ -1654,12 +1685,14 @@ struct EventsQuery {
 
 async fn events_history(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
   Query(query): Query<EventsQuery>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
   let guard = state.lock_runs();
-  let Some(entry) = guard.get(&run_id) else {
+  let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
     return error_json(StatusCode::NOT_FOUND, "run not found");
   };
   let filtered: Vec<LocalStreamedEvent> = entry
@@ -1673,13 +1706,15 @@ async fn events_history(
 
 async fn stream_events(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
   Query(query): Query<EventsQuery>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
   let (backfill, rx, already_done) = {
     let guard = state.lock_runs();
-    let Some(entry) = guard.get(&run_id) else {
+    let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
       return error_json(StatusCode::NOT_FOUND, "run not found");
     };
     let rx = entry.tx.subscribe();
@@ -1754,10 +1789,24 @@ async fn list_artifacts(
   .into_response()
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct DownloadArtifactQuery {
+  #[serde(default)]
+  inline: Option<String>,
+}
+
+fn is_inline_query_flag(raw: Option<&str>) -> bool {
+  matches!(
+    raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+    Some("1" | "true" | "yes")
+  )
+}
+
 async fn download_artifact(
   State(state): State<LocalEngineState>,
   headers: HeaderMap,
   RoutePath((run_id, artifact_id)): RoutePath<(Uuid, Uuid)>,
+  Query(query): Query<DownloadArtifactQuery>,
 ) -> Response {
   let tenant = extract_tenant(&headers);
   let found = {
@@ -1770,7 +1819,13 @@ async fn download_artifact(
   let Some(artifact) = found else {
     return error_json(StatusCode::NOT_FOUND, "artifact not found");
   };
-  serve_file_inline(&artifact.file_path, &artifact.mime_type).await
+  serve_file_with_disposition(
+    &artifact.file_path,
+    &artifact.mime_type,
+    Some(&artifact.name),
+    is_inline_query_flag(query.inline.as_deref()),
+  )
+  .await
 }
 
 #[derive(Debug, Clone)]
@@ -2024,9 +2079,20 @@ struct PreviewQuery {
 
 async fn preview_file(
   State(state): State<LocalEngineState>,
+  headers: HeaderMap,
   RoutePath(run_id): RoutePath<Uuid>,
   Query(query): Query<PreviewQuery>,
 ) -> Response {
+  let tenant = extract_tenant(&headers);
+  {
+    let guard = state.lock_runs();
+    if !guard
+      .get(&run_id)
+      .is_some_and(|e| e.record.tenant_id == tenant)
+    {
+      return error_json(StatusCode::NOT_FOUND, "run not found");
+    }
+  }
   let run_dir = state.base_dir.join(run_id.to_string());
   let resolved = match resolve_confined_path(&run_dir, &query.path) {
     Ok(p) => p,
@@ -2066,6 +2132,16 @@ fn resolve_confined_path(run_dir: &Path, requested: &str) -> Result<PathBuf, Str
 }
 
 async fn serve_file_inline(path: &Path, mime_type: &str) -> Response {
+  let fallback_name = path.file_name().map(|n| n.to_string_lossy().to_string());
+  serve_file_with_disposition(path, mime_type, fallback_name.as_deref(), true).await
+}
+
+async fn serve_file_with_disposition(
+  path: &Path,
+  mime_type: &str,
+  download_name: Option<&str>,
+  inline: bool,
+) -> Response {
   let file = match tokio::fs::File::open(path).await {
     Ok(f) => f,
     Err(_) => return error_json(StatusCode::NOT_FOUND, "file not found"),
@@ -2077,18 +2153,34 @@ async fn serve_file_inline(path: &Path, mime_type: &str) -> Response {
   let content_type = HeaderValue::from_str(mime_type)
     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
   res.headers_mut().insert(header::CONTENT_TYPE, content_type);
-  res.headers_mut().insert(
-    header::CONTENT_DISPOSITION,
-    HeaderValue::from_static("inline"),
-  );
+
+  let safe_name: String = download_name
+    .or_else(|| path.file_name().and_then(|n| n.to_str()))
+    .unwrap_or("artifact")
+    .chars()
+    .filter(|c| !c.is_control() && *c != '"' && *c != '\\' && *c != '/')
+    .collect();
+  let mode = if inline { "inline" } else { "attachment" };
+  let disposition = format!("{mode}; filename=\"{safe_name}\"");
+  if let Ok(val) = HeaderValue::from_str(&disposition) {
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, val);
+  }
   res.headers_mut().insert(
     header::X_CONTENT_TYPE_OPTIONS,
     HeaderValue::from_static("nosniff"),
   );
-  if mime_type.starts_with("text/html") {
+  let lowered_mime = mime_type.trim().to_ascii_lowercase();
+  if lowered_mime.starts_with("text/html") {
     res.headers_mut().insert(
       header::CONTENT_SECURITY_POLICY,
       HeaderValue::from_static("sandbox allow-scripts"),
+    );
+  } else if lowered_mime.starts_with("image/svg+xml") {
+    res.headers_mut().insert(
+      header::CONTENT_SECURITY_POLICY,
+      HeaderValue::from_static(
+        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+      ),
     );
   }
   if let Some(size) = len
@@ -2394,7 +2486,27 @@ fn workflow_event_to_json(event: &WorkflowEvent) -> serde_json::Value {
 }
 
 pub(crate) fn error_json(status: StatusCode, message: &str) -> Response {
-  (status, Json(serde_json::json!({ "error": message }))).into_response()
+  let code = match status {
+    StatusCode::BAD_REQUEST => "bad_request",
+    StatusCode::UNAUTHORIZED => "unauthorized",
+    StatusCode::FORBIDDEN => "forbidden",
+    StatusCode::NOT_FOUND => "not_found",
+    StatusCode::CONFLICT => "conflict",
+    StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+    StatusCode::UNPROCESSABLE_ENTITY => "bad_request",
+    StatusCode::TOO_MANY_REQUESTS => "too_many_requests",
+    _ => "internal_error",
+  };
+  (
+    status,
+    Json(serde_json::json!({
+      "error": {
+        "code": code,
+        "message": message,
+      }
+    })),
+  )
+    .into_response()
 }
 
 #[cfg(test)]
@@ -2947,10 +3059,19 @@ nodes:
       .expect("create json");
     let run_id = created["run_id"].as_str().expect("run_id").to_string();
 
+    let wrong_tenant_get = client
+      .get(format!("{base_url}/v1/runs/{run_id}"))
+      .header("X-Yanshi-Tenant", "intruder")
+      .send()
+      .await
+      .expect("wrong tenant get");
+    assert_eq!(wrong_tenant_get.status(), StatusCode::NOT_FOUND);
+
     let mut status = String::new();
     for _ in 0..80 {
       let run_json: serde_json::Value = client
         .get(format!("{base_url}/v1/runs/{run_id}"))
+        .header("X-Yanshi-Tenant", "team-resume")
         .send()
         .await
         .expect("get run")
@@ -3013,6 +3134,7 @@ nodes:
     for _ in 0..80 {
       let run_json: serde_json::Value = client
         .get(format!("{restarted_url}/v1/runs/{run_id}"))
+        .header("X-Yanshi-Tenant", "team-resume")
         .send()
         .await
         .expect("get resumed run")
@@ -3036,6 +3158,7 @@ nodes:
     // Events continue monotonically across both attempts and include `third`'s final output
     let events: Vec<LocalStreamedEvent> = client
       .get(format!("{restarted_url}/v1/runs/{run_id}/events/history"))
+      .header("X-Yanshi-Tenant", "team-resume")
       .send()
       .await
       .expect("events history")

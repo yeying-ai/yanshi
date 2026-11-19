@@ -233,7 +233,7 @@ nodes:
 
   - id: deliverable
     type: template
-    dependencies: ["analyze_repo", "system_arch_diagram", "module_dep_diagram", "report_md", "report_html", "report_pdf"]
+    dependencies: ["analyze_repo", "system_arch_diagram", "module_dep_diagram", "report_md", "report_html"]
     input_mapping:
       spec: "{{ nodes.analyze_repo.outputs.output }}"
       arch_svg: "{{ nodes.system_arch_diagram.outputs.system_arch_diagram_svg }}"
@@ -247,7 +247,7 @@ nodes:
       output_format: json
       template: |
         {"deliverable": {
-          "kind": "repo_architecture",
+          "kind": "report",
           "title": {{ spec.project_title | json_encode() }},
           "content": {{ spec | json_encode() }},
           "citations": [],
@@ -257,7 +257,7 @@ nodes:
             {"node_id": "module_dep_diagram", "name": {{ dep_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "primary"},
             {"node_id": "module_dep_diagram", "name": {{ dep_png | split(pat="/") | last | json_encode() }}, "mime_type": "image/png", "role": "preview"},
             {"node_id": "report_md", "name": {{ md | split(pat="/") | last | json_encode() }}, "mime_type": "text/markdown", "role": "asset"},
-            {"node_id": "report_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"}{% if pdf %},
+            {"node_id": "report_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "asset"}{% if pdf is defined and pdf %},
             {"node_id": "report_pdf", "name": {{ pdf | split(pat="/") | last | json_encode() }}, "mime_type": "application/pdf", "role": "primary"}{% endif %}
           ]
         }}
