@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch, resolveApiUrl } from '../lib/api';
-import type { MediaPreviewItem } from '../studio/mediaExtractor';
+import { appendInlineQuery, type MediaPreviewItem } from '../studio/mediaExtractor';
+import { InteractiveSortableTable, parseDelimitedTable } from './NotebookDeliverableViewer';
 
 export interface AuthorizedMediaProps {
   item: MediaPreviewItem;
@@ -18,25 +19,37 @@ function formatBytes(size?: number | null): string {
   return `${(size / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+export function requiresHeaderMediaFetch(apiToken: string, tenantId?: string): boolean {
+  if (Boolean(apiToken.trim())) {
+    return true;
+  }
+  const normalizedTenant = (tenantId ?? '').trim();
+  return Boolean(normalizedTenant && normalizedTenant !== 'default');
+}
+
 export function AuthorizedMedia({
   item,
   apiToken,
   tenantId,
   compact = false,
 }: AuthorizedMediaProps): React.ReactElement {
-  const needsAuthFetch = Boolean(apiToken.trim());
-  const directSrc = resolveApiUrl(item.apiPath);
+  const needsHeaderFetch = requiresHeaderMediaFetch(apiToken, tenantId);
+  const inlineApiPath = appendInlineQuery(item.apiPath);
+  const directInlineSrc = resolveApiUrl(inlineApiPath);
+  const directDownloadSrc = resolveApiUrl(item.apiPath);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [textPreview, setTextPreview] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
+  const wantsTextBody =
+    item.kind === 'subtitle' || item.kind === 'markdown' || item.kind === 'table';
+
   useEffect(() => {
     setLoadError(null);
     setTextPreview(null);
 
-    const wantsSubtitleText = item.kind === 'subtitle';
-    if (!needsAuthFetch && !wantsSubtitleText) {
+    if (!needsHeaderFetch && !wantsTextBody) {
       setBlobUrl(null);
       setLoading(false);
       return undefined;
@@ -46,17 +59,21 @@ export function AuthorizedMedia({
     let createdObjectUrl: string | null = null;
     setLoading(true);
 
-    apiFetch(item.apiPath, apiToken, { signal: controller.signal }, tenantId)
+    apiFetch(inlineApiPath, apiToken, { signal: controller.signal }, tenantId)
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
-        if (wantsSubtitleText) {
+        if (wantsTextBody) {
           const txt = await res.text();
-          setTextPreview(txt.slice(0, 6000));
+          setTextPreview(txt.slice(0, 65_536));
         } else {
-          const blob = await res.blob();
-          createdObjectUrl = URL.createObjectURL(blob);
+          const rawBlob = await res.blob();
+          const typedBlob =
+            item.mimeType && item.mimeType !== rawBlob.type
+              ? new Blob([rawBlob], { type: item.mimeType })
+              : rawBlob;
+          createdObjectUrl = URL.createObjectURL(typedBlob);
           setBlobUrl(createdObjectUrl);
         }
       })
@@ -76,14 +93,22 @@ export function AuthorizedMedia({
         URL.revokeObjectURL(createdObjectUrl);
       }
     };
-  }, [item.apiPath, item.kind, apiToken, tenantId, needsAuthFetch]);
+  }, [inlineApiPath, item.kind, item.mimeType, apiToken, tenantId, needsHeaderFetch, wantsTextBody]);
 
-  const effectiveUrl = needsAuthFetch ? blobUrl : directSrc;
+  const effectiveUrl = needsHeaderFetch ? blobUrl : directInlineSrc;
+
+  const parsedTable = useMemo(() => {
+    if (item.kind !== 'table' || textPreview === null) return null;
+    const isTsv =
+      item.label.toLowerCase().endsWith('.tsv') ||
+      (item.mimeType ?? '').toLowerCase().includes('tab-separated');
+    return parseDelimitedTable(textPreview, isTsv ? '\t' : ',');
+  }, [item.kind, item.label, item.mimeType, textPreview]);
 
   const triggerDownload = async () => {
-    if (!needsAuthFetch) {
+    if (!needsHeaderFetch) {
       const anchor = document.createElement('a');
-      anchor.href = directSrc;
+      anchor.href = directDownloadSrc;
       anchor.download = item.label;
       anchor.target = '_blank';
       anchor.rel = 'noopener noreferrer';
@@ -109,10 +134,13 @@ export function AuthorizedMedia({
 
   const kindLabelMap: Record<MediaPreviewItem['kind'], string> = {
     video: '视频 MP4',
-    image: '幻灯片图像',
-    html: '交互课件 HTML',
+    image: '矢量 / 图像',
+    html: '交互页面 HTML',
+    pdf: '排版文档 PDF',
+    table: '数据表格 CSV/TSV',
+    markdown: '文本 / Markdown',
     audio: '口播音频',
-    document: '文档课件',
+    document: '可编辑套件文档',
     subtitle: '字幕时间轴',
   };
 
@@ -172,13 +200,27 @@ export function AuthorizedMedia({
           />
         )}
 
-        {!loading && !loadError && item.kind === 'subtitle' && textPreview !== null && (
-          <pre className="studio-media-subtitle">{textPreview}</pre>
+        {!loading && !loadError && item.kind === 'pdf' && effectiveUrl && (
+          <iframe className="studio-media-pdf" src={effectiveUrl} title={item.label} />
         )}
+
+        {!loading && !loadError && item.kind === 'table' && parsedTable && (
+          <InteractiveSortableTable
+            caption={item.label}
+            columns={parsedTable.columns}
+            rows={parsedTable.rows}
+            testId="media-csv-table"
+          />
+        )}
+
+        {!loading &&
+          !loadError &&
+          (item.kind === 'subtitle' || item.kind === 'markdown') &&
+          textPreview !== null && <pre className="studio-media-subtitle">{textPreview}</pre>}
 
         {!loading && !loadError && item.kind === 'document' && (
           <div className="studio-media-doc">
-            <p>已生成可编辑文档产物（{item.label}），点击右上角按钮下载或本地打开。</p>
+            <p>已生成可编辑套件产物（{item.label}），点击右上角按钮下载或本地打开。</p>
           </div>
         )}
       </div>

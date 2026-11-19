@@ -2992,6 +2992,21 @@ h1 {
   color: #065f46;
 }
 
+.studio-media-badge--pdf {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.studio-media-badge--table {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.studio-media-badge--markdown {
+  background: #f1f5f9;
+  color: #334155;
+}
+
 .studio-media-card__title {
   font-size: 12px;
   color: #0f172a;
@@ -3035,6 +3050,14 @@ h1 {
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   background: #0f172a;
+}
+
+.studio-media-pdf {
+  width: 100%;
+  height: 400px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
 }
 
 .studio-media-subtitle {
@@ -5597,6 +5620,237 @@ button.nb-citation-chip:focus-visible {
 .nb-dialog::backdrop {
   overflow: hidden;
   overscroll-behavior: contain;
+}
+
+.nb-edit-source-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.nb-study-runner,
+.nb-interactive-table-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border-radius: 9px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+}
+
+.nb-interactive-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.nb-interactive-meta {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+}
+
+.nb-flashcard-surface {
+  width: 100%;
+  min-height: 118px;
+  padding: 14px 16px;
+  border-radius: 9px;
+  border: 1.5px solid #99f6e4;
+  background: #ffffff;
+  color: #0f172a;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.nb-flashcard-surface--flipped {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.nb-flashcard-surface:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
+.nb-flashcard-side-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.nb-flashcard-text {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: #0f172a;
+  word-break: break-word;
+}
+
+.nb-study-citation-row {
+  display: flex;
+}
+
+.nb-quiz-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nb-quiz-item {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nb-quiz-question {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.45;
+}
+
+.nb-quiz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nb-quiz-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  font-size: 12.5px;
+  color: #1e293b;
+  cursor: pointer;
+  accent-color: #0f766e;
+}
+
+.nb-quiz-opt input[type='radio'] {
+  margin-top: 2px;
+  accent-color: #0f766e;
+  flex-shrink: 0;
+}
+
+.nb-quiz-opt--right {
+  border-color: #10b981;
+  background: #ecfdf5;
+  color: #065f46;
+  font-weight: 600;
+}
+
+.nb-quiz-opt--wrong {
+  border-color: #f87171;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.nb-quiz-feedback {
+  padding-top: 6px;
+  border-top: 1px dashed #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nb-quiz-feedback p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #334155;
+}
+
+.nb-table-filter-input {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  font-size: 12.5px;
+}
+
+.nb-table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: 320px;
+  border-radius: 7px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+}
+
+.nb-table-wrapper:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
+.nb-sortable-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.nb-sortable-table th,
+.nb-sortable-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.nb-sortable-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f1f5f9;
+  font-weight: 700;
+}
+
+.nb-th-sort-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.nb-th-sort-btn:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
+.nb-sort-glyph {
+  font-size: 10px;
+  color: #0f766e;
+  flex-shrink: 0;
 }
 
 @media (max-width: 1180px) {

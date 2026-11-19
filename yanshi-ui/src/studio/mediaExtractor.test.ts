@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { collectRunDeliverables, extractNodeMediaPreviews } from './mediaExtractor';
+import {
+  appendInlineQuery,
+  classifyMediaPath,
+  collectRunDeliverables,
+  extractNodeMediaPreviews,
+} from './mediaExtractor';
 import { inspectYamlLocally, TECH_SLIDES_VIDEO_YAML } from './presets';
 
 describe('extractNodeMediaPreviews', () => {
@@ -65,6 +70,22 @@ describe('extractNodeMediaPreviews', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].kind).toBe('video');
     expect(merged[0].apiPath).toContain('/preview?path=');
+  });
+
+  it('classifies pdf, csv/tsv tables, markdown/sql/json, and appends inline=1 to artifact URLs', () => {
+    expect(classifyMediaPath('report.pdf', 'application/pdf')).toBe('pdf');
+    expect(classifyMediaPath('table.csv', 'text/csv; charset=utf-8')).toBe('table');
+    expect(classifyMediaPath('metrics.tsv')).toBe('table');
+    expect(classifyMediaPath('dossier.md', 'text/markdown')).toBe('markdown');
+    expect(classifyMediaPath('schema.sql')).toBe('markdown');
+    expect(classifyMediaPath('deck.pptx')).toBe('document');
+    expect(classifyMediaPath('sheet.xlsx')).toBe('document');
+    expect(appendInlineQuery('/v1/runs/r1/artifacts/a1')).toBe(
+      '/v1/runs/r1/artifacts/a1?inline=1',
+    );
+    expect(appendInlineQuery('/v1/runs/r1/preview?path=1.svg')).toBe(
+      '/v1/runs/r1/preview?path=1.svg',
+    );
   });
 });
 

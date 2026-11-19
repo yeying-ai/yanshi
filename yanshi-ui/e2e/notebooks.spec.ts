@@ -86,8 +86,27 @@ test.describe('Content Studio — /ui/notebooks lifecycle, chunk reader, batch s
     await expect(page.getByTestId('chunk-preview-dialog')).toContainText('Severn Bore');
     await page.getByTestId('chunk-reader-close-btn').click();
 
+    // 5b. Inline source edit (`PATCH /v1/notebooks/:id/sources/:source_id`) -> immediate BM25 re-index
+    await page.getByRole('button', { name: /编辑来源/ }).first().click();
+    await expect(page.getByTestId('edit-source-dialog')).toBeVisible();
+    const editTextInput = page.getByTestId('edit-source-text-input');
+    await expect(editTextInput).toBeEnabled();
+    const existingText = await editTextInput.inputValue();
+    expect(existingText).toContain('Severn Bore');
+    await page.getByTestId('edit-source-title-input').fill('Macrotidal Field Notes');
+    await editTextInput.fill(
+      `${existingText}\n\nMont-Saint-Michel spring tidal amplitude reaches fourteen meters.`,
+    );
+    await page.getByTestId('save-edit-source-btn').click();
+    await expect(page.locator('.nb-source-list')).toContainText('Macrotidal Field Notes');
+
+    await page.getByTestId('notebook-search-input').fill('Mont-Saint-Michel');
+    await page.getByTestId('notebook-search-submit').click();
+    await expect(page.locator('.nb-hit-card').first()).toContainText('Mont-Saint-Michel');
+
     // 6. When `E2E_MOCK_MODEL` is configured (CI + local E2E harness), verify multi-select
-    //    `generate-batch` (`flashcards` + `quiz`) -> live concurrent tracking -> gallery + `.zip` download!
+    //    `generate-batch` (`flashcards` + `quiz`) -> live concurrent tracking -> interactive viewers +
+    //    non-default tenant `blob:` media preview + `.zip` download!
     if (mockModel) {
       await page.getByTestId('notebook-model-input').fill(mockModel);
       await page.getByTestId('notebook-cost-limit-input').fill('4.00');
@@ -97,6 +116,20 @@ test.describe('Content Studio — /ui/notebooks lifecycle, chunk reader, batch s
 
       await expect(page.getByTestId('notebook-live-run')).toBeVisible();
       await expect(page.locator('.nb-artifact-block')).toHaveCount(2, { timeout: 20_000 });
+
+      // Interactive flashcards flip & quiz self-grading
+      await expect(page.getByTestId('interactive-flashcards')).toBeVisible();
+      await expect(page.getByTestId('flashcard-flip-btn')).toHaveAttribute('aria-pressed', 'false');
+      await page.getByTestId('flashcard-flip-btn').click();
+      await expect(page.getByTestId('flashcard-flip-btn')).toHaveAttribute('aria-pressed', 'true');
+
+      await expect(page.getByTestId('interactive-quiz')).toBeVisible();
+      await page.getByTestId('interactive-quiz').locator('input[type="radio"]').nth(1).check();
+      await expect(page.getByTestId('quiz-score-banner')).toContainText('自测得分：1 / 1');
+
+      // AuthorizedMedia under custom non-`default` tenant loads via authenticated `blob:` URL
+      await expect(page.locator('.studio-media-error')).toHaveCount(0);
+      await expect(page.locator('.studio-media-iframe').first()).toHaveAttribute('src', /^blob:/);
 
       const zipDownloadPromise = page.waitForEvent('download');
       await page.getByTestId('download-notebook-zip-btn').click();

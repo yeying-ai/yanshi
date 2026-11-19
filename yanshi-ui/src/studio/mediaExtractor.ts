@@ -1,7 +1,16 @@
 import { resolveApiUrl } from '../lib/api';
 import type { ArtifactSummary } from '../schemas';
 
-export type MediaPreviewKind = 'image' | 'audio' | 'video' | 'html' | 'document' | 'subtitle';
+export type MediaPreviewKind =
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'html'
+  | 'pdf'
+  | 'table'
+  | 'markdown'
+  | 'document'
+  | 'subtitle';
 
 export interface MediaPreviewItem {
   key: string;
@@ -31,23 +40,55 @@ const EXT_KIND_MAP: Record<string, MediaPreviewKind> = {
   webm: 'video',
   html: 'html',
   htm: 'html',
-  pdf: 'document',
+  pdf: 'pdf',
+  csv: 'table',
+  tsv: 'table',
+  md: 'markdown',
+  markdown: 'markdown',
+  json: 'markdown',
+  sql: 'markdown',
+  txt: 'markdown',
   pptx: 'document',
   docx: 'document',
+  xlsx: 'document',
   srt: 'subtitle',
   vtt: 'subtitle',
 };
 
-function classifyPath(filePath: string, mimeType?: string | null): MediaPreviewKind | null {
+export function classifyMediaPath(
+  filePath: string,
+  mimeType?: string | null,
+): MediaPreviewKind | null {
   const mime = (mimeType ?? '').toLowerCase();
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('audio/')) return 'audio';
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('text/html')) return 'html';
-  if (mime.includes('presentation') || mime.includes('pdf') || mime.includes('wordprocessing')) {
-    return 'document';
+  if (mime.includes('pdf')) return 'pdf';
+  if (mime.startsWith('text/csv') || mime.startsWith('text/tab-separated-values')) {
+    return 'table';
   }
   if (mime.includes('subrip') || mime.startsWith('text/vtt')) return 'subtitle';
+  if (
+    mime.includes('presentation') ||
+    mime.includes('wordprocessing') ||
+    mime.includes('spreadsheet')
+  ) {
+    return 'document';
+  }
+  if (
+    mime.startsWith('text/markdown') ||
+    mime.startsWith('application/json') ||
+    mime.startsWith('application/sql') ||
+    mime.startsWith('text/plain')
+  ) {
+    const cleanForExt = filePath.split('?')[0].split('#')[0];
+    const dotPos = cleanForExt.lastIndexOf('.');
+    const extHint = dotPos >= 0 ? cleanForExt.slice(dotPos + 1).toLowerCase() : '';
+    if (extHint === 'csv' || extHint === 'tsv') return 'table';
+    if (extHint === 'srt' || extHint === 'vtt') return 'subtitle';
+    return 'markdown';
+  }
 
   const clean = filePath.split('?')[0].split('#')[0];
   const dot = clean.lastIndexOf('.');
@@ -56,14 +97,24 @@ function classifyPath(filePath: string, mimeType?: string | null): MediaPreviewK
   return EXT_KIND_MAP[ext] ?? null;
 }
 
+export function appendInlineQuery(apiPath: string): string {
+  if (!apiPath.includes('/artifacts/') || apiPath.endsWith('.zip')) {
+    return apiPath;
+  }
+  if (/[?&]inline=/.test(apiPath)) {
+    return apiPath;
+  }
+  return apiPath.includes('?') ? `${apiPath}&inline=1` : `${apiPath}?inline=1`;
+}
+
 function looksLikeRunFilePath(str: string): boolean {
   if (!str || str.length > 1024 || str.includes('\n')) return false;
   if (/^https?:\/\//i.test(str)) return false;
   // Paths emitted by Yanshi nodes live under `<run_dir>/artifacts/...` or carry media extensions.
   if (str.includes('/artifacts/') || str.startsWith('artifacts/')) {
-    return classifyPath(str) !== null;
+    return classifyMediaPath(str) !== null;
   }
-  if ((str.startsWith('/') || str.includes('/')) && classifyPath(str) !== null) {
+  if ((str.startsWith('/') || str.includes('/')) && classifyMediaPath(str) !== null) {
     return true;
   }
   return false;
@@ -98,7 +149,7 @@ export function extractNodeMediaPreviews(
   const pushCandidate = (filePath: string, hintLabel: string, mimeType?: string | null) => {
     const trimmed = filePath.trim();
     if (!trimmed || seenPaths.has(trimmed)) return;
-    const kind = classifyPath(trimmed, mimeType);
+    const kind = classifyMediaPath(trimmed, mimeType);
     if (!kind) return;
     seenPaths.add(trimmed);
     const apiPath = buildPreviewApiPath(runId, trimmed);
@@ -141,14 +192,17 @@ export function extractNodeMediaPreviews(
 
   walk(output, '', 0);
 
-  // Order: video first, then html/images, audio, documents, subtitles.
+  // Order: video first, then html/images/pdf/tables, audio, markdown/documents, subtitles.
   const priority: Record<MediaPreviewKind, number> = {
     video: 0,
     image: 1,
     html: 2,
-    audio: 3,
-    document: 4,
-    subtitle: 5,
+    pdf: 3,
+    table: 4,
+    audio: 5,
+    markdown: 6,
+    document: 7,
+    subtitle: 8,
   };
   items.sort((a, b) => priority[a.kind] - priority[b.kind] || a.key.localeCompare(b.key));
   return items;
@@ -168,7 +222,7 @@ export function collectRunDeliverables(
   const seenNames = new Set<string>();
 
   for (const art of artifacts) {
-    const kind = classifyPath(art.name, art.mime_type) ?? 'document';
+    const kind = classifyMediaPath(art.name, art.mime_type) ?? 'document';
     // Prefer inline `/preview` for HTML/images/video/audio when we also have path,
     // otherwise use `/artifacts/{id}` which streams the exact registered bytes.
     const apiPath = `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(art.id)}`;
@@ -179,7 +233,7 @@ export function collectRunDeliverables(
       label: art.name,
       kind,
       apiPath,
-      directUrl: resolveApiUrl(apiPath),
+      directUrl: resolveApiUrl(appendInlineQuery(apiPath)),
       mimeType: art.mime_type ?? undefined,
       sizeBytes: art.size_bytes,
     });
@@ -189,12 +243,15 @@ export function collectRunDeliverables(
     for (const item of extractNodeMediaPreviews(runId, nodeId, output)) {
       const dedupKey = `${nodeId}:${item.label}`;
       if (seenNames.has(dedupKey)) {
-        // Upgrade HTML/image/video items to inline `/preview` URL so browsers
+        // Upgrade HTML/PDF/image/video items to inline `/preview` URL so browsers
         // render them inline instead of triggering `Content-Disposition: attachment`.
         const existingIdx = results.findIndex(
           (r) => r.nodeId === nodeId && r.label === item.label,
         );
-        if (existingIdx >= 0 && ['video', 'image', 'html', 'audio'].includes(item.kind)) {
+        if (
+          existingIdx >= 0 &&
+          ['video', 'image', 'html', 'pdf', 'audio'].includes(item.kind)
+        ) {
           results[existingIdx] = {
             ...results[existingIdx],
             apiPath: item.apiPath,
@@ -211,10 +268,13 @@ export function collectRunDeliverables(
   const priority: Record<MediaPreviewKind, number> = {
     video: 0,
     html: 1,
-    document: 2,
-    image: 3,
-    audio: 4,
-    subtitle: 5,
+    pdf: 2,
+    table: 3,
+    document: 4,
+    markdown: 5,
+    image: 6,
+    audio: 7,
+    subtitle: 8,
   };
   results.sort((a, b) => priority[a.kind] - priority[b.kind] || a.label.localeCompare(b.label));
   return results;

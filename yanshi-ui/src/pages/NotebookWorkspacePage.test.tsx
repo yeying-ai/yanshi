@@ -1,6 +1,11 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { requiresHeaderMediaFetch } from '../components/AuthorizedMedia';
+import {
+  NotebookDeliverableViewer,
+  parseDelimitedTable,
+} from '../components/NotebookDeliverableViewer';
 import {
   NotebookArtifactsEnvelopeSchema,
   NotebookAskResponseSchema,
@@ -9,6 +14,7 @@ import {
   NotebookDetailEnvelopeSchema,
   NotebookExportBundleSchema,
   NotebookImportResponseSchema,
+  NotebookMessagesEnvelopeSchema,
   NotebookPlanResponseSchema,
   NotebookSearchEnvelopeSchema,
   NotebookSourceChunksEnvelopeSchema,
@@ -20,6 +26,7 @@ import {
   buildGeneratorParamsFromDraft,
   dedupeDeliverableCitations,
   encodeBytesToBase64,
+  formatAskResultAsNoteText,
   NotebookAskResultCard,
   NotebookDeliverableCitationBar,
   NotebookWorkspacePage,
@@ -69,6 +76,43 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     });
     expect(htmlItem.kind).toBe('html');
     expect(htmlItem.apiPath).toBe('/v1/runs/run-9/artifacts/art-1');
+    expect(htmlItem.directUrl).toContain('?inline=1');
+
+    const pdfItem = notebookArtifactToMediaItem({
+      kind: 'report',
+      id: 'art-pdf',
+      run_id: 'run-9',
+      node_id: 'pdf',
+      name: 'report.pdf',
+      path_or_url: '/tmp/report.pdf',
+      mime_type: 'application/pdf',
+      created_at: '2026-11-15T00:00:00Z',
+    });
+    expect(pdfItem.kind).toBe('pdf');
+
+    const tableItem = notebookArtifactToMediaItem({
+      kind: 'data_table',
+      id: 'art-csv',
+      run_id: 'run-9',
+      node_id: 'table_csv',
+      name: 'table.csv',
+      path_or_url: '/tmp/table.csv',
+      mime_type: 'text/csv',
+      created_at: '2026-11-15T00:00:00Z',
+    });
+    expect(tableItem.kind).toBe('table');
+
+    const mdItem = notebookArtifactToMediaItem({
+      kind: 'report',
+      id: 'art-md',
+      run_id: 'run-9',
+      node_id: 'md',
+      name: 'report.md',
+      path_or_url: '/tmp/report.md',
+      mime_type: 'text/markdown',
+      created_at: '2026-11-15T00:00:00Z',
+    });
+    expect(mdItem.kind).toBe('markdown');
 
     const audioItem = notebookArtifactToMediaItem({
       kind: 'audio_overview',
@@ -217,6 +261,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('data-testid="chunk-lookup-input"');
     expect(html).toContain('data-testid="delete-notebook-dialog"');
     expect(html).toContain('data-testid="chunk-preview-dialog"');
+    expect(html).toContain('data-testid="edit-source-dialog"');
     expect(html).not.toContain('role="dialog"');
     expect(html).not.toContain('aria-modal=');
     for (const spec of STUDIO_GENERATORS) {
@@ -435,5 +480,114 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     });
     expect(batch.runs).toHaveLength(2);
     expect(batch.per_run_cost_limit_usd).toBe(1.5);
+  });
+
+  it('requires authenticated fetch for custom tenants and formats persisted Q&A notes & interactive deliverable viewers', () => {
+    expect(requiresHeaderMediaFetch('', undefined)).toBe(false);
+    expect(requiresHeaderMediaFetch('', 'default')).toBe(false);
+    expect(requiresHeaderMediaFetch('', 'tenant-custom')).toBe(true);
+    expect(requiresHeaderMediaFetch('tok-123', 'default')).toBe(true);
+
+    const msgEnv = NotebookMessagesEnvelopeSchema.parse({
+      notebook_id: 'nb-1',
+      messages: [
+        {
+          id: 'msg-1',
+          notebook_id: 'nb-1',
+          question: 'What causes spring tides?',
+          answer: 'Solar and lunar alignment.',
+          model: 'gpt-4o',
+          citations: [{ source_id: 'src-1', chunk_id: 'src-1:0', quote: 'Alignment amplifies tides.' }],
+          used_chunk_count: 1,
+        },
+      ],
+    });
+    expect(msgEnv.messages[0]?.id).toBe('msg-1');
+
+    const noteBody = formatAskResultAsNoteText(
+      {
+        notebook_id: 'nb-1',
+        question: 'What causes spring tides?',
+        answer: 'Solar and lunar alignment.',
+        model: 'gpt-4o',
+        citations: [{ source_id: 'src-1', chunk_id: 'src-1:0', quote: 'Alignment amplifies tides.' }],
+        used_chunk_count: 1,
+      },
+      new Map([['src-1', 'Tidal Notes']]),
+    );
+    expect(noteBody).toContain('引用来源：');
+    expect(noteBody).toContain('[src-1:0] (Tidal Notes)');
+    expect(noteBody).toContain('Alignment amplifies tides.');
+
+    const parsedCsv = parseDelimitedTable(
+      'Basin,Peak (m),Notes\r\n"Bay of Fundy, CA",16.3,"Resonant ""funnel"" basin"\r\nSevern,15.0,Macrotidal\r\n',
+      ',',
+    );
+    expect(parsedCsv.columns).toEqual(['Basin', 'Peak (m)', 'Notes']);
+    expect(parsedCsv.rows).toHaveLength(2);
+    expect(parsedCsv.rows[0]?.cells).toEqual([
+      'Bay of Fundy, CA',
+      '16.3',
+      'Resonant "funnel" basin',
+    ]);
+
+    const fcHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'flashcards',
+          title: 'Tidal Cards',
+          content: {
+            items: [{ front: 'Peak range in Fundy?', back: '16.3 m', chunk_id: 'src-1:0' }],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(fcHtml).toContain('data-testid="interactive-flashcards"');
+    expect(fcHtml).toContain('Peak range in Fundy?');
+
+    const quizHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'quiz',
+          title: 'Tidal Quiz',
+          content: {
+            items: [
+              {
+                question: 'Which basin reaches 16.3 m?',
+                options: ['Bay of Fundy', 'Baltic Sea'],
+                answer: 0,
+                explanation: 'Half-wave resonance.',
+                chunk_id: 'src-1:0',
+              },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(quizHtml).toContain('data-testid="interactive-quiz"');
+    expect(quizHtml).toContain('<fieldset');
+    expect(quizHtml).toContain('Which basin reaches 16.3 m?');
+
+    const dtHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'data_table',
+          title: 'Basin Metrics',
+          content: {
+            columns: ['Basin', 'Peak (m)'],
+            rows: [{ cells: ['Bay of Fundy', '16.3'], chunk_id: 'src-1:0', quote: '16.3 m peak' }],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(dtHtml).toContain('data-testid="interactive-data-table"');
+    expect(dtHtml).toContain('scope="col"');
+    expect(dtHtml).toContain('Bay of Fundy');
   });
 });

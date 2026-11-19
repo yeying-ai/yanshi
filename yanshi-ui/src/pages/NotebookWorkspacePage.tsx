@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
+import { NotebookDeliverableViewer } from '../components/NotebookDeliverableViewer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, formatApiError, parseSseChunk, resolveApiUrl } from '../lib/api';
 import { formatTime, isTerminalRun, runFromEnvelope } from '../lib/helpers';
@@ -20,6 +21,7 @@ import {
   NotebookExportBundleSchema,
   NotebookGenerateResponseSchema,
   NotebookImportResponseSchema,
+  NotebookMessagesEnvelopeSchema,
   NotebookPlanResponseSchema,
   NotebookSchema,
   NotebookSearchEnvelopeSchema,
@@ -39,7 +41,12 @@ import {
   type NotebookSource,
   type StreamedEvent,
 } from '../schemas';
-import type { MediaPreviewItem, MediaPreviewKind } from '../studio/mediaExtractor';
+import {
+  appendInlineQuery,
+  classifyMediaPath,
+  type MediaPreviewItem,
+  type MediaPreviewKind,
+} from '../studio/mediaExtractor';
 import { formatSpendUsd, reduceWorkflowEvents } from './WorkflowStudioPage';
 
 export interface NotebookWorkspacePageProps {
@@ -447,23 +454,7 @@ function classifyNotebookArtifactKind(
   name: string,
   mimeType?: string | null,
 ): MediaPreviewKind {
-  const mime = (mimeType ?? '').toLowerCase();
-  if (mime.startsWith('image/')) return 'image';
-  if (mime.startsWith('audio/')) return 'audio';
-  if (mime.startsWith('video/')) return 'video';
-  if (mime.startsWith('text/html')) return 'html';
-  if (mime.includes('subrip') || mime.startsWith('text/vtt')) return 'subtitle';
-  if (mime.includes('pdf') || mime.includes('presentation') || mime.includes('markdown')) {
-    return 'document';
-  }
-  const dot = name.lastIndexOf('.');
-  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
-  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].includes(ext)) return 'image';
-  if (['mp3', 'wav', 'ogg', 'm4a'].includes(ext)) return 'audio';
-  if (['mp4', 'webm'].includes(ext)) return 'video';
-  if (['html', 'htm'].includes(ext)) return 'html';
-  if (['srt', 'vtt'].includes(ext)) return 'subtitle';
-  return 'document';
+  return classifyMediaPath(name, mimeType) ?? 'document';
 }
 
 export function notebookArtifactToMediaItem(artifact: NotebookArtifact): MediaPreviewItem {
@@ -476,7 +467,7 @@ export function notebookArtifactToMediaItem(artifact: NotebookArtifact): MediaPr
     label: artifact.name,
     kind: classifyNotebookArtifactKind(artifact.name, artifact.mime_type),
     apiPath,
-    directUrl: resolveApiUrl(apiPath),
+    directUrl: resolveApiUrl(appendInlineQuery(apiPath)),
     mimeType: artifact.mime_type ?? undefined,
     sizeBytes: artifact.size_bytes ?? undefined,
   };
@@ -614,6 +605,26 @@ export function buildAskHistoryPayload(
     .filter((t) => t.question.length > 0 || t.answer.length > 0);
   const skip = Math.max(0, cleaned.length - Math.max(1, maxTurns));
   return cleaned.slice(skip);
+}
+
+/** Format a grounded `/ask` turn (including verified citations) for saving as an inline note source. */
+export function formatAskResultAsNoteText(
+  result: NotebookAskResponse,
+  sourceTitleById?: ReadonlyMap<string, string>,
+): string {
+  const base = `问题：${result.question.trim()}\n\n回答：\n${result.answer.trim()}`;
+  const citations = dedupeDeliverableCitations(result.citations);
+  if (citations.length === 0) {
+    return base;
+  }
+  const lines = citations.map((cit) => {
+    const title = sourceTitleById?.get(cit.source_id);
+    const label = [cit.chunk_id ? `[${cit.chunk_id}]` : '', title ? `(${title})` : '']
+      .filter(Boolean)
+      .join(' ');
+    return `- ${label ? `${label} ` : ''}“${cit.quote}”`;
+  });
+  return `${base}\n\n引用来源：\n${lines.join('\n')}`;
 }
 
 export interface NotebookAskResultCardProps {
@@ -792,6 +803,7 @@ export function NotebookWorkspacePage({
   const [excludedSourceIds, setExcludedSourceIds] = useState<string[]>([]);
   const [askQuestionDraft, setAskQuestionDraft] = useState<string>('');
   const [askBusy, setAskBusy] = useState<boolean>(false);
+  const [clearAskBusy, setClearAskBusy] = useState<boolean>(false);
   const [askThread, setAskThread] = useState<NotebookAskResponse[]>([]);
   const [saveAskSourceBusy, setSaveAskSourceBusy] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -804,6 +816,12 @@ export function NotebookWorkspacePage({
   const [readerSourceId, setReaderSourceId] = useState<string>('');
   const [browseSourceBusyId, setBrowseSourceBusyId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [retryingSourceId, setRetryingSourceId] = useState<string | null>(null);
+  const [editingSource, setEditingSource] = useState<NotebookSource | null>(null);
+  const [editSourceTitleDraft, setEditSourceTitleDraft] = useState<string>('');
+  const [editSourceTextDraft, setEditSourceTextDraft] = useState<string>('');
+  const [editSourceLoadingText, setEditSourceLoadingText] = useState<boolean>(false);
+  const [editSourceBusy, setEditSourceBusy] = useState<boolean>(false);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteNotebookBusy, setDeleteNotebookBusy] = useState<boolean>(false);
   const [exportNotebookBusy, setExportNotebookBusy] = useState<boolean>(false);
@@ -815,6 +833,7 @@ export function NotebookWorkspacePage({
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const chunkDialogRef = useRef<HTMLDialogElement | null>(null);
+  const editSourceDialogRef = useRef<HTMLDialogElement | null>(null);
 
   // Studio generator, AI planner & multi-select batch state
   const [expandedKind, setExpandedKind] = useState<GeneratorKind>('flashcards');
@@ -887,22 +906,22 @@ export function NotebookWorkspacePage({
   );
 
   const loadNotebookDetailAndArtifacts = useCallback(
-    async (notebookId: string) => {
+    async (notebookId: string, opts?: { refreshMessages?: boolean }) => {
       if (!notebookId) {
         setActiveNotebook(null);
         setSources([]);
         setArtifacts([]);
         return;
       }
+      const shouldLoadMessages = opts?.refreshMessages !== false;
       try {
-        const [detailRes, artRes] = await Promise.all([
-          apiFetch(`/v1/notebooks/${encodeURIComponent(notebookId)}`, apiToken, {}, tenantId),
-          apiFetch(
-            `/v1/notebooks/${encodeURIComponent(notebookId)}/artifacts`,
-            apiToken,
-            {},
-            tenantId,
-          ),
+        const encodedId = encodeURIComponent(notebookId);
+        const [detailRes, artRes, msgRes] = await Promise.all([
+          apiFetch(`/v1/notebooks/${encodedId}`, apiToken, {}, tenantId),
+          apiFetch(`/v1/notebooks/${encodedId}/artifacts`, apiToken, {}, tenantId),
+          shouldLoadMessages
+            ? apiFetch(`/v1/notebooks/${encodedId}/messages`, apiToken, {}, tenantId)
+            : Promise.resolve(null),
         ]);
         if (!detailRes.ok) {
           if (detailRes.status === 404) {
@@ -929,6 +948,25 @@ export function NotebookWorkspacePage({
             'GET /v1/notebooks/:id/artifacts',
           );
           setArtifacts(artEnv.artifacts);
+        }
+
+        if (msgRes && msgRes.ok) {
+          const msgEnv = await parseJsonResponse(
+            NotebookMessagesEnvelopeSchema,
+            msgRes,
+            'GET /v1/notebooks/:id/messages',
+          );
+          setAskThread(
+            msgEnv.messages.map((m) => ({
+              message_id: m.id,
+              notebook_id: m.notebook_id,
+              question: m.question,
+              answer: m.answer,
+              model: m.model,
+              citations: m.citations,
+              used_chunk_count: m.used_chunk_count,
+            })),
+          );
         }
       } catch (err) {
         setErrorBanner(formatApiError(err));
@@ -980,7 +1018,7 @@ export function NotebookWorkspacePage({
       return undefined;
     }
     const timer = window.setInterval(() => {
-      void loadNotebookDetailAndArtifacts(selectedNotebookId);
+      void loadNotebookDetailAndArtifacts(selectedNotebookId, { refreshMessages: false });
     }, 1200);
     return () => window.clearInterval(timer);
   }, [selectedNotebookId, hasIngestingSource, loadNotebookDetailAndArtifacts]);
@@ -1390,6 +1428,138 @@ export function NotebookWorkspacePage({
     }
   };
 
+  const handleOpenEditSource = async (source: NotebookSource) => {
+    if (!selectedNotebookId) return;
+    setEditingSource(source);
+    setEditSourceTitleDraft(source.title);
+    setEditSourceTextDraft('');
+    setErrorBanner(null);
+    openModalDialog(editSourceDialogRef.current);
+
+    if (source.kind === 'text' && source.status === 'ready') {
+      setEditSourceLoadingText(true);
+      try {
+        const res = await apiFetch(
+          `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources/${encodeURIComponent(
+            source.id,
+          )}/chunks`,
+          apiToken,
+          {},
+          tenantId,
+        );
+        if (res.ok) {
+          const env = await parseJsonResponse(
+            NotebookSourceChunksEnvelopeSchema,
+            res,
+            'GET /v1/notebooks/:id/sources/:source_id/chunks',
+          );
+          setEditSourceTextDraft(env.chunks.map((c) => c.content).join('\n\n'));
+        }
+      } catch (err) {
+        setErrorBanner(formatApiError(err));
+      } finally {
+        setEditSourceLoadingText(false);
+      }
+    }
+  };
+
+  const handleSaveEditSource = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    if (!selectedNotebookId || !editingSource) return;
+    const trimmedTitle = editSourceTitleDraft.trim();
+    if (!trimmedTitle) {
+      setErrorBanner('来源标题不能为空。');
+      return;
+    }
+    const payload: Record<string, unknown> = { title: trimmedTitle };
+    if (editingSource.kind === 'text' && !editSourceLoadingText) {
+      const trimmedText = editSourceTextDraft.trim();
+      if (!trimmedText) {
+        setErrorBanner('文本笔记正文不能为空。');
+        return;
+      }
+      payload.text = editSourceTextDraft;
+    }
+
+    setEditSourceBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources/${encodeURIComponent(
+          editingSource.id,
+        )}`,
+        apiToken,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`更新资料来源失败 (${res.status}): ${text}`);
+      }
+      const updated = await parseJsonResponse(
+        NotebookSourceSchema,
+        res,
+        'PATCH /v1/notebooks/:id/sources/:source_id',
+      );
+      setSources((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      if (payload.text !== undefined) {
+        setSearchHits(null);
+        if (inspectedChunk?.source_id === updated.id) {
+          setInspectedChunk(null);
+          setReaderChunks([]);
+          setReaderSourceId('');
+          closeModalDialog(chunkDialogRef.current);
+        }
+      }
+      closeModalDialog(editSourceDialogRef.current);
+      setEditingSource(null);
+      setNoticeBanner(
+        payload.text !== undefined
+          ? `已更新笔记「${updated.title}」并即时重建分块与 BM25 索引。`
+          : `已将来源重命名为「${updated.title}」。`,
+      );
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setEditSourceBusy(false);
+    }
+  };
+
+  const handleRetrySource = async (source: NotebookSource) => {
+    if (!selectedNotebookId) return;
+    setRetryingSourceId(source.id);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources/${encodeURIComponent(
+          source.id,
+        )}:retry`,
+        apiToken,
+        { method: 'POST' },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`重试入库失败 (${res.status}): ${text}`);
+      }
+      const updated = await parseJsonResponse(
+        NotebookSourceSchema,
+        res,
+        'POST /v1/notebooks/:id/sources/:source_id:retry',
+      );
+      setSources((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      setNoticeBanner(`已重新提交「${updated.title}」执行抓取与分块。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setRetryingSourceId(null);
+    }
+  };
+
   const handleBrowseSourceChunks = async (source: NotebookSource) => {
     if (!selectedNotebookId) return;
     setBrowseSourceBusyId(source.id);
@@ -1776,6 +1946,29 @@ export function NotebookWorkspacePage({
     }
   };
 
+  const handleClearAskThread = async () => {
+    if (!selectedNotebookId || clearAskBusy) return;
+    setClearAskBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/messages`,
+        apiToken,
+        { method: 'DELETE' },
+        tenantId,
+      );
+      if (!res.ok && res.status !== 404) {
+        const text = await res.text();
+        throw new Error(`清空对话记录失败 (${res.status}): ${text}`);
+      }
+      setAskThread([]);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setClearAskBusy(false);
+    }
+  };
+
   const handleSaveAnswerAsSource = async (result: NotebookAskResponse) => {
     if (!selectedNotebookId) return;
     setSaveAskSourceBusy(true);
@@ -1791,7 +1984,7 @@ export function NotebookWorkspacePage({
           body: JSON.stringify({
             kind: 'text',
             title: `问答摘录：${shortQ}`,
-            text: `问题：${result.question}\n\n回答：\n${result.answer}`,
+            text: formatAskResultAsNoteText(result, sourceTitleById),
           }),
         },
         tenantId,
@@ -2417,7 +2610,9 @@ export function NotebookWorkspacePage({
               <div role="tabpanel" aria-labelledby="nb-tab-url" hidden={ingestTab !== 'url'}>
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
-                    <label htmlFor="nb-src-url">网页链接（内置 SSRF 安全抓取与正文提取）</label>
+                    <label htmlFor="nb-src-url">
+                      网页 / arXiv 论文 / GitHub 仓库链接（内置 SSRF 安全抓取与全文提取）
+                    </label>
                     <input
                       id="nb-src-url"
                       name="url"
@@ -2425,7 +2620,7 @@ export function NotebookWorkspacePage({
                       autoCorrect="off"
                       autoCapitalize="none"
                       spellCheck={false}
-                      placeholder="https://example.org/article"
+                      placeholder="https://arxiv.org/abs/... 或 https://github.com/owner/repo"
                       value={sourceUrlDraft}
                       onChange={(ev) => setSourceUrlDraft(ev.target.value)}
                     />
@@ -2436,7 +2631,7 @@ export function NotebookWorkspacePage({
                       id="nb-src-url-title"
                       name="url_title"
                       type="text"
-                      placeholder="留空默认使用 URL"
+                      placeholder="留空默认使用论文/仓库/网页标题"
                       value={sourceTitleDraft}
                       onChange={(ev) => setSourceTitleDraft(ev.target.value)}
                     />
@@ -2581,6 +2776,27 @@ export function NotebookWorkspacePage({
                               <span className="nb-source-status" data-status={src.status}>
                                 {sourceStatusLabel(src.status)}
                               </span>
+                              <button
+                                type="button"
+                                className="studio-link-btn"
+                                data-testid={`open-edit-source-${src.id}`}
+                                aria-label={`编辑来源 ${src.title}`}
+                                onClick={() => void handleOpenEditSource(src)}
+                              >
+                                {src.kind === 'text' ? '编辑笔记' : '重命名'}
+                              </button>
+                              {src.status === 'failed' && (
+                                <button
+                                  type="button"
+                                  className="studio-link-btn"
+                                  data-testid={`retry-source-${src.id}`}
+                                  aria-label={`重试入库 ${src.title}`}
+                                  disabled={retryingSourceId === src.id}
+                                  onClick={() => void handleRetrySource(src)}
+                                >
+                                  {retryingSourceId === src.id ? '重试中…' : '重试入库'}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="studio-link-btn nb-danger-link"
@@ -2804,9 +3020,10 @@ export function NotebookWorkspacePage({
                     type="button"
                     className="studio-link-btn"
                     data-testid="clear-ask-thread-btn"
-                    onClick={() => setAskThread([])}
+                    disabled={clearAskBusy}
+                    onClick={() => void handleClearAskThread()}
                   >
-                    清空对话
+                    {clearAskBusy ? '清空中…' : '清空对话'}
                   </button>
                 )}
               </div>
@@ -3206,11 +3423,17 @@ export function NotebookWorkspacePage({
                           </div>
                         </div>
                         {showDeliverableBar && art.deliverable && (
-                          <NotebookDeliverableCitationBar
-                            deliverable={art.deliverable}
-                            sourceTitleById={sourceTitleById}
-                            onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
-                          />
+                          <>
+                            <NotebookDeliverableCitationBar
+                              deliverable={art.deliverable}
+                              sourceTitleById={sourceTitleById}
+                              onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+                            />
+                            <NotebookDeliverableViewer
+                              deliverable={art.deliverable}
+                              onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+                            />
+                          </>
                         )}
                         <AuthorizedMedia
                           item={mediaItem}
@@ -3335,6 +3558,85 @@ export function NotebookWorkspacePage({
             </pre>
           </div>
         )}
+      </dialog>
+
+      <dialog
+        ref={editSourceDialogRef}
+        className="nb-dialog nb-dialog--wide"
+        data-testid="edit-source-dialog"
+        aria-labelledby="nb-edit-source-dialog-title"
+        onClose={(ev) => {
+          ev.currentTarget.returnValue = '';
+          setEditingSource(null);
+        }}
+      >
+        <div className="nb-dialog__head">
+          <h2 id="nb-edit-source-dialog-title">
+            {editingSource?.kind === 'text' ? '编辑文本笔记与重建索引' : '重命名资料来源'}
+          </h2>
+          <form method="dialog">
+            <button
+              type="submit"
+              value="cancel"
+              className="studio-btn-secondary studio-btn-sm"
+            >
+              取消
+            </button>
+          </form>
+        </div>
+        <form
+          className="nb-edit-source-form"
+          onSubmit={(ev) => void handleSaveEditSource(ev)}
+        >
+          <div className="nb-field">
+            <label htmlFor="nb-edit-source-title">来源标题</label>
+            <input
+              id="nb-edit-source-title"
+              name="title"
+              type="text"
+              required
+              data-testid="edit-source-title-input"
+              value={editSourceTitleDraft}
+              onChange={(ev) => setEditSourceTitleDraft(ev.target.value)}
+            />
+          </div>
+          {editingSource?.kind === 'text' && (
+            <div className="nb-field">
+              <label htmlFor="nb-edit-source-text">
+                笔记正文（保存后立即重新切块并刷新 BM25 索引）
+              </label>
+              <textarea
+                id="nb-edit-source-text"
+                name="text"
+                rows={7}
+                required={!editSourceLoadingText}
+                disabled={editSourceLoadingText}
+                data-testid="edit-source-text-input"
+                placeholder={editSourceLoadingText ? '正在加载笔记内容…' : '编辑笔记正文…'}
+                value={editSourceTextDraft}
+                onChange={(ev) => setEditSourceTextDraft(ev.target.value)}
+              />
+            </div>
+          )}
+          <div className="nb-dialog__actions">
+            <button
+              type="button"
+              className="studio-btn-secondary studio-btn-sm"
+              disabled={editSourceBusy}
+              onClick={() => closeModalDialog(editSourceDialogRef.current)}
+            >
+              关闭
+            </button>
+            <button
+              type="submit"
+              className="studio-btn-primary studio-btn-sm"
+              data-testid="save-edit-source-btn"
+              disabled={editSourceBusy || editSourceLoadingText}
+            >
+              {editSourceBusy ? '保存中…' : '保存更改'}
+            </button>
+          </div>
+        </form>
       </dialog>
     </div>
   );

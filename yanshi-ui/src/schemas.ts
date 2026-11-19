@@ -588,6 +588,7 @@ export type NotebookDeliverable = z.infer<typeof NotebookDeliverableSchema>;
 
 export const NotebookAskResponseSchema = z
   .object({
+    message_id: z.string().optional(),
     notebook_id: z.string(),
     question: z.string(),
     answer: z.string(),
@@ -597,6 +598,29 @@ export const NotebookAskResponseSchema = z
   })
   .loose();
 export type NotebookAskResponse = z.infer<typeof NotebookAskResponseSchema>;
+
+export const NotebookMessageSchema = z
+  .object({
+    id: z.string(),
+    notebook_id: z.string(),
+    tenant_id: z.string().optional(),
+    question: z.string(),
+    answer: z.string(),
+    model: z.string(),
+    citations: z.array(DeliverableCitationSchema).optional().default([]),
+    used_chunk_count: z.number().optional().default(0),
+    created_at: z.string().optional(),
+  })
+  .loose();
+export type NotebookMessage = z.infer<typeof NotebookMessageSchema>;
+
+export const NotebookMessagesEnvelopeSchema = z
+  .object({
+    notebook_id: z.string(),
+    messages: z.array(NotebookMessageSchema),
+  })
+  .loose();
+export type NotebookMessagesEnvelope = z.infer<typeof NotebookMessagesEnvelopeSchema>;
 
 export const NotebookArtifactSchema = z
   .object({
@@ -634,6 +658,7 @@ export const NotebookExportBundleSchema = z
       .loose(),
     sources: z.array(z.unknown()),
     deliverables: z.array(z.unknown()).optional().default([]),
+    messages: z.array(z.unknown()).optional().default([]),
     markdown_brief: z.string().optional().default(''),
   })
   .loose();
@@ -644,6 +669,7 @@ export const NotebookImportResponseSchema = z
     notebook: NotebookSchema,
     imported_sources: z.number(),
     imported_chunks: z.number(),
+    imported_messages: z.number().optional(),
   })
   .loose();
 export type NotebookImportResponse = z.infer<typeof NotebookImportResponseSchema>;
