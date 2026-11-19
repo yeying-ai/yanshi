@@ -23,7 +23,7 @@ downloadable deliverables through a deterministic five-stage pipeline
 
 ---
 
-## Built-in Generator Catalogue (18 Workflows)
+## Built-in Generator Catalogue (19 Workflows)
 
 Every template in [`examples/generators/`](../examples/generators/) validates
 under `yanshi workflow validate --strict` and can be executed from the CLI, the
@@ -76,6 +76,7 @@ classify each slide's visual layout automatically:
 | Template | Primary Inputs | Deliverables | Workflow Highlights |
 | --- | --- | --- | --- |
 | [`report.yml`](../examples/generators/report.yml) | `url` / `text` / `chunks`, `focus`, `sections`, `pdf` | Footnoted `.md`, self-contained `.html`, typeset `.pdf` | Parallel `map` section drafting with verbatim source quotes and chunk citations |
+| [`data_table.yml`](../examples/generators/data_table.yml) | `url` / `text` / `chunks`, `focus`, `max_rows` | `.xlsx`, `.csv`, self-contained preview `.html` | Structured entity/metric extraction with per-row `chunk_id` & `quote` citations rendered via `render_table` + `render_markdown` |
 | [`infographic.yml`](../examples/generators/infographic.yml) | `url` / `text` / `chunks`, `focus` | `.svg` and high-DPI `.png` | Deterministic Tera SVG poster layout driven by schema-validated headline metrics |
 | [`mindmap.yml`](../examples/generators/mindmap.yml) | `url` / `text` / `chunks`, `depth` | Vector `.svg`, `.png`, interactive markmap `.html` | Hierarchical tree extraction rendered via embedded `render_mindmap` + `render_svg` |
 | [`circuit_diagram.yml`](../examples/generators/circuit_diagram.yml) | `description`, `text` | Checked schematic `.svg` and `.png` | Extracts a typed parts list first, then verifies every component ID/kind in `circuitikz` before `lualatex` compile |
@@ -120,6 +121,12 @@ yanshi skill run examples/applications/content-studio \
   --input url=https://example.org/article \
   --input want=report,mindmap \
   --output-dir out/studio
+
+# 5. Notebook CLI (ingest rich sources -> grounded Q&A -> downloadable deliverable)
+yanshi notebook create "Oceanography Study"
+yanshi notebook add-source <notebook_id> --file metrics.csv --wait
+yanshi notebook ask <notebook_id> "What is the peak range of Bay of Fundy?"
+yanshi notebook generate <notebook_id> data_table --output-dir out/table
 ```
 
 Cap total LLM + media spend on any run with `cost_limit_usd` in YAML or `--checkpoint`
@@ -136,11 +143,16 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
   --output-dir out/lecture
 ```
 
-### Web Studio (`/ui/studio` & `/ui/app`)
+### Web Studio (`/ui/notebooks`, `/ui/studio` & `/ui/app`)
 
 Start `yanshi-server` and open:
 
-- **`http://127.0.0.1:8080/ui/app`** — **App Runner**: pick any of the 18
+- **`http://127.0.0.1:8080/ui/notebooks`** — **Notebook Workspace**: ingest URLs,
+  `.pdf`/`.docx`/`.csv`/`.tsv`/`.json`/`.md`/`.html` files, notes, and audio
+  recordings into per-notebook BM25 indexes, scope active sources via checkboxes,
+  ask grounded questions with verified chunk citations, and launch 12
+  source-grounded deliverables with interactive citation chips.
+- **`http://127.0.0.1:8080/ui/app`** — **App Runner**: pick any of the 19
   templates, fill in the generated input form, answer inline `ask_user`
   clarification cards if prompted, and preview/download finished `.pptx`,
   `.pdf`, `.mp4`, `.xlsx`, and `.html` deliverables.

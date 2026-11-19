@@ -1,11 +1,13 @@
 # Current Project Status
 
-Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, and **AA**
-closed, plus the daily productivity, keynote & multi-paradigm creative studio
-suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst `.pdf`
-export, art-directed `illustration` node, 19 Studio catalogue workflows
+Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, and
+**AB** closed, plus the daily productivity, keynote & multi-paradigm creative
+studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
+`.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
-`worldbuilding_bible`, and Pingora production gateway; see `RoadMap.md` and
+`worldbuilding_bible`, source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`)
+with `source_ids` scoping, first-class `yanshi notebook` CLI, 1:1 Tauri desktop
+Notebook engine parity, and Pingora production gateway; see `RoadMap.md` and
 `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
@@ -133,9 +135,11 @@ The short-term execution queue in `TODOs.md` (maintainer-local, gitignored) is
 currently **empty** — every segment through **X** (2026-10-07 evaluation fixes),
 **Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`),
 **Z** (2026-11-18 Notebook lifecycle closure, modality SSRF/gateway hardening &
-dogfooding refinements), and **AA** (2026-11-19 `data_table` generator,
-persisted Notebook `Deliverable` citations, skill-run admission parity &
-`.docx`/`.csv`/`.tsv`/`.json` source ingestion)
+dogfooding refinements), **AA** (2026-11-19 `data_table` generator, persisted
+Notebook `Deliverable` citations, skill-run admission parity &
+`.docx`/`.csv`/`.tsv`/`.json` source ingestion), and **AB** (2026-11-19
+`source_ids` scoping, `POST /v1/notebooks/{id}/ask` grounded Q&A, 1:1 Tauri
+desktop Notebook engine parity & `yanshi notebook` CLI)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts

@@ -14,12 +14,13 @@ TypeScript codebase runs in two deployment modes:
 
 ---
 
-## Three Surfaces
+## Four Surfaces
 
 | Route | Mode | Purpose |
 | --- | --- | --- |
+| **`/ui/notebooks`** | **Notebook Workspace** | Multi-source research & deliverable workspace: ingest URLs, `.pdf` / `.docx` / `.csv` / `.tsv` / `.json` / `.md` / `.html` documents, text notes, and ASR audio recordings into per-notebook BM25 indexes; scope active sources via checkboxes (`source_ids`); ask grounded questions (`POST /v1/notebooks/{id}/ask`) with verified chunk citations; launch 12 source-grounded Studio generators; and inspect deliverables with interactive citation chips. |
 | **`/ui/studio`** | **Visual DAG Studio & Step Debugger** | Interactive `@xyflow/react` graph editor with topological auto-layout, node palette (including `illustration`, `figure`, `render_slides`, `render_video`, `agent`, `map`/`while`), per-node breakpoints, step-by-step Input/Output inspection, inline slide/video/audio/HTML preview, and live HITL `ask_user` prompt cards. |
-| **`/ui/app`** | **App Runner (Publish Mode)** | Schema-driven typed input forms generated automatically from a workflow's `inputs:` block over the 15-template [Content Studio catalogue](STUDIO_CATALOGUE.md). Runs independent stages concurrently, tracks live stage progress, surfaces `ask_user` clarification cards, and showcases downloadable `.pptx`, `.pdf`, `.mp4`, `.xlsx`, `.mp3`, and `.html` artifacts. |
+| **`/ui/app`** | **App Runner (Publish Mode)** | Schema-driven typed input forms generated automatically from a workflow's `inputs:` block over the 19-template [Content Studio catalogue](STUDIO_CATALOGUE.md). Runs independent stages concurrently, tracks live stage progress, surfaces `ask_user` clarification cards, and showcases downloadable `.pptx`, `.pdf`, `.mp4`, `.xlsx`, `.mp3`, and `.html` artifacts. |
 | **`/ui/console`** | **Classic Run & Session Console** | Low-level run/session inspector: live SSE event timeline with `?after_seq=` reconnect, server-side `?filter=` history pre-filtering, Harness session approval cards, trace diffing, and tenant preference sync. |
 
 ### Positioning & Scope Discipline
@@ -71,6 +72,12 @@ Then open:
   list and stream generated `FlowValue::File` deliverables.
 - `GET /v1/runs/{id}/questions` & `POST /v1/runs/{id}/questions/{question_id}` —
   list and answer inline workflow `type: agent` HITL `ask_user` prompts.
+- `/v1/notebooks` (`POST`/`GET`/`DELETE`), `/v1/notebooks/{id}/sources` (`POST`/`DELETE`),
+  `/v1/notebooks/{id}/chunks/{chunk_id}`, `/v1/notebooks/{id}/search?q=&source_ids=`,
+  `/v1/notebooks/{id}/ask`, `/v1/notebooks/{id}/generate`, &
+  `/v1/notebooks/{id}/artifacts` — multi-source notebook ingestion, `source_ids`
+  scoping, cited Q&A, and Studio deliverable generation (served identically by
+  both `yanshi-server` and the Tauri desktop `local_notebooks.rs` engine).
 - `GET /v1/preferences` & `PUT /v1/preferences` — durable tenant-scoped UI
   preferences.
 
@@ -129,15 +136,15 @@ Selected non-sensitive UI preferences sync to `/v1/preferences` while keeping
 ## 4. Verification & Testing
 
 ```bash
-# TypeScript typecheck + Vitest unit suite (123 tests)
+# TypeScript typecheck + Vitest unit suite (125 tests)
 npm --prefix yanshi-ui run typecheck
 npm --prefix yanshi-ui test
 
 # Embedded gateway UI route tests
 cargo test -p yanshi-server ui::tests
 
-# Tauri local engine integration tests (19-node Studio inspect, PPTX artifact, HITL questions, pricing)
-cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml
+# Tauri local engine integration tests (20-node Studio inspect, 1:1 notebooks + /ask, PPTX artifact, HITL questions, pricing)
+cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --test-threads=1
 ```
 
 ### Playwright E2E

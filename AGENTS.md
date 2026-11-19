@@ -61,9 +61,10 @@ so the tool tier carries no capability dependencies.
   `render_svg`, `render_markdown`, `render_document`), plus capability-backed
   `figure` (TikZ / Typst / D2 / sandboxed Python) and `illustration`
   (art-directed conceptual visual generator).
-- **6 LLM providers** (OpenAI, Anthropic, Google, Moonshot, StepFun,
-  Mock) with native `tool_calls`/`tool_choice`, multimodal, streaming,
-  W3C `traceparent` propagation.
+- **9 LLM vendors + Mock** (OpenAI, Anthropic, Google, Moonshot, StepFun,
+  GLM·Zhipu, DashScope·Alibaba, DeepSeek, MiniMax, plus `Mock`) with native
+  `tool_calls`/`tool_choice`, `json_schema` structured output, multimodal,
+  streaming, and W3C `traceparent` propagation.
 - **Agent-native runtime** — ReAct, Plan-Execute, Reflection,
   verification-before-stop, memory summary backends, hybrid DAG/agent
   composition, generic HITL interrupt/resume (`ask_user`), agent-loop
@@ -89,11 +90,13 @@ so the tool tier carries no capability dependencies.
   propagation, first-party OTLP/HTTP+JSON exporter (`otlp-http` feature,
   `OtlpHttpSpanSink`) — gRPC transport still deferred, bring your own
   `OtelSpanSink` for that.
-- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, SSE,
-  skills, Harness sessions/approvals), Postgres-backed `yanshi-db`
-  (9 tables / 9 repos), per-tenant run admission control, distributed
-  `yanshi-worker` (gRPC `WorkerProtocol`, 7 node payload types), and
-  a React/Vite Web UI embedded at `/ui`.
+- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, `/v1/notebooks`
+  incl. `/ask` & `source_ids`, SSE, skills, Harness sessions/approvals),
+  Postgres-backed `yanshi-db` (17 tables / 13 repos), per-tenant run admission
+  control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
+  (gRPC `WorkerProtocol`, 7 node payload types), and a React/Vite Web UI
+  embedded at `/ui` (`/ui/notebooks`, `/ui/studio`, `/ui/app`, `/ui/console`)
+  plus a 1:1 Tauri v2 desktop app (`yanshi-ui/src-tauri/`).
 - **Plugins & marketplace** — subprocess JSON-RPC plugin runtime,
   signed manifests (Ed25519), remote registry client.
 
@@ -174,10 +177,11 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA / AB
 closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
-creative/deliberative studios, persisted Notebook `Deliverable` citations &
-`.docx`/`.csv`/`.tsv`/`.json` source ingestion, gateway-safe inline
-`multi_agent`, `illustration` node, and pure-Rust native OOXML `.pptx` / `16:9`
-Typst `.pdf` slide rendering; earlier V4.1 regeneration on 2026-08-08 aligned
-the 25-crate workspace layout with `CLAUDE.md` + `docs/CURRENT_STATUS.md`).
+creative/deliberative studios, Notebook `source_ids` scoping & grounded
+`POST /v1/notebooks/{id}/ask`, persisted `Deliverable` citations &
+`.docx`/`.csv`/`.tsv`/`.json` source ingestion, 1:1 Tauri desktop local engine
+parity, first-class `yanshi notebook` CLI, gateway-safe inline `multi_agent`,
+`illustration` node, and pure-Rust native OOXML `.pptx` / `16:9` Typst `.pdf`
+slide rendering).

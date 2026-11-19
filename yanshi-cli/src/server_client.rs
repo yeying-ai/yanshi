@@ -643,18 +643,18 @@ async fn expect_bytes_success(response: reqwest::Response) -> Result<Vec<u8>> {
 }
 
 fn bail_server_error<T>(status: reqwest::StatusCode, text: &str) -> Result<T> {
-  if let Ok(value) = serde_json::from_str::<Value>(text) {
-    if let Some(message) = value.get("error").and_then(|e| {
+  if let Ok(value) = serde_json::from_str::<Value>(text)
+    && let Some(message) = value.get("error").and_then(|e| {
       e.get("message")
         .and_then(Value::as_str)
         .or_else(|| e.as_str())
-    }) {
-      bail!(
-        "server returned {} {}: {message}",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("")
-      );
-    }
+    })
+  {
+    bail!(
+      "server returned {} {}: {message}",
+      status.as_u16(),
+      status.canonical_reason().unwrap_or("")
+    );
   }
   bail!(
     "server returned {} {}: {text}",

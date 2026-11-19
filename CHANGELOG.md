@@ -130,6 +130,17 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Tauri desktop local engine 1:1 Notebook/Studio parity and root-cause error extraction (`b35344b`).**
+  `yanshi-ui/src-tauri/src/local_notebooks.rs` now matches `yanshi-server` 1:1
+  across `DELETE /v1/notebooks/{id}`, `DELETE /v1/notebooks/{id}/sources/{source_id}`,
+  `GET /v1/notebooks/{id}/chunks/{chunk_id}`, `POST /v1/notebooks/{id}/ask`,
+  `source_ids` scoping, `.pdf` / `.docx` / `.csv` / `.tsv` / `.json` / ASR
+  `recording` ingestion, all 12 Studio generators (including `data_table`,
+  `illustrated_slides`, `tech_slides_video`, and `debate_podcast_show` with
+  automatic `chat_model` binding), BM25 `focus` + round-robin chunk selection,
+  and persisted `LocalNotebookArtifact.deliverable` JSON; `local_engine::first_pool_error`
+  now delegates to `FlowStateExt::first_node_failure` so downstream
+  `DependencyNotMet` cascades no longer mask upstream root-cause node errors.
 - **Root-cause error reporting on gateway runs (`e186390`).**
   `yanshi_server::runs::first_state_error` now delegates to
   `yanshi_core::FlowStateExt::first_node_failure` instead of iterating
@@ -387,6 +398,17 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`), `source_ids` scoping, and first-class `yanshi notebook` CLI (`9604519`, `09fb95f`, `53a77f5`).**
+  Added `POST /v1/notebooks/{id}/ask` for cited Q&A over a notebook's ready
+  sources with server-side `chunk_id` verification (filling `source_id` from DB
+  truth and stripping hallucinated IDs), plus optional `source_ids` subset
+  scoping on `GET /v1/notebooks/{id}/search`, `POST /v1/notebooks/{id}/ask`, and
+  `POST /v1/notebooks/{id}/generate`. Updated `/ui/notebooks` with accessible
+  per-source checkboxes and an interactive Grounded Ask card (reusing
+  `NotebookDeliverableCitationBar` plus one-click focus and save-as-source
+  actions), and added `yanshi notebook` (`create`, `list`, `show`, `delete`,
+  `add-source`, `remove-source`, `chunk`, `search`, `ask`, `generate`,
+  `artifacts`) with `--wait` and `--output-dir` streaming artifact downloads.
 - **Official `data_table` Studio generator, persisted Notebook `Deliverable` citations, and `.docx`/`.csv`/`.tsv`/`.json` source ingestion (`7d00992`, `330cf65`, `53a21bc`).**
   Added `examples/generators/data_table.yml` (`DeliverableKind::DataTable`:
   `.xlsx` + `.csv` + `.html` preview with per-row citations), registered across

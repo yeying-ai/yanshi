@@ -302,16 +302,27 @@ gateway's SSRF filter, decodes uploaded `file` documents (`.txt`, `.md`, `.html`
 uploaded `recording` audio via `asr`, chunks passages into `source_chunks`, and
 invalidates `NotebookIndexCache`.
 
-Generation against a notebook: `POST /v1/notebooks/{id}/generate`
-`{ kind, params }` selects the template, ranks ready chunks by BM25 relevance
-against `focus` / `topic` with multi-source round-robin coverage when sources
-exceed the 24 KB prompt budget, applies Y2.3's `cost_limit_usd`, registers
-artifacts (§4.2) and links them through `notebook_artifacts`.
-`GET /v1/notebooks/{id}/artifacts` lists them with their `Deliverable`,
-`GET /v1/notebooks/{id}/chunks/{chunk_id}` resolves cited passages, and
-`DELETE /v1/notebooks/{id}` / `DELETE /v1/notebooks/{id}/sources/{source_id}`
-remove notebooks or individual sources while immediately invalidating the
-in-memory `NotebookIndexCache`.
+Generation & grounded Q&A against a notebook:
+- `POST /v1/notebooks/{id}/ask` `{ question, source_ids?, model?, top_k? }`
+  answers questions strictly from ready chunks (optionally scoped to
+  `source_ids`), enforcing `json_schema` structured citations and verifying every
+  returned `chunk_id` against real `source_chunks` rows (populating `source_id`
+  from server truth and dropping hallucinated IDs).
+- `POST /v1/notebooks/{id}/generate` `{ kind, params, source_ids?, model? }`
+  selects one of the 12 source-grounded templates, ranks ready chunks (within
+  `source_ids` when supplied) by BM25 relevance against `focus` / `topic` with
+  multi-source round-robin coverage when sources exceed the 24 KB prompt budget,
+  applies Y2.3's `cost_limit_usd`, registers artifacts (§4.2) and links them
+  through `notebook_artifacts` together with their `Deliverable` JSON.
+- `GET /v1/notebooks/{id}/search?q=&top_k=&source_ids=` runs BM25 passage search
+  (scoped to `source_ids` when specified), `GET /v1/notebooks/{id}/artifacts`
+  lists attached deliverables with citations, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
+  resolves cited passages, and `DELETE /v1/notebooks/{id}` /
+  `DELETE /v1/notebooks/{id}/sources/{source_id}` remove notebooks or individual
+  sources while immediately invalidating `NotebookIndexCache`.
+- The Tauri desktop local engine (`yanshi-ui/src-tauri/src/local_notebooks.rs`)
+  mirrors this entire 11-route contract offline on local JSON bundles, and
+  `yanshi notebook` exposes it as a first-class CLI command suite.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)
 
