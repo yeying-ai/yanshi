@@ -4,16 +4,20 @@ import { describe, expect, it } from 'vitest';
 import {
   NotebookArtifactsEnvelopeSchema,
   NotebookAskResponseSchema,
+  NotebookBatchGenerateResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookExportBundleSchema,
   NotebookImportResponseSchema,
+  NotebookPlanResponseSchema,
   NotebookSearchEnvelopeSchema,
+  NotebookSourceChunksEnvelopeSchema,
 } from '../schemas';
 import { OFFICIAL_GENERATOR_PRESETS } from '../studio/generatorCatalog';
 import { inspectYamlLocally } from '../studio/presets';
 import {
   buildAskHistoryPayload,
+  buildGeneratorParamsFromDraft,
   dedupeDeliverableCitations,
   encodeBytesToBase64,
   NotebookAskResultCard,
@@ -204,6 +208,9 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('data-testid="notebook-ask-card"');
     expect(html).toContain('data-testid="notebook-ask-input"');
     expect(html).toContain('data-testid="notebook-ask-submit"');
+    expect(html).toContain('data-testid="notebook-planner-card"');
+    expect(html).toContain('data-testid="notebook-plan-input"');
+    expect(html).toContain('data-testid="notebook-plan-submit"');
     expect(html).toContain('data-testid="notebook-cost-limit-input"');
     expect(html).toContain('data-testid="import-notebook-file-input"');
     expect(html).toContain('data-testid="import-notebook-submit-btn"');
@@ -214,6 +221,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).not.toContain('aria-modal=');
     for (const spec of STUDIO_GENERATORS) {
       expect(html).toContain(`data-testid="generator-card-${spec.kind}"`);
+      expect(html).toContain(`data-testid="batch-select-${spec.kind}"`);
     }
   });
 
@@ -352,5 +360,80 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
       imported_chunks: 3,
     });
     expect(imported.imported_chunks).toBe(3);
+  });
+
+  it('validates Studio planner, batch generate, source chunks schemas & draft param builder', () => {
+    const reportSpec = STUDIO_GENERATORS.find((g) => g.kind === 'report')!;
+    const okDraft = buildGeneratorParamsFromDraft(reportSpec, {
+      focus: '  lunar tides  ',
+      sections: '3',
+      pdf: false,
+    });
+    expect(okDraft).toEqual({
+      ok: true,
+      params: { focus: 'lunar tides', sections: 3, pdf: false },
+    });
+
+    const badNumberDraft = buildGeneratorParamsFromDraft(reportSpec, {
+      focus: 'tides',
+      sections: 'not-a-number',
+      pdf: true,
+    });
+    expect(badNumberDraft.ok).toBe(false);
+
+    const srcChunks = NotebookSourceChunksEnvelopeSchema.parse({
+      notebook_id: 'nb-1',
+      source: {
+        id: 'src-1',
+        notebook_id: 'nb-1',
+        tenant_id: 'default',
+        kind: 'file',
+        title: 'tides.pdf',
+        status: 'ready',
+        created_at: '2026-11-19T00:00:00Z',
+        updated_at: '2026-11-19T00:00:00Z',
+      },
+      chunks: [
+        {
+          chunk_id: 'src-1:0',
+          source_id: 'src-1',
+          notebook_id: 'nb-1',
+          ordinal: 0,
+          content: 'Passage zero',
+        },
+        {
+          chunk_id: 'src-1:1',
+          source_id: 'src-1',
+          notebook_id: 'nb-1',
+          ordinal: 1,
+          content: 'Passage one',
+        },
+      ],
+    });
+    expect(srcChunks.chunks).toHaveLength(2);
+
+    const plan = NotebookPlanResponseSchema.parse({
+      notebook_id: 'nb-1',
+      goal: 'Study pack',
+      model: 'gpt-4o',
+      rationale: 'Flashcards plus quiz.',
+      items: [
+        { kind: 'flashcards', reason: 'Recall', params: { count: 6 } },
+        { kind: 'quiz', params: { count: 4 } },
+      ],
+      used_chunk_count: 2,
+    });
+    expect(plan.items).toHaveLength(2);
+
+    const batch = NotebookBatchGenerateResponseSchema.parse({
+      notebook_id: 'nb-1',
+      runs: [
+        { run_id: 'r-1', kind: 'flashcards', status: 'queued' },
+        { run_id: 'r-2', kind: 'quiz', status: 'queued' },
+      ],
+      per_run_cost_limit_usd: 1.5,
+    });
+    expect(batch.runs).toHaveLength(2);
+    expect(batch.per_run_cost_limit_usd).toBe(1.5);
   });
 });

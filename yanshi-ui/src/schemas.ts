@@ -519,6 +519,15 @@ export const NotebookChunkSchema = z
   .loose();
 export type NotebookChunk = z.infer<typeof NotebookChunkSchema>;
 
+export const NotebookSourceChunksEnvelopeSchema = z
+  .object({
+    notebook_id: z.string(),
+    source: NotebookSourceSchema,
+    chunks: z.array(NotebookChunkSchema),
+  })
+  .loose();
+export type NotebookSourceChunksEnvelope = z.infer<typeof NotebookSourceChunksEnvelopeSchema>;
+
 export const NotebookGenerateResponseSchema = z
   .object({
     run_id: z.string(),
@@ -527,6 +536,36 @@ export const NotebookGenerateResponseSchema = z
   })
   .loose();
 export type NotebookGenerateResponse = z.infer<typeof NotebookGenerateResponseSchema>;
+
+export const NotebookBatchGenerateResponseSchema = z
+  .object({
+    notebook_id: z.string(),
+    runs: z.array(NotebookGenerateResponseSchema),
+    per_run_cost_limit_usd: z.number().optional(),
+  })
+  .loose();
+export type NotebookBatchGenerateResponse = z.infer<typeof NotebookBatchGenerateResponseSchema>;
+
+export const NotebookPlannedItemSchema = z
+  .object({
+    kind: z.string(),
+    reason: z.string().optional(),
+    params: z.record(z.string(), z.unknown()).optional().default({}),
+  })
+  .loose();
+export type NotebookPlannedItem = z.infer<typeof NotebookPlannedItemSchema>;
+
+export const NotebookPlanResponseSchema = z
+  .object({
+    notebook_id: z.string(),
+    goal: z.string(),
+    model: z.string(),
+    rationale: z.string(),
+    items: z.array(NotebookPlannedItemSchema),
+    used_chunk_count: z.number(),
+  })
+  .loose();
+export type NotebookPlanResponse = z.infer<typeof NotebookPlanResponseSchema>;
 
 export const DeliverableCitationSchema = z
   .object({

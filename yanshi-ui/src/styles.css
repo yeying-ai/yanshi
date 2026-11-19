@@ -5529,6 +5529,76 @@ button.nb-citation-chip:focus-visible {
   margin-top: 0;
 }
 
+.nb-planner-card h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.nb-plan-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nb-plan-item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nb-plan-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: #334155;
+}
+
+.nb-plan-item code {
+  font-size: 11.5px;
+  color: #0f766e;
+  background: #f0fdfa;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+
+.nb-live-run-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nb-batch-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+  accent-color: #0f766e;
+}
+
+.nb-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+.nb-dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 @media (max-width: 1180px) {
   .nb-workbench {
     grid-template-columns: 1fr;

@@ -14,13 +14,16 @@ import {
   ListNotebooksEnvelopeSchema,
   NotebookArtifactsEnvelopeSchema,
   NotebookAskResponseSchema,
+  NotebookBatchGenerateResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookExportBundleSchema,
   NotebookGenerateResponseSchema,
   NotebookImportResponseSchema,
+  NotebookPlanResponseSchema,
   NotebookSchema,
   NotebookSearchEnvelopeSchema,
+  NotebookSourceChunksEnvelopeSchema,
   NotebookSourceSchema,
   RunEnvelopeSchema,
   StreamedEventSchema,
@@ -31,6 +34,7 @@ import {
   type NotebookAskResponse,
   type NotebookChunk,
   type NotebookDeliverable,
+  type NotebookPlanResponse,
   type NotebookSearchHit,
   type NotebookSource,
   type StreamedEvent,
@@ -695,6 +699,41 @@ function buildInitialGeneratorDrafts(): Record<GeneratorKind, Record<string, str
   return out;
 }
 
+export const MAX_STUDIO_BATCH_ITEMS = 6;
+
+export interface TrackedGeneratorRun {
+  runId: string;
+  kind: string;
+  status: string;
+  completedNodes: number;
+  totalCostUsd: number;
+}
+
+export function buildGeneratorParamsFromDraft(
+  spec: StudioGeneratorSpec,
+  rawDraft: Readonly<Record<string, string | boolean>>,
+): { ok: true; params: Record<string, unknown> } | { ok: false; error: string } {
+  const params: Record<string, unknown> = {};
+  for (const field of spec.fields) {
+    const val = rawDraft[field.key];
+    if (field.type === 'checkbox') {
+      params[field.key] = Boolean(val);
+    } else if (field.type === 'number') {
+      const parsed = Number(String(val ?? field.defaultValue).trim());
+      if (!Number.isFinite(parsed)) {
+        return { ok: false, error: `「${spec.title}」的参数「${field.label}」必须是有效数字。` };
+      }
+      params[field.key] = parsed;
+    } else {
+      const strVal = String(val ?? field.defaultValue).trim();
+      if (strVal) {
+        params[field.key] = strVal;
+      }
+    }
+  }
+  return { ok: true, params };
+}
+
 function sourceStatusLabel(status: string): string {
   switch (status) {
     case 'ready':
@@ -761,6 +800,9 @@ export function NotebookWorkspacePage({
   const [chunkLookupId, setChunkLookupId] = useState<string>('');
   const [chunkLookupBusy, setChunkLookupBusy] = useState<boolean>(false);
   const [inspectedChunk, setInspectedChunk] = useState<NotebookChunk | null>(null);
+  const [readerChunks, setReaderChunks] = useState<NotebookChunk[]>([]);
+  const [readerSourceId, setReaderSourceId] = useState<string>('');
+  const [browseSourceBusyId, setBrowseSourceBusyId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteNotebookBusy, setDeleteNotebookBusy] = useState<boolean>(false);
@@ -774,19 +816,21 @@ export function NotebookWorkspacePage({
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const chunkDialogRef = useRef<HTMLDialogElement | null>(null);
 
-  // Studio generator state
+  // Studio generator, AI planner & multi-select batch state
   const [expandedKind, setExpandedKind] = useState<GeneratorKind>('flashcards');
   const [paramDrafts, setParamDrafts] = useState<
     Record<GeneratorKind, Record<string, string | boolean>>
   >(() => buildInitialGeneratorDrafts());
   const [generateBusyKind, setGenerateBusyKind] = useState<GeneratorKind | null>(null);
+  const [batchSelectedKinds, setBatchSelectedKinds] = useState<GeneratorKind[]>([]);
+  const [batchSubmitBusy, setBatchSubmitBusy] = useState<boolean>(false);
+  const [planGoalDraft, setPlanGoalDraft] = useState<string>('');
+  const [planBusy, setPlanBusy] = useState<boolean>(false);
+  const [studioPlan, setStudioPlan] = useState<NotebookPlanResponse | null>(null);
 
-  // Active generator run live tracking
-  const [activeGenRunId, setActiveGenRunId] = useState<string>('');
-  const [activeGenKind, setActiveGenKind] = useState<GeneratorKind | null>(null);
-  const [activeGenStatus, setActiveGenStatus] = useState<string>('');
-  const [activeGenEvents, setActiveGenEvents] = useState<StreamedEvent[]>([]);
-  const runStreamAbortRef = useRef<AbortController | null>(null);
+  // Concurrent generator runs live tracking (each run gets its own AbortController)
+  const [trackedGenRuns, setTrackedGenRuns] = useState<TrackedGeneratorRun[]>([]);
+  const runAbortMapRef = useRef<Map<string, AbortController>>(new Map());
 
   // Gallery filter & feedback banners
   const [artifactFilter, setArtifactFilter] = useState<'all' | GeneratorKind>('all');
@@ -897,14 +941,33 @@ export function NotebookWorkspacePage({
     void loadNotebooksList(initialNotebookId ?? undefined);
   }, [loadNotebooksList, initialNotebookId]);
 
+  const abortAllWatchedRuns = useCallback(() => {
+    for (const ctrl of runAbortMapRef.current.values()) {
+      ctrl.abort();
+    }
+    runAbortMapRef.current.clear();
+  }, []);
+
   useEffect(() => {
+    return () => {
+      abortAllWatchedRuns();
+    };
+  }, [abortAllWatchedRuns]);
+
+  useEffect(() => {
+    abortAllWatchedRuns();
+    setTrackedGenRuns([]);
     setExcludedSourceIds([]);
     setAskThread([]);
+    setStudioPlan(null);
+    setBatchSelectedKinds([]);
     setRenamingNotebook(false);
     setSearchHits(null);
     setInspectedChunk(null);
+    setReaderChunks([]);
+    setReaderSourceId('');
     void loadNotebookDetailAndArtifacts(selectedNotebookId);
-  }, [selectedNotebookId, loadNotebookDetailAndArtifacts]);
+  }, [selectedNotebookId, loadNotebookDetailAndArtifacts, abortAllWatchedRuns]);
 
   // Poll notebook sources while any source is still `pending` or `ingesting`.
   const hasIngestingSource = useMemo(
@@ -922,82 +985,118 @@ export function NotebookWorkspacePage({
     return () => window.clearInterval(timer);
   }, [selectedNotebookId, hasIngestingSource, loadNotebookDetailAndArtifacts]);
 
-  // Stream live generator run events via SSE and refresh artifacts upon completion.
-  useEffect(() => {
-    if (!activeGenRunId) {
-      return undefined;
-    }
-    let cancelled = false;
-    const abortCtrl = new AbortController();
-    runStreamAbortRef.current?.abort();
-    runStreamAbortRef.current = abortCtrl;
+  const watchDispatchedGeneratorRun = useCallback(
+    (notebookId: string, runId: string, kind: string, initialStatus = 'running') => {
+      runAbortMapRef.current.get(runId)?.abort();
+      const abortCtrl = new AbortController();
+      runAbortMapRef.current.set(runId, abortCtrl);
 
-    const watchGeneratorRun = async () => {
-      try {
-        const res = await apiFetch(
-          `/v1/runs/${encodeURIComponent(activeGenRunId)}/events`,
-          apiToken,
-          {
-            headers: { Accept: 'text/event-stream' },
-            signal: abortCtrl.signal,
-          },
-          tenantId,
-        );
-        if (res.ok && res.body) {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let carry = '';
-          while (!cancelled) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            carry += decoder.decode(value, { stream: true });
-            const parsed = parseSseChunk(carry, StreamedEventSchema, 'notebook generator SSE');
-            carry = parsed.rest;
-            for (const ev of parsed.events) {
-              setActiveGenEvents((prev) =>
-                prev.some((e) => e.seq === ev.seq) ? prev : [...prev, ev],
-              );
-            }
-          }
-        }
+      setTrackedGenRuns((prev) => {
+        const next: TrackedGeneratorRun = {
+          runId,
+          kind,
+          status: initialStatus || 'running',
+          completedNodes: 0,
+          totalCostUsd: 0,
+        };
+        const rest = prev.filter((item) => item.runId !== runId);
+        return [next, ...rest].slice(0, 8);
+      });
 
-        // Confirm terminal run status and refresh notebook artifacts.
-        if (!cancelled) {
-          const runRes = await apiFetch(
-            `/v1/runs/${encodeURIComponent(activeGenRunId)}`,
+      const runWatcher = async () => {
+        const seenEvents: StreamedEvent[] = [];
+        try {
+          const res = await apiFetch(
+            `/v1/runs/${encodeURIComponent(runId)}/events`,
             apiToken,
-            {},
+            {
+              headers: { Accept: 'text/event-stream' },
+              signal: abortCtrl.signal,
+            },
             tenantId,
           );
-          if (runRes.ok) {
-            const runEnv = await parseJsonResponse(RunEnvelopeSchema, runRes, 'GET generator run');
-            const rec = runFromEnvelope(runEnv);
-            setActiveGenStatus(rec.status);
-            if (rec.status === 'failed' && rec.error) {
-              setErrorBanner(`生成任务失败：${rec.error}`);
-            } else if (rec.status === 'succeeded') {
-              setNoticeBanner('成品已生成并自动挂载至右侧画廊。');
+          if (res.ok && res.body) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let carry = '';
+            while (!abortCtrl.signal.aborted) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              carry += decoder.decode(value, { stream: true });
+              const parsed = parseSseChunk(carry, StreamedEventSchema, 'notebook generator SSE');
+              carry = parsed.rest;
+              let added = false;
+              for (const ev of parsed.events) {
+                if (!seenEvents.some((e) => e.seq === ev.seq)) {
+                  seenEvents.push(ev);
+                  added = true;
+                }
+              }
+              if (added) {
+                const reduced = reduceWorkflowEvents(seenEvents);
+                const completedNodes = Object.values(reduced.telemetryByNode).filter(
+                  (t) => t.status === 'succeeded' || t.status === 'skipped',
+                ).length;
+                setTrackedGenRuns((prev) =>
+                  prev.map((item) =>
+                    item.runId === runId
+                      ? {
+                          ...item,
+                          completedNodes,
+                          totalCostUsd: reduced.totalCostUsd,
+                        }
+                      : item,
+                  ),
+                );
+              }
             }
           }
-          if (selectedNotebookId) {
-            await loadNotebookDetailAndArtifacts(selectedNotebookId);
+
+          if (!abortCtrl.signal.aborted) {
+            const runRes = await apiFetch(
+              `/v1/runs/${encodeURIComponent(runId)}`,
+              apiToken,
+              { signal: abortCtrl.signal },
+              tenantId,
+            );
+            if (runRes.ok) {
+              const runEnv = await parseJsonResponse(
+                RunEnvelopeSchema,
+                runRes,
+                'GET generator run',
+              );
+              const rec = runFromEnvelope(runEnv);
+              setTrackedGenRuns((prev) =>
+                prev.map((item) =>
+                  item.runId === runId ? { ...item, status: rec.status } : item,
+                ),
+              );
+              if (rec.status === 'failed' && rec.error) {
+                setErrorBanner(`生成任务 (${kind}) 失败：${rec.error}`);
+              } else if (rec.status === 'succeeded') {
+                setNoticeBanner(`「${kind}」成品已生成并自动挂载至右侧画廊。`);
+              }
+            }
+            if (notebookId) {
+              await loadNotebookDetailAndArtifacts(notebookId);
+            }
+          }
+        } catch (err) {
+          if (abortCtrl.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            return;
+          }
+          setErrorBanner(formatApiError(err));
+        } finally {
+          if (runAbortMapRef.current.get(runId) === abortCtrl) {
+            runAbortMapRef.current.delete(runId);
           }
         }
-      } catch (err) {
-        if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) {
-          return;
-        }
-        setErrorBanner(formatApiError(err));
-      }
-    };
+      };
 
-    void watchGeneratorRun();
-
-    return () => {
-      cancelled = true;
-      abortCtrl.abort();
-    };
-  }, [activeGenRunId, apiToken, tenantId, selectedNotebookId, loadNotebookDetailAndArtifacts]);
+      void runWatcher();
+    },
+    [apiToken, tenantId, loadNotebookDetailAndArtifacts],
+  );
 
   const readySourceCount = useMemo(
     () => sources.filter((s) => s.status === 'ready').length,
@@ -1024,10 +1123,12 @@ export function NotebookWorkspacePage({
     return map;
   }, [sources]);
 
-  const reducedGenRun = useMemo(
-    () => reduceWorkflowEvents(activeGenEvents),
-    [activeGenEvents],
-  );
+  const readerChunkIndex = useMemo(() => {
+    if (!inspectedChunk || readerChunks.length === 0 || readerSourceId !== inspectedChunk.source_id) {
+      return -1;
+    }
+    return readerChunks.findIndex((c) => c.chunk_id === inspectedChunk.chunk_id);
+  }, [inspectedChunk, readerChunks, readerSourceId]);
 
   const handleSelectNotebook = (nextId: string) => {
     setSelectedNotebookId(nextId);
@@ -1078,7 +1179,10 @@ export function NotebookWorkspacePage({
       closeModalDialog(deleteDialogRef.current);
       setSearchHits(null);
       setInspectedChunk(null);
-      setActiveGenRunId('');
+      setReaderChunks([]);
+      setReaderSourceId('');
+      abortAllWatchedRuns();
+      setTrackedGenRuns([]);
       const remaining = notebooks.filter((n) => n.id !== selectedNotebookId);
       setNotebooks(remaining);
       const nextId = remaining[0]?.id ?? '';
@@ -1255,6 +1359,8 @@ export function NotebookWorkspacePage({
       );
       if (inspectedChunk?.source_id === source.id) {
         setInspectedChunk(null);
+        setReaderChunks([]);
+        setReaderSourceId('');
         closeModalDialog(chunkDialogRef.current);
       }
       setNoticeBanner(`已移除来源「${source.title}」，BM25 索引缓存已即时刷新。`);
@@ -1262,6 +1368,51 @@ export function NotebookWorkspacePage({
       setErrorBanner(formatApiError(err));
     } finally {
       setDeletingSourceId(null);
+    }
+  };
+
+  const handleBrowseSourceChunks = async (source: NotebookSource) => {
+    if (!selectedNotebookId) return;
+    setBrowseSourceBusyId(source.id);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources/${encodeURIComponent(
+          source.id,
+        )}/chunks`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`读取来源分块失败 (${res.status}): ${text}`);
+      }
+      const env = await parseJsonResponse(
+        NotebookSourceChunksEnvelopeSchema,
+        res,
+        'GET /v1/notebooks/:id/sources/:source_id/chunks',
+      );
+      if (env.chunks.length === 0) {
+        setNoticeBanner(`来源「${source.title}」当前尚无就绪文本分块。`);
+        return;
+      }
+      setReaderSourceId(source.id);
+      setReaderChunks(env.chunks);
+      setInspectedChunk(env.chunks[0]!);
+      openModalDialog(chunkDialogRef.current);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setBrowseSourceBusyId(null);
+    }
+  };
+
+  const handleStepReaderChunk = (delta: number) => {
+    if (readerChunkIndex < 0) return;
+    const nextIdx = readerChunkIndex + delta;
+    if (nextIdx >= 0 && nextIdx < readerChunks.length) {
+      setInspectedChunk(readerChunks[nextIdx]!);
     }
   };
 
@@ -1293,6 +1444,10 @@ export function NotebookWorkspacePage({
         'GET /v1/notebooks/:id/chunks/:chunk_id',
       );
       setInspectedChunk(chunk);
+      if (readerSourceId !== chunk.source_id) {
+        setReaderChunks([]);
+        setReaderSourceId('');
+      }
       openModalDialog(chunkDialogRef.current);
     } catch (err) {
       setErrorBanner(formatApiError(err));
@@ -1679,25 +1834,10 @@ export function NotebookWorkspacePage({
       setErrorBanner('请至少在左侧勾选一份「已就绪」资料来源参与生成。');
       return;
     }
-    const rawDraft = paramDrafts[spec.kind] ?? {};
-    const params: Record<string, unknown> = {};
-    for (const field of spec.fields) {
-      const val = rawDraft[field.key];
-      if (field.type === 'checkbox') {
-        params[field.key] = Boolean(val);
-      } else if (field.type === 'number') {
-        const parsed = Number(String(val ?? field.defaultValue).trim());
-        if (!Number.isFinite(parsed)) {
-          setErrorBanner(`参数「${field.label}」必须是有效数字。`);
-          return;
-        }
-        params[field.key] = parsed;
-      } else {
-        const strVal = String(val ?? field.defaultValue).trim();
-        if (strVal) {
-          params[field.key] = strVal;
-        }
-      }
+    const built = buildGeneratorParamsFromDraft(spec, paramDrafts[spec.kind] ?? {});
+    if (!built.ok) {
+      setErrorBanner(built.error);
+      return;
     }
 
     const parsedCost = parseCostLimitUsdDraft(costLimitUsdDraft);
@@ -1708,13 +1848,14 @@ export function NotebookWorkspacePage({
       return;
     }
 
+    const targetNotebookId = selectedNotebookId;
     setGenerateBusyKind(spec.kind);
     setErrorBanner(null);
     setNoticeBanner(null);
     try {
       const body: Record<string, unknown> = {
         kind: spec.kind,
-        params,
+        params: built.params,
       };
       if (modelName.trim()) {
         body.model = modelName.trim();
@@ -1726,7 +1867,7 @@ export function NotebookWorkspacePage({
         body.cost_limit_usd = parsedCost.value;
       }
       const res = await apiFetch(
-        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/generate`,
+        `/v1/notebooks/${encodeURIComponent(targetNotebookId)}/generate`,
         apiToken,
         {
           method: 'POST',
@@ -1744,10 +1885,12 @@ export function NotebookWorkspacePage({
         res,
         'POST /v1/notebooks/:id/generate',
       );
-      setActiveGenEvents([]);
-      setActiveGenKind(spec.kind);
-      setActiveGenStatus(gen.status ?? 'running');
-      setActiveGenRunId(gen.run_id);
+      watchDispatchedGeneratorRun(
+        targetNotebookId,
+        gen.run_id,
+        spec.kind,
+        gen.status ?? 'running',
+      );
     } catch (err) {
       setErrorBanner(formatApiError(err));
     } finally {
@@ -1755,19 +1898,174 @@ export function NotebookWorkspacePage({
     }
   };
 
+  const toggleBatchKind = (kind: GeneratorKind, checked: boolean) => {
+    setBatchSelectedKinds((prev) => {
+      if (checked) {
+        if (prev.includes(kind)) return prev;
+        if (prev.length >= MAX_STUDIO_BATCH_ITEMS) {
+          setErrorBanner(`单次批量生成最多选择 ${MAX_STUDIO_BATCH_ITEMS} 种生成器。`);
+          return prev;
+        }
+        return [...prev, kind];
+      }
+      return prev.filter((k) => k !== kind);
+    });
+  };
+
+  const submitBatchItems = async (
+    items: Array<{ kind: string; params: Record<string, unknown> }>,
+  ) => {
+    if (!selectedNotebookId) {
+      setErrorBanner('请先创建或选择一个笔记本。');
+      return;
+    }
+    if (selectedReadyCount === 0) {
+      setErrorBanner('请至少勾选一份「已就绪」资料来源参与批量生成。');
+      return;
+    }
+    const parsedCost = parseCostLimitUsdDraft(costLimitUsdDraft);
+    if (!parsedCost.ok) {
+      setCostLimitInvalid(true);
+      setErrorBanner(parsedCost.error);
+      document.getElementById('nb-cost-limit-input')?.focus();
+      return;
+    }
+
+    const targetNotebookId = selectedNotebookId;
+    setBatchSubmitBusy(true);
+    setErrorBanner(null);
+    setNoticeBanner(null);
+    try {
+      const body: Record<string, unknown> = { items };
+      if (modelName.trim()) {
+        body.model = modelName.trim();
+      }
+      if (scopedSourceIds) {
+        body.source_ids = scopedSourceIds;
+      }
+      if (parsedCost.value !== undefined) {
+        body.cost_limit_usd = parsedCost.value;
+      }
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(targetNotebookId)}/generate-batch`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`批量生成提交失败 (${res.status}): ${text}`);
+      }
+      const batch = await parseJsonResponse(
+        NotebookBatchGenerateResponseSchema,
+        res,
+        'POST /v1/notebooks/:id/generate-batch',
+      );
+      for (const r of batch.runs) {
+        watchDispatchedGeneratorRun(
+          targetNotebookId,
+          r.run_id,
+          r.kind,
+          r.status ?? 'running',
+        );
+      }
+      setNoticeBanner(
+        `已批量提交 ${batch.runs.length} 项生成任务（${batch.runs.map((r) => r.kind).join('、')}），完成后将逐一挂载至画廊。`,
+      );
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setBatchSubmitBusy(false);
+    }
+  };
+
+  const handleLaunchBatchSelected = async () => {
+    if (batchSelectedKinds.length === 0) return;
+    const items: Array<{ kind: string; params: Record<string, unknown> }> = [];
+    for (const kind of batchSelectedKinds) {
+      const spec = STUDIO_GENERATORS.find((g) => g.kind === kind);
+      if (!spec) continue;
+      const built = buildGeneratorParamsFromDraft(spec, paramDrafts[kind] ?? {});
+      if (!built.ok) {
+        setErrorBanner(built.error);
+        return;
+      }
+      items.push({ kind: spec.kind, params: built.params });
+    }
+    await submitBatchItems(items);
+  };
+
+  const handlePlanNotebook = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    if (!selectedNotebookId) {
+      setErrorBanner('请先创建或选择一个笔记本。');
+      return;
+    }
+    const goal = planGoalDraft.trim();
+    if (!goal) {
+      setErrorBanner('请输入本次内容生产的规划目标（例如：生成期末复习闪卡和自测题）。');
+      return;
+    }
+    if (selectedReadyCount === 0) {
+      setErrorBanner('请至少勾选一份「已就绪」资料来源后再执行 AI 规划。');
+      return;
+    }
+    setPlanBusy(true);
+    setErrorBanner(null);
+    try {
+      const body: Record<string, unknown> = { goal, max_items: 4 };
+      if (modelName.trim()) {
+        body.model = modelName.trim();
+      }
+      if (scopedSourceIds) {
+        body.source_ids = scopedSourceIds;
+      }
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/plan`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`AI Studio 规划失败 (${res.status}): ${text}`);
+      }
+      const plan = await parseJsonResponse(
+        NotebookPlanResponseSchema,
+        res,
+        'POST /v1/notebooks/:id/plan',
+      );
+      setStudioPlan(plan);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setPlanBusy(false);
+    }
+  };
+
+  const handleExecuteStudioPlan = async () => {
+    if (!studioPlan || studioPlan.items.length === 0) return;
+    await submitBatchItems(
+      studioPlan.items.map((item) => ({
+        kind: item.kind,
+        params: item.params ?? {},
+      })),
+    );
+  };
+
   const filteredArtifacts = useMemo(() => {
     const reversed = [...artifacts].reverse();
     if (artifactFilter === 'all') return reversed;
     return reversed.filter((a) => a.kind === artifactFilter);
   }, [artifacts, artifactFilter]);
-
-  const completedGenNodes = useMemo(
-    () =>
-      Object.values(reducedGenRun.telemetryByNode).filter(
-        (t) => t.status === 'succeeded' || t.status === 'skipped',
-      ).length,
-    [reducedGenRun.telemetryByNode],
-  );
 
   return (
     <div className="nb-shell" data-testid="notebook-workspace-page">
@@ -2284,10 +2582,12 @@ export function NotebookWorkspacePage({
                               <button
                                 type="button"
                                 className="studio-link-btn"
-                                aria-label={`查看首段 ${src.title}`}
-                                onClick={() => void handleInspectChunk(`${src.id}:0`)}
+                                data-testid={`browse-source-chunks-${src.id}`}
+                                aria-label={`阅读分块 ${src.title}`}
+                                disabled={browseSourceBusyId === src.id}
+                                onClick={() => void handleBrowseSourceChunks(src)}
                               >
-                                查看首段
+                                {browseSourceBusyId === src.id ? '加载中…' : '阅读分块'}
                               </button>
                             )}
                           </div>
@@ -2544,36 +2844,141 @@ export function NotebookWorkspacePage({
             )}
           </section>
 
-          {activeGenRunId && (
-            <div className="nb-live-run-ribbon" role="status" data-testid="notebook-live-run">
-              <div className="nb-live-run-ribbon__info">
-                <span
-                  className={`nb-run-dot ${
-                    ['succeeded', 'failed', 'cancelled'].includes(activeGenStatus)
-                      ? 'nb-run-dot--done'
-                      : 'nb-run-dot--running'
-                  }`}
-                />
-                <strong>
-                  {activeGenKind ?? 'workflow'} · 状态：{activeGenStatus || 'running'}
-                </strong>
-                <span>已完成 {completedGenNodes} 个节点</span>
-                {reducedGenRun.totalCostUsd > 0 && (
-                  <span className="studio-spend-pill">
-                    💰 {formatSpendUsd(reducedGenRun.totalCostUsd)}
-                  </span>
+          <section
+            className="nb-card nb-planner-card"
+            data-testid="notebook-planner-card"
+            aria-labelledby="nb-planner-heading"
+          >
+            <div className="nb-card__head">
+              <h3 id="nb-planner-heading">AI Studio 智能规划与多选批量生产</h3>
+              <div className="nb-picker-actions">
+                {batchSelectedKinds.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      className="studio-btn-primary studio-btn-sm"
+                      data-testid="launch-batch-selected-btn"
+                      disabled={batchSubmitBusy || !selectedNotebookId || selectedReadyCount === 0}
+                      onClick={() => void handleLaunchBatchSelected()}
+                    >
+                      {batchSubmitBusy
+                        ? '批量提交中…'
+                        : `⚡ 批量生成已选 (${batchSelectedKinds.length})`}
+                    </button>
+                    <button
+                      type="button"
+                      className="studio-link-btn"
+                      onClick={() => setBatchSelectedKinds([])}
+                    >
+                      清空已选
+                    </button>
+                  </>
                 )}
               </div>
-              <div className="nb-live-run-ribbon__actions">
-                <SpaLink
-                  className="studio-btn-secondary studio-btn-sm"
-                  to={`/ui/studio?run_id=${encodeURIComponent(activeGenRunId)}${
-                    activeGenKind ? `&preset=${encodeURIComponent(activeGenKind)}` : ''
-                  }`}
-                >
-                  在 Studio 拓扑台中查看 / 续跑
-                </SpaLink>
+            </div>
+            <form
+              className="nb-ask-form"
+              method="POST"
+              action="/v1/notebooks/plan"
+              aria-labelledby="nb-planner-heading"
+              onSubmit={(ev) => void handlePlanNotebook(ev)}
+            >
+              <label htmlFor="nb-plan-goal-input" className="nb-sr-only">
+                输入多成品内容规划目标
+              </label>
+              <input
+                id="nb-plan-goal-input"
+                name="goal"
+                type="text"
+                enterKeyHint="send"
+                data-testid="notebook-plan-input"
+                placeholder="描述要产出的组合（例如：制作一份深度报告、10 张闪卡与自测题，聚焦峰值指标与权衡）…"
+                value={planGoalDraft}
+                onChange={(ev) => setPlanGoalDraft(ev.target.value)}
+              />
+              <button
+                type="submit"
+                className="studio-btn-secondary studio-btn-sm"
+                data-testid="notebook-plan-submit"
+                disabled={planBusy || !selectedNotebookId || selectedReadyCount === 0}
+              >
+                {planBusy ? '规划中…' : '🧭 AI 规划方案'}
+              </button>
+            </form>
+            {studioPlan && (
+              <div className="nb-plan-result" data-testid="notebook-plan-result">
+                <div className="nb-ask-answer__meta">
+                  <strong>推荐方案（{studioPlan.items.length} 项交付物）</strong>
+                  <div className="nb-picker-actions">
+                    <button
+                      type="button"
+                      className="studio-btn-primary studio-btn-sm"
+                      data-testid="execute-studio-plan-btn"
+                      disabled={batchSubmitBusy || !selectedNotebookId || selectedReadyCount === 0}
+                      onClick={() => void handleExecuteStudioPlan()}
+                    >
+                      {batchSubmitBusy
+                        ? '启动中…'
+                        : `🚀 一键执行规划 (${studioPlan.items.length})`}
+                    </button>
+                    <button
+                      type="button"
+                      className="studio-link-btn"
+                      onClick={() => setStudioPlan(null)}
+                    >
+                      关闭方案
+                    </button>
+                  </div>
+                </div>
+                <p className="nb-ask-answer__body">{studioPlan.rationale}</p>
+                <ul className="nb-plan-item-list" role="list">
+                  {studioPlan.items.map((item) => (
+                    <li key={item.kind} className="nb-plan-item">
+                      <span className="nb-gen-badge">{item.kind}</span>
+                      {item.reason && <span>{item.reason}</span>}
+                      {Object.keys(item.params).length > 0 && (
+                        <code>{JSON.stringify(item.params)}</code>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </div>
+            )}
+          </section>
+
+          {trackedGenRuns.length > 0 && (
+            <div className="nb-live-run-stack" role="status" data-testid="notebook-live-run">
+              {trackedGenRuns.map((tracked) => {
+                const isDone = ['succeeded', 'failed', 'cancelled'].includes(tracked.status);
+                return (
+                  <div key={tracked.runId} className="nb-live-run-ribbon">
+                    <div className="nb-live-run-ribbon__info">
+                      <span
+                        className={`nb-run-dot ${isDone ? 'nb-run-dot--done' : 'nb-run-dot--running'}`}
+                      />
+                      <strong>
+                        {tracked.kind} · 状态：{tracked.status || 'running'}
+                      </strong>
+                      <span>已完成 {tracked.completedNodes} 个节点</span>
+                      {tracked.totalCostUsd > 0 && (
+                        <span className="studio-spend-pill">
+                          💰 {formatSpendUsd(tracked.totalCostUsd)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="nb-live-run-ribbon__actions">
+                      <SpaLink
+                        className="studio-btn-secondary studio-btn-sm"
+                        to={`/ui/studio?run_id=${encodeURIComponent(
+                          tracked.runId,
+                        )}&preset=${encodeURIComponent(tracked.kind)}`}
+                      >
+                        在 Studio 拓扑台中查看 / 续跑
+                      </SpaLink>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -2581,6 +2986,8 @@ export function NotebookWorkspacePage({
             {STUDIO_GENERATORS.map((spec) => {
               const isExpanded = expandedKind === spec.kind;
               const isBusy = generateBusyKind === spec.kind;
+              const isBatchChecked = batchSelectedKinds.includes(spec.kind);
+              const batchCheckId = `nb-batch-check-${spec.kind}`;
               const draft = paramDrafts[spec.kind] ?? {};
               return (
                 <article
@@ -2593,14 +3000,28 @@ export function NotebookWorkspacePage({
                       <span className="nb-gen-badge">{spec.deliverableBadge}</span>
                       <h3>{spec.title}</h3>
                     </div>
-                    <button
-                      type="button"
-                      className="studio-link-btn"
-                      aria-expanded={isExpanded}
-                      onClick={() => setExpandedKind(spec.kind)}
-                    >
-                      {isExpanded ? '参数已展开' : '调整参数'}
-                    </button>
+                    <div className="nb-picker-actions">
+                      <label htmlFor={batchCheckId} className="nb-batch-check-label">
+                        <input
+                          id={batchCheckId}
+                          name={`batch_${spec.kind}`}
+                          type="checkbox"
+                          className="nb-source-checkbox"
+                          data-testid={`batch-select-${spec.kind}`}
+                          checked={isBatchChecked}
+                          onChange={(ev) => toggleBatchKind(spec.kind, ev.target.checked)}
+                        />
+                        <span>批量</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="studio-link-btn"
+                        aria-expanded={isExpanded}
+                        onClick={() => setExpandedKind(spec.kind)}
+                      >
+                        {isExpanded ? '参数已展开' : '调整参数'}
+                      </button>
+                    </div>
                   </div>
 
                   <p className="nb-gen-card__desc">{spec.summary}</p>
@@ -2830,27 +3251,69 @@ export function NotebookWorkspacePage({
       >
         <div className="nb-dialog__head">
           <h2 id="nb-chunk-dialog-title">
-            引用分块原文 {inspectedChunk ? `· #${inspectedChunk.ordinal}` : ''}
+            {readerChunkIndex >= 0
+              ? `来源分块阅读 · 第 ${readerChunkIndex + 1} / ${readerChunks.length} 段`
+              : `引用分块原文 ${inspectedChunk ? `· #${inspectedChunk.ordinal}` : ''}`}
           </h2>
-          <form method="dialog">
-            <button type="submit" value="close" className="studio-btn-secondary studio-btn-sm" autoFocus>
-              关闭
-            </button>
-          </form>
+          <div className="nb-picker-actions">
+            {readerChunkIndex >= 0 && readerChunks.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  className="studio-btn-secondary studio-btn-sm"
+                  data-testid="chunk-reader-prev-btn"
+                  disabled={readerChunkIndex <= 0}
+                  onClick={() => handleStepReaderChunk(-1)}
+                >
+                  ← 上一段
+                </button>
+                <button
+                  type="button"
+                  className="studio-btn-secondary studio-btn-sm"
+                  data-testid="chunk-reader-next-btn"
+                  disabled={readerChunkIndex >= readerChunks.length - 1}
+                  onClick={() => handleStepReaderChunk(1)}
+                >
+                  下一段 →
+                </button>
+              </>
+            )}
+            <form method="dialog">
+              <button
+                type="submit"
+                value="close"
+                className="studio-btn-secondary studio-btn-sm"
+                data-testid="chunk-reader-close-btn"
+                autoFocus
+              >
+                关闭
+              </button>
+            </form>
+          </div>
         </div>
         {inspectedChunk && (
           <div className="nb-chunk-preview">
             <div className="nb-source-item__meta">
               <span>{sourceTitleById.get(inspectedChunk.source_id) ?? '所属来源'}</span>
-              <code>{inspectedChunk.chunk_id}</code>
+              <code data-testid="chunk-reader-current-id">{inspectedChunk.chunk_id}</code>
               {typeof inspectedChunk.metadata?.start_line === 'number' &&
                 typeof inspectedChunk.metadata?.end_line === 'number' && (
                   <span>
                     行号 {inspectedChunk.metadata.start_line}–{inspectedChunk.metadata.end_line}
                   </span>
                 )}
+              <button
+                type="button"
+                className="studio-link-btn"
+                data-testid="chunk-reader-use-focus-btn"
+                onClick={() => applyHitAsGeneratorFocus(inspectedChunk.content)}
+              >
+                设为生成焦点
+              </button>
             </div>
-            <pre className="nb-chunk-preview__body">{inspectedChunk.content}</pre>
+            <pre className="nb-chunk-preview__body" data-testid="chunk-reader-body">
+              {inspectedChunk.content}
+            </pre>
           </div>
         )}
       </dialog>
