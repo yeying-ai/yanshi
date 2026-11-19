@@ -231,3 +231,138 @@ path = "greeter"
     Some("hello from the skill")
   );
 }
+
+struct ParkedExecutor;
+
+#[async_trait::async_trait]
+impl yanshi_server::RunExecutor for ParkedExecutor {
+  async fn execute(&self, _ctx: yanshi_server::RunContext) {}
+}
+
+#[tokio::test]
+async fn run_skill_enforces_tenant_admission_and_persists_run_dir() {
+  let Some(state) = fresh_state().await else {
+    eprintln!("skipping run_skill_enforces_tenant_admission_and_persists_run_dir");
+    return;
+  };
+  let tmp = tempfile::tempdir().unwrap();
+  let skill_dir = tmp.path().join("greeter");
+  std::fs::create_dir_all(&skill_dir).unwrap();
+  std::fs::write(
+    skill_dir.join("skill.toml"),
+    r#"
+[skill]
+name = "greeter"
+version = "0.1.0"
+description = "admission test skill"
+
+[persona]
+role = "Answer briefly."
+
+[model]
+name = "mock-chat"
+"#,
+  )
+  .unwrap();
+  let index_path = tmp.path().join("skills.index.toml");
+  std::fs::write(
+    &index_path,
+    "schema_version = 1\nname = \"test-registry\"\n\n[[skills]]\nname = \"greeter\"\nversion = \"0.1.0\"\npath = \"greeter\"\n",
+  )
+  .unwrap();
+  let index = yanshi_skills::SkillRegistryIndex::load(&index_path).unwrap();
+  let catalog = SkillCatalog::from_index(index, index_path);
+
+  let mut defaults = yanshi_tools::SecurityProfile::Local.defaults();
+  defaults.run_admission.max_concurrent_runs_per_tenant = 1;
+  defaults
+    .run_admission
+    .max_run_submissions_per_minute_per_tenant = 10;
+
+  let repos = state.repos.clone();
+  let app = create_router(
+    state
+      .with_security_defaults(defaults)
+      .with_skills(catalog)
+      .with_executor(std::sync::Arc::new(ParkedExecutor)),
+  );
+  let tenant_a = format!("tenant-skill-{}", uuid::Uuid::new_v4());
+  let tenant_b = format!("tenant-skill-{}", uuid::Uuid::new_v4());
+
+  // First submission for tenant_a is admitted and records run_dir + structured inputs.
+  let first = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/v1/skills/greeter:run")
+        .header(CONTENT_TYPE, "application/json")
+        .header("X-Yanshi-Tenant", &tenant_a)
+        .body(Body::from(
+          json!({"inputs": {"want": "report", "sections": 3}}).to_string(),
+        ))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(first.status(), StatusCode::OK);
+  let first_body: serde_json::Value =
+    serde_json::from_slice(&axum::body::to_bytes(first.into_body(), 4096).await.unwrap()).unwrap();
+  let run_id: uuid::Uuid = first_body["run_id"]
+    .as_str()
+    .expect("run_id")
+    .parse()
+    .expect("uuid");
+
+  use yanshi_db::RunRepo as _;
+  let stored = repos
+    .runs
+    .get(run_id)
+    .await
+    .expect("db get")
+    .expect("run exists");
+  assert!(
+    stored
+      .run_dir
+      .as_deref()
+      .is_some_and(|dir| dir.contains(&run_id.to_string())),
+    "skill run must persist run_dir for retention cleanup, got {:?}",
+    stored.run_dir
+  );
+  assert!(
+    stored.workflow.contains("- sections: 3") && stored.workflow.contains("- want: report"),
+    "structured inputs must reach skill workflow prompt: {}",
+    stored.workflow
+  );
+
+  // Second concurrent submission for tenant_a exceeds max_concurrent_runs_per_tenant = 1 → 429.
+  let second = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/v1/skills/greeter:run")
+        .header(CONTENT_TYPE, "application/json")
+        .header("X-Yanshi-Tenant", &tenant_a)
+        .body(Body::from(json!({"input": "second"}).to_string()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+  // Another tenant is isolated and still admitted.
+  let other_tenant = app
+    .oneshot(
+      Request::builder()
+        .method("POST")
+        .uri("/v1/skills/greeter:run")
+        .header(CONTENT_TYPE, "application/json")
+        .header("X-Yanshi-Tenant", &tenant_b)
+        .body(Body::from(json!({"input": "hello"}).to_string()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(other_tenant.status(), StatusCode::OK);
+}

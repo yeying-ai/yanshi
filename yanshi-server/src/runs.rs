@@ -1059,35 +1059,51 @@ async fn run_skill_agent(
 ) -> anyhow::Result<(yanshi_agent_spi::runtime::AgentRunResult, i64)> {
   ensure_llm_initialized().await?;
 
-  let manifest = SkillLoader::load(skill_dir).map_err(|e| {
+  let mut manifest = SkillLoader::load(skill_dir).map_err(|e| {
     anyhow::anyhow!(
       "failed to load skill manifest at {}: {e}",
       skill_dir.display()
     )
   })?;
+  if let Some(model_override) = ctx
+    .model
+    .as_deref()
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+  {
+    manifest.model.name = Some(model_override.to_string());
+  }
   let _warnings = SkillLoader::validate(&manifest, skill_dir)
     .map_err(|e| anyhow::anyhow!("skill validation failed: {e}"))?;
   let model = manifest.model.resolved_model().to_owned();
-  // Y8.5: the skill's `[[workflows]]` become agent tools, as under
-  // `yanshi skill run`. Their runs share this run's base dir and
-  // cancellation; their files are registered as this run's artifacts.
+  // Y8.5 / AA1: the skill's `[[workflows]]` become agent tools, rooted under
+  // `<run_base_dir>/<ctx.run_id>` so retention cleanup of `runs.run_dir`
+  // reclaims every workflow-tool sub-run directory as well.
   let run_base_dir = ctx
     .run_base_dir
     .clone()
     .unwrap_or_else(default_run_base_dir);
+  let skill_run_dir = run_dir_for_run(&run_base_dir, ctx.run_id);
+  let mut wf_execution_config = server_execution_config(
+    Some(skill_run_dir.clone()),
+    ctx.cancellation_token.clone(),
+    ctx.run_max_concurrency,
+  )
+  .with_question_handler(Arc::new(
+    crate::run_questions::ServerRunQuestionHandler::new(
+      ctx.run_id,
+      ctx.question_registry.clone(),
+      ctx.cancellation_token.clone(),
+    ),
+  ));
+  if let Some(limit) = ctx.cost_limit_usd {
+    wf_execution_config = wf_execution_config.with_cost_limit_usd(limit);
+  }
   let yanshi_config::skill_workflows::WorkflowTools {
     tools: workflow_tools,
     runs: workflow_runs,
-  } = yanshi_config::skill_workflows::build(
-    &manifest,
-    skill_dir,
-    Some(&model),
-    server_execution_config(
-      Some(run_base_dir.clone()),
-      ctx.cancellation_token.clone(),
-      ctx.run_max_concurrency,
-    ),
-  )?;
+  } =
+    yanshi_config::skill_workflows::build(&manifest, skill_dir, Some(&model), wf_execution_config)?;
   let mut agent = SkillBuilder::build_with_extra_tools(&manifest, skill_dir, workflow_tools)
     .await
     .map_err(|e| anyhow::anyhow!("failed to build agent from skill manifest: {e}"))?;
@@ -1133,7 +1149,7 @@ async fn run_skill_agent(
       ctx.run_id,
       &ctx.tenant_id,
       &recorded.state,
-      &run_base_dir,
+      &skill_run_dir,
     )
     .await?;
   }
@@ -1481,16 +1497,15 @@ pub(crate) fn default_run_dir_for_id(run_id: Uuid) -> PathBuf {
   run_dir_for_run(&run_base_dir_for_request(), run_id)
 }
 
-/// V1.1: mirrors `yanshi_core::flow`'s `is_genuine_failure` -- a
-/// benign `run_if` skip (`YanshiError::NodeSkipped`) is not a
-/// workflow failure. Before this fix, a run whose only "error" was a
-/// skipped node was wrongly marked `RunStatus::Failed`.
+/// V1.1 / AA1: delegates to [`yanshi_core::FlowStateExt::first_node_failure`]
+/// so benign `run_if` skips (`YanshiError::NodeSkipped`) are ignored and
+/// primary root-cause node failures deterministically win over downstream
+/// `DependencyNotMet` cascades regardless of `HashMap` seed order.
 fn first_state_error(state: &HashMap<String, AsyncNodeResult>) -> Option<String> {
-  state.iter().find_map(|(node_id, result)| match result {
-    Err(yanshi_core::error::YanshiError::NodeSkipped) => None,
-    Err(err) => Some(format!("{node_id}: {err}")),
-    Ok(_) => None,
-  })
+  use yanshi_core::FlowStateExt as _;
+  state
+    .first_node_failure()
+    .map(|(node_id, err)| format!("{node_id}: {err}"))
 }
 
 async fn stub_execute(ctx: &RunContext) -> Result<(), yanshi_db::DbError> {
@@ -1680,6 +1695,7 @@ pub async fn submit_run(
       inputs: req.inputs,
       model: req.model,
       notebook: None,
+      skill_dir: None,
       events_retention_days,
       artifacts_retention_days,
       run_mode: req.run_mode,
@@ -1703,6 +1719,7 @@ pub(crate) struct RunOptions {
   pub inputs: serde_json::Map<String, serde_json::Value>,
   pub model: Option<String>,
   pub notebook: Option<NotebookLink>,
+  pub skill_dir: Option<PathBuf>,
   pub events_retention_days: Option<i32>,
   pub artifacts_retention_days: Option<i32>,
   pub run_mode: RunMode,
@@ -1797,6 +1814,7 @@ pub(crate) async fn admit_and_dispatch(
       inputs: options.inputs,
       model: options.model,
       notebook: options.notebook,
+      skill_dir: options.skill_dir,
       debug_controller,
       max_concurrency: options.max_concurrency,
     },
@@ -1816,6 +1834,7 @@ struct DispatchedRun {
   inputs: serde_json::Map<String, serde_json::Value>,
   model: Option<String>,
   notebook: Option<NotebookLink>,
+  skill_dir: Option<PathBuf>,
   debug_controller: Option<FlowDebugController>,
   max_concurrency: Option<usize>,
 }
@@ -1862,7 +1881,7 @@ fn dispatch_run<G: Send + 'static>(
         broker,
         tenant_id: run.tenant_id,
         live_state_registry: Some(live_state_registry),
-        skill_dir: None,
+        skill_dir: run.skill_dir,
         approval_registry,
         approval_timeout: crate::serve::HARNESS_APPROVAL_TIMEOUT,
         run_max_concurrency,
@@ -2105,6 +2124,7 @@ async fn resume_run(
       inputs: serde_json::Map::new(),
       model: None,
       notebook: None,
+      skill_dir: None,
       debug_controller: None,
       max_concurrency: None,
     },
@@ -2585,6 +2605,31 @@ mod first_state_error_tests {
     state.insert("a".to_string(), Ok(HashMap::new()));
     state.insert("b".to_string(), Ok(HashMap::new()));
     assert!(first_state_error(&state).is_none());
+  }
+
+  #[test]
+  fn prefers_root_cause_failure_over_dependency_cascade() {
+    let mut state = HashMap::new();
+    for idx in 0..24 {
+      state.insert(
+        format!("downstream_{idx:02}"),
+        Err(YanshiError::DependencyNotMet {
+          node_id: format!("downstream_{idx:02}"),
+          dependency_id: "z_root_llm".to_string(),
+        }),
+      );
+    }
+    state.insert(
+      "z_root_llm".to_string(),
+      Err(YanshiError::NodeExecutionFailed {
+        message: "provider 401 unauthorized".to_string(),
+      }),
+    );
+    let error = first_state_error(&state).expect("must report failure");
+    assert_eq!(
+      error,
+      "z_root_llm: Node execution failed: provider 401 unauthorized"
+    );
   }
 }
 
