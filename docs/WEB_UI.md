@@ -72,13 +72,16 @@ Then open:
   list and stream generated `FlowValue::File` deliverables.
 - `GET /v1/runs/{id}/questions` & `POST /v1/runs/{id}/questions/{question_id}` —
   list and answer inline workflow `type: agent` HITL `ask_user` prompts.
-- `/v1/notebooks` (`POST`/`GET`/`PATCH`/`DELETE`), `/v1/notebooks/{id}/sources` (`POST`/`DELETE`),
+- `/v1/notebooks` (`POST`/`GET`/`PATCH`/`DELETE`), `/v1/notebooks/import` (`POST`),
+  `/v1/notebooks/{id}/export` (`GET`), `/v1/notebooks/{id}/sources` (`POST`/`DELETE`),
   `/v1/notebooks/{id}/chunks/{chunk_id}`, `/v1/notebooks/{id}/search?q=&source_ids=`,
-  `/v1/notebooks/{id}/ask` (with multi-turn `history`), `/v1/notebooks/{id}/generate`, &
-  `/v1/notebooks/{id}/artifacts` (`GET`/`DELETE`) — multi-source notebook ingestion,
-  `source_ids` scoping, multi-turn cited Q&A, and Studio deliverable generation
-  (served identically by both `yanshi-server` and the Tauri desktop
-  `local_notebooks.rs` engine).
+  `/v1/notebooks/{id}/ask` (with multi-turn `history`), `/v1/notebooks/{id}/generate`
+  (with optional `cost_limit_usd`), `/v1/notebooks/{id}/artifacts` (`GET`/`DELETE`), &
+  `/v1/notebooks/{id}/artifacts.zip` — multi-source notebook ingestion, portable
+  bundle export/import, `source_ids` scoping, multi-turn cited Q&A, Studio
+  deliverable generation, and one-click `.zip` archive download (served
+  identically by both `yanshi-server` and the Tauri desktop `local_notebooks.rs`
+  engine).
 - `GET /v1/preferences` & `PUT /v1/preferences` — durable tenant-scoped UI
   preferences.
 
@@ -137,7 +140,7 @@ Selected non-sensitive UI preferences sync to `/v1/preferences` while keeping
 ## 4. Verification & Testing
 
 ```bash
-# TypeScript typecheck + Vitest unit suite (125 tests)
+# TypeScript typecheck + Vitest unit suite (126 tests)
 npm --prefix yanshi-ui run typecheck
 npm --prefix yanshi-ui test
 

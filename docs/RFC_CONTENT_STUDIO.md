@@ -310,22 +310,30 @@ Generation & grounded Q&A against a notebook:
   into the BM25 retrieval hint, enforcing `json_schema` structured citations, and
   verifying every returned `chunk_id` against real `source_chunks` rows
   (populating `source_id` from server truth and dropping hallucinated IDs).
-- `POST /v1/notebooks/{id}/generate` `{ kind, params, source_ids?, model? }`
+- `POST /v1/notebooks/{id}/generate` `{ kind, params, source_ids?, model?, cost_limit_usd? }`
   selects one of the 12 source-grounded templates, ranks ready chunks (within
   `source_ids` when supplied) by BM25 relevance against `focus` / `topic` with
   multi-source round-robin coverage when sources exceed the 24 KB prompt budget,
-  applies Y2.3's `cost_limit_usd`, registers artifacts (§4.2) and links them
-  through `notebook_artifacts` together with their `Deliverable` JSON.
+  applies Y2.3's `cost_limit_usd` (`> 0` and finite), registers artifacts (§4.2)
+  and links them through `notebook_artifacts` together with their `Deliverable` JSON.
+- `GET /v1/notebooks/{id}/export` exports a portable `NotebookExportBundle`
+  (`version: 1`, `notebook`, `sources` + ordered `chunks`, `deliverables` +
+  citations, and a cited `markdown_brief` research dossier), and
+  `POST /v1/notebooks/import` imports a bundle into a fresh notebook with
+  remapped `source_id`s and `<new_source_id>:<ordinal>` `chunk_id`s (immediately
+  searchable via BM25 with zero schema migrations or primary-key collisions).
 - `GET /v1/notebooks/{id}/search?q=&top_k=&source_ids=` runs BM25 passage search
   (scoped to `source_ids` when specified), `PATCH /v1/notebooks/{id}` `{ title }`
   renames an owned notebook, `GET /v1/notebooks/{id}/artifacts` lists attached
-  deliverables with citations, `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`
-  detaches an individual deliverable link, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
-  resolves cited passages, and `DELETE /v1/notebooks/{id}` /
+  deliverables with citations, `GET /v1/notebooks/{id}/artifacts.zip` streams all
+  attached deliverables together with `BRIEFING.md` and `notebook_artifacts.json`,
+  `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}` detaches an individual
+  deliverable link, `GET /v1/notebooks/{id}/chunks/{chunk_id}` resolves cited
+  passages, and `DELETE /v1/notebooks/{id}` /
   `DELETE /v1/notebooks/{id}/sources/{source_id}` remove notebooks or individual
   sources while immediately invalidating `NotebookIndexCache`.
 - The Tauri desktop local engine (`yanshi-ui/src-tauri/src/local_notebooks.rs`)
-  mirrors this entire 13-route contract offline on local JSON bundles, and
+  mirrors this entire 16-route contract offline on local JSON bundles, and
   `yanshi notebook` exposes it as a first-class CLI command suite.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)

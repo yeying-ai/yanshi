@@ -178,8 +178,9 @@ what's active vs. closed.
 ---
 
 **Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA / AB /
-AC closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
+AC / AD closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
 creative/deliberative studios, Notebook `PATCH` rename / artifact detach /
+portable `export`+`import` / `artifacts.zip` / `generate.cost_limit_usd` /
 `source_ids` scoping & multi-turn grounded `POST /v1/notebooks/{id}/ask`,
 persisted `Deliverable` citations & `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`
 source ingestion, 1:1 Tauri desktop local engine parity, first-class

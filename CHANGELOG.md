@@ -130,6 +130,16 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Notebook `generate.cost_limit_usd` enforcement, tabular preview MIME types, and `yanshi-core` / `yanshi-cli` unused dependency pruning (`623dfce`, `e1b1311`, `8573e00`).**
+  `POST /v1/notebooks/{id}/generate` (on both `yanshi-server` and the Tauri
+  desktop `local_notebooks.rs` engine, plus `yanshi notebook generate --cost-limit-usd`
+  and `/ui/notebooks`) now validates and forwards `cost_limit_usd` into
+  `FlowExecutionConfig` as specified in `RFC_CONTENT_STUDIO.md` §6;
+  `artifacts::infer_preview_mime` (and Tauri `infer_mime`) now maps `.xlsx`,
+  `.csv`, and `.tsv` instead of falling back to `application/octet-stream`; and
+  unused production dependencies were pruned from `yanshi-core` (`serde_yaml`,
+  `num_cpus`, `url`, with `anyhow` moved to `[dev-dependencies]`) and `yanshi-cli`
+  (`clap_complete`, `config`).
 - **Production `ExplicitOrigins` CORS preflight for `PATCH` and `X-Yanshi-Tenant`, plus `rustdoc` & `tokio-retry` cleanup (`5b167f3`).**
   `cors_layer` under `CorsMode::ExplicitOrigins` (`SecurityProfile::Production`
   with `YANSHI_CORS_ALLOWED_ORIGINS`) now permits `Method::PATCH` and
@@ -406,6 +416,16 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Portable Notebook bundle export/import (`GET /v1/notebooks/{id}/export` + `POST /v1/notebooks/import`) and one-click Notebook deliverables `.zip` archive (`GET /v1/notebooks/{id}/artifacts.zip`) (`623dfce`, `e1b1311`, `a7e63cc`).**
+  Export a versioned `NotebookExportBundle` containing notebook metadata,
+  ingested sources + ordered `source_chunks`, deliverable citations, and a
+  deterministic `markdown_brief` research dossier; re-import into any tenant or
+  across Tauri Desktop / CLI / `yanshi-server` with remapped source UUIDs and
+  `<new_source_id>:<ordinal>` chunk IDs (zero schema migrations, zero primary-key
+  collisions, immediately searchable via BM25); and stream all attached
+  deliverables plus `BRIEFING.md` and `notebook_artifacts.json` in one `.zip`
+  download across HTTP gateway, Tauri desktop engine, `yanshi notebook` CLI
+  (`export`, `import`, `download-artifacts`), and `/ui/notebooks`.
 - **Notebook rename (`PATCH`), artifact detach (`DELETE`), multi-turn grounded `/ask` (`history`), and pure-Rust `.xlsx`/`.pptx` OOXML ingestion (`5b167f3`, `31bbb07`, `b497099`, `dde67e5`).**
   Added `NotebookRepo::rename` (`PATCH /v1/notebooks/{id}`), `NotebookRepo::detach_artifact`
   (`DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`), and bounded multi-turn

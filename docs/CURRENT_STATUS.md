@@ -1,12 +1,13 @@
 # Current Project Status
 
 Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-and **AC** closed, plus the daily productivity, keynote & multi-paradigm creative
+**AC**, and **AD** closed, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
 `worldbuilding_bible`, multi-turn source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`)
-with `source_ids` scoping, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion,
+with `source_ids` scoping, portable Notebook bundle export/import & one-click
+`artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion,
 first-class `yanshi notebook` CLI, 1:1 Tauri desktop Notebook engine parity, and
 Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
 
@@ -139,11 +140,14 @@ dogfooding refinements), **AA** (2026-11-19 `data_table` generator, persisted
 Notebook `Deliverable` citations, skill-run admission parity &
 `.docx`/`.csv`/`.tsv`/`.json` source ingestion), **AB** (2026-11-19 `source_ids`
 scoping, `POST /v1/notebooks/{id}/ask` grounded Q&A, 1:1 Tauri desktop Notebook
-engine parity & `yanshi notebook` CLI), and **AC** (2026-11-19
+engine parity & `yanshi notebook` CLI), **AC** (2026-11-19
 `PATCH /v1/notebooks/{id}` rename, `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`,
 multi-turn `/ask` `history`, pure-Rust `.xlsx`/`.pptx` OOXML source ingestion,
 `ExplicitOrigins` CORS `PATCH` + `x-yanshi-tenant` fix, and `/ui/notebooks`
-Playwright E2E)
+Playwright E2E), and **AD** (2026-11-19 portable Notebook bundle export/import,
+one-click `GET /v1/notebooks/{id}/artifacts.zip` with `BRIEFING.md`,
+`generate.cost_limit_usd` enforcement, desktop/CLI/UI parity + live Chromium
+Playwright E2E, and `yanshi-core` / `yanshi-cli` Cargo manifest dependency pruning)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts

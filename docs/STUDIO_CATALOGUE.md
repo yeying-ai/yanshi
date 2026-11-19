@@ -122,11 +122,13 @@ yanshi skill run examples/applications/content-studio \
   --input want=report,mindmap \
   --output-dir out/studio
 
-# 5. Notebook CLI (ingest rich Office/tabular sources -> multi-turn Q&A -> downloadable deliverable)
+# 5. Notebook CLI (ingest rich Office/tabular sources -> multi-turn Q&A -> deliverables & portable bundle)
 yanshi notebook create "Oceanography Study"
 yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
 yanshi notebook ask <notebook_id> "What is the peak range of Bay of Fundy?" --history-file chat.json
-yanshi notebook generate <notebook_id> data_table --output-dir out/table
+yanshi notebook generate <notebook_id> data_table --cost-limit-usd 2.50 --output-dir out/table
+yanshi notebook download-artifacts <notebook_id> --out out/oceanography.zip
+yanshi notebook export <notebook_id> --out out/oceanography.json --brief-out out/BRIEFING.md
 ```
 
 Cap total LLM + media spend on any run with `cost_limit_usd` in YAML or `--checkpoint`
