@@ -327,6 +327,91 @@ function extractDeliverableTable(deliverable: NotebookDeliverable): ParsedDelimi
   return rows.length > 0 ? { columns, rows } : null;
 }
 
+interface AudioScriptTurn {
+  speaker: string;
+  text: string;
+  chunkId?: string;
+}
+
+interface VideoStoryboardScene {
+  narration: string;
+  visual?: string;
+  motion?: boolean;
+  chunkId?: string;
+}
+
+function extractAudioScript(deliverable: NotebookDeliverable): {
+  turns: AudioScriptTurn[];
+  loudnessLufs?: number;
+} {
+  const content = deliverable.content;
+  if (!content || typeof content !== 'object') {
+    return { turns: [] };
+  }
+  const rawScript = Array.isArray(content.script) ? content.script : [];
+  const turns: AudioScriptTurn[] = [];
+  for (const entry of rawScript) {
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as Record<string, unknown>;
+    const speaker = typeof obj.speaker === 'string' ? obj.speaker.trim() : '';
+    const text = typeof obj.text === 'string' ? obj.text.trim() : '';
+    if (!text) continue;
+    turns.push({
+      speaker: speaker || 'host',
+      text,
+      chunkId: typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
+    });
+  }
+  const loudnessLufs =
+    typeof content.loudness_lufs === 'number' && Number.isFinite(content.loudness_lufs)
+      ? content.loudness_lufs
+      : undefined;
+  return { turns, loudnessLufs };
+}
+
+function extractVideoScenes(deliverable: NotebookDeliverable): {
+  scenes: VideoStoryboardScene[];
+  seconds?: number;
+} {
+  const content = deliverable.content;
+  if (!content || typeof content !== 'object') {
+    return { scenes: [] };
+  }
+  const rawScenes = Array.isArray(content.scenes) ? content.scenes : [];
+  const scenes: VideoStoryboardScene[] = [];
+  for (const entry of rawScenes) {
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as Record<string, unknown>;
+    const narration = typeof obj.narration === 'string' ? obj.narration.trim() : '';
+    const visual = typeof obj.visual === 'string' ? obj.visual.trim() : '';
+    if (!narration && !visual) continue;
+    scenes.push({
+      narration,
+      visual: visual || undefined,
+      motion: obj.motion === true,
+      chunkId: typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
+    });
+  }
+  const seconds =
+    typeof content.seconds === 'number' && Number.isFinite(content.seconds)
+      ? content.seconds
+      : undefined;
+  return { scenes, seconds };
+}
+
+/**
+ * Returns `true` when `NotebookDeliverableViewer` already renders the exact
+ * interactive table for `data_table` (`content.columns` + `content.rows` with
+ * `[chunk_id]` provenance), avoiding a duplicate raw CSV table right underneath
+ * while keeping the file's download header bar intact.
+ */
+export function hasExclusiveDeliverableView(deliverable: NotebookDeliverable): boolean {
+  if (deliverable.kind === 'data_table') {
+    return extractDeliverableTable(deliverable) !== null;
+  }
+  return false;
+}
+
 export interface NotebookDeliverableViewerProps {
   deliverable: NotebookDeliverable;
   onInspectChunk: (chunkId: string) => void;
@@ -346,6 +431,16 @@ export function NotebookDeliverableViewer({
   );
   const dataTable = useMemo(
     () => (deliverable.kind === 'data_table' ? extractDeliverableTable(deliverable) : null),
+    [deliverable],
+  );
+  const audioScript = useMemo(
+    () =>
+      deliverable.kind === 'audio_overview' ? extractAudioScript(deliverable) : { turns: [] },
+    [deliverable],
+  );
+  const videoStoryboard = useMemo(
+    () =>
+      deliverable.kind === 'video_overview' ? extractVideoScenes(deliverable) : { scenes: [] },
     [deliverable],
   );
 
@@ -548,6 +643,102 @@ export function NotebookDeliverableViewer({
         rows={dataTable.rows}
         onInspectChunk={onInspectChunk}
       />
+    );
+  }
+
+  if (deliverable.kind === 'audio_overview' && audioScript.turns.length > 0) {
+    return (
+      <div className="nb-study-runner" data-testid="interactive-audio-transcript">
+        <div className="nb-interactive-toolbar">
+          <span className="nb-interactive-meta">
+            播客逐字稿 · 共 {audioScript.turns.length} 轮对谈
+            {typeof audioScript.loudnessLufs === 'number'
+              ? ` · ${audioScript.loudnessLufs.toFixed(1)} LUFS`
+              : ''}
+          </span>
+        </div>
+        <ol className="nb-transcript-list" role="list">
+          {audioScript.turns.map((turn, idx) => {
+            const isGuest = turn.speaker.toLowerCase() === 'guest';
+            const speakerLabel =
+              turn.speaker.toLowerCase() === 'host'
+                ? '主持人'
+                : isGuest
+                  ? '特邀嘉宾'
+                  : turn.speaker;
+            return (
+              <li key={`turn-${idx}`} className="nb-transcript-turn">
+                <div className="nb-transcript-turn__head">
+                  <span
+                    className={`nb-speaker-pill ${
+                      isGuest ? 'nb-speaker-pill--guest' : 'nb-speaker-pill--host'
+                    }`}
+                  >
+                    {speakerLabel}
+                  </span>
+                  {turn.chunkId && (
+                    <button
+                      type="button"
+                      className="nb-citation-chip"
+                      aria-label={`第 ${idx + 1} 轮对谈溯源分块 ${turn.chunkId}`}
+                      onClick={() => onInspectChunk(turn.chunkId!)}
+                    >
+                      [{turn.chunkId.split(':').pop() ?? turn.chunkId}] 溯源
+                    </button>
+                  )}
+                </div>
+                <p className="nb-transcript-turn__text">{turn.text}</p>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+    );
+  }
+
+  if (deliverable.kind === 'video_overview' && videoStoryboard.scenes.length > 0) {
+    return (
+      <div className="nb-study-runner" data-testid="interactive-video-storyboard">
+        <div className="nb-interactive-toolbar">
+          <span className="nb-interactive-meta">
+            视频分镜脚本 · 共 {videoStoryboard.scenes.length} 个镜头
+            {typeof videoStoryboard.seconds === 'number'
+              ? ` · ${videoStoryboard.seconds.toFixed(1)}s`
+              : ''}
+          </span>
+        </div>
+        <ol className="nb-storyboard-list" role="list">
+          {videoStoryboard.scenes.map((scene, idx) => (
+            <li key={`scene-${idx}`} className="nb-storyboard-card">
+              <div className="nb-transcript-turn__head">
+                <div className="nb-storyboard-badges">
+                  <span className="nb-speaker-pill nb-speaker-pill--host">镜头 {idx + 1}</span>
+                  {scene.motion && (
+                    <span className="nb-speaker-pill nb-speaker-pill--motion">动态运镜</span>
+                  )}
+                </div>
+                {scene.chunkId && (
+                  <button
+                    type="button"
+                    className="nb-citation-chip"
+                    aria-label={`镜头 ${idx + 1} 溯源分块 ${scene.chunkId}`}
+                    onClick={() => onInspectChunk(scene.chunkId!)}
+                  >
+                    [{scene.chunkId.split(':').pop() ?? scene.chunkId}] 溯源
+                  </button>
+                )}
+              </div>
+              {scene.narration && <p className="nb-transcript-turn__text">{scene.narration}</p>}
+              {scene.visual && (
+                <p className="nb-storyboard-visual">
+                  <strong>画面提示：</strong>
+                  {scene.visual}
+                </p>
+              )}
+            </li>
+          ))}
+        </ol>
+      </div>
     );
   }
 

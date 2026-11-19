@@ -41,7 +41,9 @@ import {
   DebugStatusResponseSchema,
   InspectWorkflowResponseSchema,
   ListArtifactsResponseSchema,
+  ListNotebooksEnvelopeSchema,
   ListRunsEnvelopeSchema,
+  NotebookAttachRunResponseSchema,
   ResumePlanSchema,
   RunApprovalDecisionResponseSchema,
   RunApprovalsEnvelopeSchema,
@@ -55,6 +57,7 @@ import {
   type FlowDebugPause,
   type InspectedInput,
   type InspectWorkflowResponse,
+  type Notebook,
   type PendingApproval,
   type PendingRunQuestion,
   type ResumePlan,
@@ -435,6 +438,16 @@ export function WorkflowStudioPage({
   const [pendingRunQuestions, setPendingRunQuestions] = useState<PendingRunQuestion[]>([]);
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [questionAnswerBusyId, setQuestionAnswerBusyId] = useState<string | null>(null);
+  const [attachPickerOpen, setAttachPickerOpen] = useState<boolean>(false);
+  const [attachNotebooks, setAttachNotebooks] = useState<Notebook[]>([]);
+  const [attachNotebooksLoading, setAttachNotebooksLoading] = useState<boolean>(false);
+  const [selectedAttachNotebookId, setSelectedAttachNotebookId] = useState<string>('');
+  const [attachRunBusy, setAttachRunBusy] = useState<boolean>(false);
+  const [attachedReceipt, setAttachedReceipt] = useState<{
+    notebookId: string;
+    notebookTitle: string;
+    count: number;
+  } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const latestSeqRef = useRef<number>(-1);
@@ -1514,6 +1527,82 @@ export function WorkflowStudioPage({
     }
   };
 
+  const openAttachNotebookPicker = async () => {
+    setAttachPickerOpen(true);
+    setAttachedReceipt(null);
+    setBannerError(null);
+    setAttachNotebooksLoading(true);
+    try {
+      const res = await apiFetch('/v1/notebooks', apiToken, {}, tenantId);
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `加载笔记本列表失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`,
+        );
+      }
+      const env = await parseJsonResponse(
+        ListNotebooksEnvelopeSchema,
+        res,
+        'GET /v1/notebooks',
+      );
+      setAttachNotebooks(env.notebooks);
+      if (
+        env.notebooks.length > 0 &&
+        !env.notebooks.some((n) => n.id === selectedAttachNotebookId)
+      ) {
+        setSelectedAttachNotebookId(env.notebooks[0].id);
+      }
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAttachNotebooksLoading(false);
+    }
+  };
+
+  const confirmAttachRunToNotebook = async () => {
+    if (!runId || !selectedAttachNotebookId || attachRunBusy) return;
+    setAttachRunBusy(true);
+    setBannerError(null);
+    try {
+      const payload: Record<string, unknown> = { run_id: runId };
+      if (selectedPresetId && selectedPresetId !== 'custom') {
+        payload.kind = selectedPresetId;
+      }
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedAttachNotebookId)}/artifacts`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `存入笔记本失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`,
+        );
+      }
+      const attached = await parseJsonResponse(
+        NotebookAttachRunResponseSchema,
+        res,
+        `POST /v1/notebooks/${selectedAttachNotebookId}/artifacts`,
+      );
+      const targetNb = attachNotebooks.find((n) => n.id === selectedAttachNotebookId);
+      setAttachedReceipt({
+        notebookId: selectedAttachNotebookId,
+        notebookTitle: targetNb?.title ?? selectedAttachNotebookId.slice(0, 8),
+        count: attached.attached_count,
+      });
+      setAttachPickerOpen(false);
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAttachRunBusy(false);
+    }
+  };
+
   const handleAddCanvasNode = (nodeType: string, afterNodeId?: string) => {
     const res = addNodeToYaml(yamlDraft, nodeType, { afterNodeId });
     if (!res.ok) {
@@ -1878,6 +1967,84 @@ export function WorkflowStudioPage({
           <button type="button" onClick={() => setBannerNotice(null)}>
             关闭
           </button>
+        </div>
+      )}
+
+      {attachPickerOpen && runId && (
+        <div
+          className="studio-alert studio-alert--info studio-save-notebook-bar"
+          data-testid="attach-notebook-bar"
+        >
+          <label htmlFor="studio-attach-notebook-select">将本次运行成果存入笔记本：</label>
+          {attachNotebooksLoading ? (
+            <span>正在读取笔记本列表…</span>
+          ) : attachNotebooks.length === 0 ? (
+            <span>
+              当前租户暂无笔记本，请先前往{' '}
+              <SpaLink to="/ui/notebooks">笔记本工作台</SpaLink> 创建。
+            </span>
+          ) : (
+            <select
+              id="studio-attach-notebook-select"
+              data-testid="studio-attach-notebook-select"
+              value={selectedAttachNotebookId}
+              onChange={(ev) => setSelectedAttachNotebookId(ev.target.value)}
+            >
+              {attachNotebooks.map((nb) => (
+                <option key={nb.id} value={nb.id}>
+                  {nb.title}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="studio-save-notebook-bar__actions">
+            {attachNotebooks.length > 0 && (
+              <button
+                type="button"
+                data-testid="confirm-attach-notebook-btn"
+                className="studio-btn-primary studio-btn-sm"
+                disabled={attachRunBusy || !selectedAttachNotebookId}
+                onClick={() => void confirmAttachRunToNotebook()}
+              >
+                {attachRunBusy ? '存入中…' : '确认存入'}
+              </button>
+            )}
+            <button
+              type="button"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={() => setAttachPickerOpen(false)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {attachedReceipt && (
+        <div
+          className="studio-alert studio-alert--info studio-save-notebook-bar"
+          role="status"
+          data-testid="attached-notebook-receipt"
+        >
+          <span>
+            ✓ 已将 {attachedReceipt.count} 项成品存入笔记本「{attachedReceipt.notebookTitle}」
+          </span>
+          <div className="studio-save-notebook-bar__actions">
+            <SpaLink
+              data-testid="attached-notebook-link"
+              className="studio-btn-secondary studio-btn-sm"
+              to={`/ui/notebooks/${encodeURIComponent(attachedReceipt.notebookId)}`}
+            >
+              前往笔记本查看 →
+            </SpaLink>
+            <button
+              type="button"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={() => setAttachedReceipt(null)}
+            >
+              关闭
+            </button>
+          </div>
         </div>
       )}
 
@@ -2361,15 +2528,27 @@ export function WorkflowStudioPage({
                 )}
 
                 {runId && (artifacts.length > 0 || deliverables.length > 0) && (
-                  <button
-                    type="button"
-                    data-testid="download-artifacts-zip-debug"
-                    className="studio-btn-ghost studio-btn-sm"
-                    disabled={zipExportBusy}
-                    onClick={() => void downloadAllArtifactsZip()}
-                  >
-                    {zipExportBusy ? '打包中…' : '📦 打包导出 (.zip)'}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      data-testid="download-artifacts-zip-debug"
+                      className="studio-btn-ghost studio-btn-sm"
+                      disabled={zipExportBusy}
+                      onClick={() => void downloadAllArtifactsZip()}
+                    >
+                      {zipExportBusy ? '打包中…' : '📦 打包导出 (.zip)'}
+                    </button>
+                    {activeRun?.status === 'succeeded' && (
+                      <button
+                        type="button"
+                        data-testid="open-attach-notebook-btn"
+                        className="studio-btn-secondary studio-btn-sm"
+                        onClick={() => void openAttachNotebookPicker()}
+                      >
+                        📥 存入笔记本
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -2682,15 +2861,27 @@ export function WorkflowStudioPage({
                 <span>最终成果展台 ({deliverables.length + (finalTextSummary ? 1 : 0)})</span>
                 <div className="studio-deliverables-head-right">
                   {runId && (artifacts.length > 0 || deliverables.length > 0) && (
-                    <button
-                      type="button"
-                      data-testid="download-artifacts-zip-release"
-                      className="studio-btn-secondary studio-btn-sm"
-                      disabled={zipExportBusy}
-                      onClick={() => void downloadAllArtifactsZip()}
-                    >
-                      {zipExportBusy ? '正在打包…' : '📦 一键打包下载 (.zip)'}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        data-testid="download-artifacts-zip-release"
+                        className="studio-btn-secondary studio-btn-sm"
+                        disabled={zipExportBusy}
+                        onClick={() => void downloadAllArtifactsZip()}
+                      >
+                        {zipExportBusy ? '正在打包…' : '📦 一键打包下载 (.zip)'}
+                      </button>
+                      {activeRun?.status === 'succeeded' && (
+                        <button
+                          type="button"
+                          data-testid="open-attach-notebook-btn-release"
+                          className="studio-btn-secondary studio-btn-sm"
+                          onClick={() => void openAttachNotebookPicker()}
+                        >
+                          📥 存入笔记本
+                        </button>
+                      )}
+                    </>
                   )}
                   {runId && <small>Run ID: {runId.slice(0, 12)}…</small>}
                 </div>

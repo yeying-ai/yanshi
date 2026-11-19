@@ -4,6 +4,7 @@
 
 import { describe, it } from 'vitest';
 import {
+  CancelRunEnvelopeSchema,
   CreateRunEnvelopeSchema,
   DiagnosticsReportSchema,
   HarnessEventSchema,
@@ -197,5 +198,26 @@ describe('parseJson + SchemaValidationError', () => {
     // Count semicolons in the parenthesised summary: 3 issues → 2 separators.
     const semiCount = (head.match(/;/g) ?? []).length;
     assert(semiCount <= 2, `summary capped at 3 issues, got ${semiCount + 1}`);
+  });
+
+  it('CancelRunEnvelopeSchema normalizes both nested { run, cancelled } and flattened server Run responses', () => {
+    const nested = CancelRunEnvelopeSchema.parse({
+      run: { id: 'r-1', workflow: 'wf', status: 'cancelled' },
+      cancelled: true,
+    });
+    assert(nested.run.id === 'r-1' && nested.cancelled === true, 'nested cancel envelope');
+
+    const flattened = CancelRunEnvelopeSchema.parse({
+      id: 'r-2',
+      workflow: 'wf',
+      status: 'succeeded',
+      cancelled: false,
+    });
+    assert(
+      flattened.run.id === 'r-2' &&
+        flattened.run.status === 'succeeded' &&
+        flattened.cancelled === false,
+      'flattened server cancel response normalized to { run, cancelled }',
+    );
   });
 });

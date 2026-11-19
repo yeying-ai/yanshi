@@ -57,13 +57,24 @@ export const CreateRunEnvelopeSchema = z
   .loose();
 export type CreateRunEnvelope = z.infer<typeof CreateRunEnvelopeSchema>;
 
-export const CancelRunEnvelopeSchema = z
-  .object({
-    run: RunRecordSchema,
+export const CancelRunEnvelopeSchema = z.union([
+  z
+    .object({
+      run: RunRecordSchema,
+      cancelled: z.boolean(),
+    })
+    .loose(),
+  RunRecordSchema.extend({
     cancelled: z.boolean(),
-  })
-  .loose();
-export type CancelRunEnvelope = z.infer<typeof CancelRunEnvelopeSchema>;
+  }).transform(({ cancelled, ...run }) => ({
+    run: run as RunRecord,
+    cancelled,
+  })),
+]);
+export type CancelRunEnvelope = {
+  run: RunRecord;
+  cancelled: boolean;
+};
 
 export const StreamedEventSchema = z
   .object({
@@ -523,6 +534,7 @@ export const NotebookSourceChunksEnvelopeSchema = z
   .object({
     notebook_id: z.string(),
     source: NotebookSourceSchema,
+    raw_text: z.string().nullable().optional(),
     chunks: z.array(NotebookChunkSchema),
   })
   .loose();
@@ -669,10 +681,22 @@ export const NotebookImportResponseSchema = z
     notebook: NotebookSchema,
     imported_sources: z.number(),
     imported_chunks: z.number(),
+    imported_deliverables: z.number().optional(),
     imported_messages: z.number().optional(),
   })
   .loose();
 export type NotebookImportResponse = z.infer<typeof NotebookImportResponseSchema>;
+
+export const NotebookAttachRunResponseSchema = z
+  .object({
+    notebook_id: z.string(),
+    run_id: z.string(),
+    kind: z.string(),
+    attached_count: z.number(),
+    artifacts: z.array(NotebookArtifactSchema),
+  })
+  .loose();
+export type NotebookAttachRunResponse = z.infer<typeof NotebookAttachRunResponseSchema>;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

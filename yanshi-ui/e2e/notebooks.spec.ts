@@ -86,13 +86,21 @@ test.describe('Content Studio — /ui/notebooks lifecycle, chunk reader, batch s
     await expect(page.getByTestId('chunk-preview-dialog')).toContainText('Severn Bore');
     await page.getByTestId('chunk-reader-close-btn').click();
 
-    // 5b. Inline source edit (`PATCH /v1/notebooks/:id/sources/:source_id`) -> immediate BM25 re-index
+    // 5b. Inline source edit (`PATCH /v1/notebooks/:id/sources/:source_id`):
+    //     First verify lossless `raw_text` hydration (no 150-char chunk-overlap duplication)
+    //     and title-only rename without re-chunking, then full text edit -> immediate BM25 re-index.
     await page.getByRole('button', { name: /编辑来源/ }).first().click();
     await expect(page.getByTestId('edit-source-dialog')).toBeVisible();
     const editTextInput = page.getByTestId('edit-source-text-input');
     await expect(editTextInput).toBeEnabled();
     const existingText = await editTextInput.inputValue();
-    expect(existingText).toContain('Severn Bore');
+    expect(existingText).toBe(`${paraA}\n\n${paraB}`);
+    await page.getByTestId('edit-source-title-input').fill('Renamed Without Rechunk');
+    await page.getByTestId('save-edit-source-btn').click();
+    await expect(page.locator('.nb-source-list')).toContainText('Renamed Without Rechunk');
+
+    await page.getByRole('button', { name: /编辑来源/ }).first().click();
+    await expect(editTextInput).toBeEnabled();
     await page.getByTestId('edit-source-title-input').fill('Macrotidal Field Notes');
     await editTextInput.fill(
       `${existingText}\n\nMont-Saint-Michel spring tidal amplitude reaches fourteen meters.`,
@@ -154,10 +162,67 @@ test.describe('Content Studio — /ui/notebooks lifecycle, chunk reader, batch s
       .not.toBe(originalUrl);
     await expect(page.getByTestId('source-scope-bar')).toContainText('1/1 份就绪资料');
 
-    // Verify imported notebook is immediately searchable via BM25
+    // Verify imported notebook is immediately searchable via BM25 AND restores portable deliverables
     await page.getByTestId('notebook-search-input').fill('equinoctial');
     await page.getByTestId('notebook-search-submit').click();
     await expect(page.getByRole('button', { name: /查看分块/ }).first()).toBeVisible();
+    if (mockModel) {
+      await expect(page.locator('.nb-artifact-block')).toHaveCount(2);
+      await expect(page.getByTestId('interactive-flashcards')).toBeVisible();
+      await expect(page.getByTestId('interactive-quiz')).toBeVisible();
+    }
+
+    // 5c. Bridge a standalone `/ui/studio` run into the imported notebook via `"📥 存入笔记本"`
+    const authHeaders: Record<string, string> = {
+      'X-Yanshi-Tenant': uniqueTenant,
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
+    };
+    const createRunRes = await page.request.post(`${baseURL}/v1/runs`, {
+      headers: authHeaders,
+      data: {
+        workflow: [
+          'name: e2e-studio-brief',
+          'nodes:',
+          '  - id: tpl',
+          '    type: template',
+          '    parameters:',
+          '      template: "# Studio Bridge Brief\\n\\nAttached from Workflow Studio."',
+          '  - id: brief_md',
+          '    type: render_markdown',
+          '    dependencies: ["tpl"]',
+          '    input_mapping:',
+          '      markdown: "{{ nodes.tpl.outputs.output }}"',
+          '    parameters:',
+          '      format: md',
+        ].join('\n'),
+      },
+    });
+    expect(createRunRes.ok()).toBeTruthy();
+    const { run_id: studioRunId } = (await createRunRes.json()) as { run_id: string };
+    await expect
+      .poll(
+        async () => {
+          const r = await page.request.get(`${baseURL}/v1/runs/${studioRunId}`, {
+            headers: authHeaders,
+          });
+          const body = (await r.json()) as { status?: string };
+          return body.status;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe('succeeded');
+
+    const importedUrl = page.url();
+    const importedNotebookId = importedUrl.split('/ui/notebooks/')[1]!;
+    await page.goto(`${baseURL}/ui/studio?run_id=${encodeURIComponent(studioRunId)}`);
+    await page.getByTestId('open-attach-notebook-btn').click();
+    await expect(page.getByTestId('attach-notebook-bar')).toBeVisible();
+    await page.getByTestId('studio-attach-notebook-select').selectOption(importedNotebookId);
+    await page.getByTestId('confirm-attach-notebook-btn').click();
+    await expect(page.getByTestId('attached-notebook-receipt')).toBeVisible();
+    await page.getByTestId('attached-notebook-link').click();
+    await expect(page).toHaveURL(importedUrl);
+    await expect(page.locator('.nb-artifact-block')).toHaveCount(mockModel ? 3 : 1);
 
     // 6. Delete imported notebook, then delete original notebook
     await page.getByTestId('open-delete-notebook-btn').click();

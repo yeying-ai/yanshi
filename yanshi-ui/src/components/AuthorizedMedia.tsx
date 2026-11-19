@@ -8,6 +8,7 @@ export interface AuthorizedMediaProps {
   apiToken: string;
   tenantId?: string;
   compact?: boolean;
+  headerOnly?: boolean;
 }
 
 function formatBytes(size?: number | null): string {
@@ -32,6 +33,7 @@ export function AuthorizedMedia({
   apiToken,
   tenantId,
   compact = false,
+  headerOnly = false,
 }: AuthorizedMediaProps): React.ReactElement {
   const needsHeaderFetch = requiresHeaderMediaFetch(apiToken, tenantId);
   const inlineApiPath = appendInlineQuery(item.apiPath);
@@ -49,7 +51,7 @@ export function AuthorizedMedia({
     setLoadError(null);
     setTextPreview(null);
 
-    if (!needsHeaderFetch && !wantsTextBody) {
+    if (headerOnly || (!needsHeaderFetch && !wantsTextBody)) {
       setBlobUrl(null);
       setLoading(false);
       return undefined;
@@ -93,7 +95,16 @@ export function AuthorizedMedia({
         URL.revokeObjectURL(createdObjectUrl);
       }
     };
-  }, [inlineApiPath, item.kind, item.mimeType, apiToken, tenantId, needsHeaderFetch, wantsTextBody]);
+  }, [
+    inlineApiPath,
+    item.kind,
+    item.mimeType,
+    apiToken,
+    tenantId,
+    needsHeaderFetch,
+    wantsTextBody,
+    headerOnly,
+  ]);
 
   const effectiveUrl = needsHeaderFetch ? blobUrl : directInlineSrc;
 
@@ -170,60 +181,62 @@ export function AuthorizedMedia({
         </button>
       </header>
 
-      <div className="studio-media-card__body">
-        {loading && <p className="studio-media-status">正在加载预览…</p>}
-        {loadError && <p className="studio-media-error">预览加载失败：{loadError}</p>}
+      {!headerOnly && (
+        <div className="studio-media-card__body">
+          {loading && <p className="studio-media-status">正在加载预览…</p>}
+          {loadError && <p className="studio-media-error">预览加载失败：{loadError}</p>}
 
-        {!loading && !loadError && item.kind === 'image' && effectiveUrl && (
-          <img
-            className="studio-media-img"
-            src={effectiveUrl}
-            alt={item.label}
-            loading="lazy"
-          />
-        )}
+          {!loading && !loadError && item.kind === 'image' && effectiveUrl && (
+            <img
+              className="studio-media-img"
+              src={effectiveUrl}
+              alt={item.label}
+              loading="lazy"
+            />
+          )}
 
-        {!loading && !loadError && item.kind === 'video' && effectiveUrl && (
-          <video className="studio-media-video" src={effectiveUrl} controls preload="metadata" />
-        )}
+          {!loading && !loadError && item.kind === 'video' && effectiveUrl && (
+            <video className="studio-media-video" src={effectiveUrl} controls preload="metadata" />
+          )}
 
-        {!loading && !loadError && item.kind === 'audio' && effectiveUrl && (
-          <audio className="studio-media-audio" src={effectiveUrl} controls preload="metadata" />
-        )}
+          {!loading && !loadError && item.kind === 'audio' && effectiveUrl && (
+            <audio className="studio-media-audio" src={effectiveUrl} controls preload="metadata" />
+          )}
 
-        {!loading && !loadError && item.kind === 'html' && effectiveUrl && (
-          <iframe
-            className="studio-media-iframe"
-            src={effectiveUrl}
-            title={item.label}
-            sandbox="allow-scripts"
-          />
-        )}
+          {!loading && !loadError && item.kind === 'html' && effectiveUrl && (
+            <iframe
+              className="studio-media-iframe"
+              src={effectiveUrl}
+              title={item.label}
+              sandbox="allow-scripts"
+            />
+          )}
 
-        {!loading && !loadError && item.kind === 'pdf' && effectiveUrl && (
-          <iframe className="studio-media-pdf" src={effectiveUrl} title={item.label} />
-        )}
+          {!loading && !loadError && item.kind === 'pdf' && effectiveUrl && (
+            <iframe className="studio-media-pdf" src={effectiveUrl} title={item.label} />
+          )}
 
-        {!loading && !loadError && item.kind === 'table' && parsedTable && (
-          <InteractiveSortableTable
-            caption={item.label}
-            columns={parsedTable.columns}
-            rows={parsedTable.rows}
-            testId="media-csv-table"
-          />
-        )}
+          {!loading && !loadError && item.kind === 'table' && parsedTable && (
+            <InteractiveSortableTable
+              caption={item.label}
+              columns={parsedTable.columns}
+              rows={parsedTable.rows}
+              testId="media-csv-table"
+            />
+          )}
 
-        {!loading &&
-          !loadError &&
-          (item.kind === 'subtitle' || item.kind === 'markdown') &&
-          textPreview !== null && <pre className="studio-media-subtitle">{textPreview}</pre>}
+          {!loading &&
+            !loadError &&
+            (item.kind === 'subtitle' || item.kind === 'markdown') &&
+            textPreview !== null && <pre className="studio-media-subtitle">{textPreview}</pre>}
 
-        {!loading && !loadError && item.kind === 'document' && (
-          <div className="studio-media-doc">
-            <p>已生成可编辑套件产物（{item.label}），点击右上角按钮下载或本地打开。</p>
-          </div>
-        )}
-      </div>
+          {!loading && !loadError && item.kind === 'document' && (
+            <div className="studio-media-doc">
+              <p>已生成可编辑套件产物（{item.label}），点击右上角按钮下载或本地打开。</p>
+            </div>
+          )}
+        </div>
+      )}
     </article>
   );
 }

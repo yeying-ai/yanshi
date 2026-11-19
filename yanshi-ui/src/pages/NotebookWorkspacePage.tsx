@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
-import { NotebookDeliverableViewer } from '../components/NotebookDeliverableViewer';
+import {
+  NotebookDeliverableViewer,
+  hasExclusiveDeliverableView,
+} from '../components/NotebookDeliverableViewer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, formatApiError, parseSseChunk, resolveApiUrl } from '../lib/api';
 import { formatTime, isTerminalRun, runFromEnvelope } from '../lib/helpers';
@@ -222,7 +225,7 @@ export const STUDIO_GENERATORS: ReadonlyArray<StudioGeneratorSpec> = [
     kind: 'slides',
     title: '演示文稿课件',
     deliverableBadge: 'PPTX · 矢量配图',
-    summary: '生成带演讲备注与自动渲染 SVG 示意图的结构化演示幻灯片（需 pandoc）。',
+    summary: '生成带演讲备注与自动渲染 SVG 示意图的结构化演示幻灯片（原生 PPTX / 16:9 PDF）。',
     fields: [
       {
         key: 'focus',
@@ -789,7 +792,7 @@ export function NotebookWorkspacePage({
   const [sourceUrlDraft, setSourceUrlDraft] = useState<string>('');
   const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
   const [selectedRecordingFile, setSelectedRecordingFile] = useState<File | null>(null);
-  const [recordingModelDraft, setRecordingModelDraft] = useState<string>('gemini-2.5-flash-asr');
+  const [recordingModelDraft, setRecordingModelDraft] = useState<string>('');
   const [recordingLangDraft, setRecordingLangDraft] = useState<string>('');
   const [ingestBusy, setIngestBusy] = useState<boolean>(false);
   const sourceTabRefs = useRef<Record<SourceIngestTab, HTMLButtonElement | null>>({
@@ -820,6 +823,7 @@ export function NotebookWorkspacePage({
   const [editingSource, setEditingSource] = useState<NotebookSource | null>(null);
   const [editSourceTitleDraft, setEditSourceTitleDraft] = useState<string>('');
   const [editSourceTextDraft, setEditSourceTextDraft] = useState<string>('');
+  const [initialEditSourceText, setInitialEditSourceText] = useState<string>('');
   const [editSourceLoadingText, setEditSourceLoadingText] = useState<boolean>(false);
   const [editSourceBusy, setEditSourceBusy] = useState<boolean>(false);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
@@ -1354,8 +1358,12 @@ export function NotebookWorkspacePage({
         importFileInputRef.current.value = '';
       }
       handleSelectNotebook(imported.notebook.id);
+      const delivNote =
+        typeof imported.imported_deliverables === 'number' && imported.imported_deliverables > 0
+          ? `、${imported.imported_deliverables} 份交付物已恢复`
+          : '';
       setNoticeBanner(
-        `已导入笔记本「${imported.notebook.title}」（${imported.imported_sources} 份来源、${imported.imported_chunks} 个分块立即可搜）。`,
+        `已导入笔记本「${imported.notebook.title}」（${imported.imported_sources} 份来源、${imported.imported_chunks} 个分块立即可搜${delivNote}）。`,
       );
     } catch (err) {
       setErrorBanner(formatApiError(err));
@@ -1433,6 +1441,7 @@ export function NotebookWorkspacePage({
     setEditingSource(source);
     setEditSourceTitleDraft(source.title);
     setEditSourceTextDraft('');
+    setInitialEditSourceText('');
     setErrorBanner(null);
     openModalDialog(editSourceDialogRef.current);
 
@@ -1453,7 +1462,12 @@ export function NotebookWorkspacePage({
             res,
             'GET /v1/notebooks/:id/sources/:source_id/chunks',
           );
-          setEditSourceTextDraft(env.chunks.map((c) => c.content).join('\n\n'));
+          const hydrated =
+            typeof env.raw_text === 'string' && env.raw_text.length > 0
+              ? env.raw_text
+              : env.chunks.map((c) => c.content).join('\n\n');
+          setEditSourceTextDraft(hydrated);
+          setInitialEditSourceText(hydrated);
         }
       } catch (err) {
         setErrorBanner(formatApiError(err));
@@ -1478,7 +1492,9 @@ export function NotebookWorkspacePage({
         setErrorBanner('文本笔记正文不能为空。');
         return;
       }
-      payload.text = editSourceTextDraft;
+      if (editSourceTextDraft !== initialEditSourceText) {
+        payload.text = editSourceTextDraft;
+      }
     }
 
     setEditSourceBusy(true);
@@ -2643,13 +2659,13 @@ export function NotebookWorkspacePage({
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
                     <label htmlFor="nb-src-file">
-                      选择本地文档、表格或课件（支持 .pdf / .docx / .xlsx / .pptx / .csv / .tsv / .json / .md / .txt / .html，≤10MB）
+                      选择本地文档、表格、字幕或课件（支持 .pdf / .docx / .xlsx / .pptx / .csv / .tsv / .json / .srt / .vtt / .md / .txt / .html，≤10MB）
                     </label>
                     <input
                       id="nb-src-file"
                       name="file"
                       type="file"
-                      accept=".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.json,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/csv,text/tab-separated-values,application/json,text/plain,text/markdown,text/html"
+                      accept=".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.json,.srt,.vtt,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/csv,text/tab-separated-values,application/json,application/x-subrip,text/vtt,text/plain,text/markdown,text/html"
                       onChange={(ev) => setSelectedUploadFile(ev.target.files?.[0] ?? null)}
                     />
                   </div>
@@ -3439,6 +3455,11 @@ export function NotebookWorkspacePage({
                           item={mediaItem}
                           apiToken={apiToken}
                           tenantId={tenantId}
+                          headerOnly={Boolean(
+                            showDeliverableBar &&
+                              art.deliverable &&
+                              hasExclusiveDeliverableView(art.deliverable),
+                          )}
                         />
                       </div>
                     );

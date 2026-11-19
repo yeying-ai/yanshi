@@ -589,5 +589,53 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(dtHtml).toContain('data-testid="interactive-data-table"');
     expect(dtHtml).toContain('scope="col"');
     expect(dtHtml).toContain('Bay of Fundy');
+
+    const audioHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'audio_overview',
+          title: 'Tidal Podcast',
+          content: {
+            loudness_lufs: -16.0,
+            script: [
+              { speaker: 'host', text: 'Welcome to Tidal Science.', chunk_id: 'src-1:0' },
+              { speaker: 'guest', text: 'Bay of Fundy peaks at 16.3 m.', chunk_id: 'src-1:1' },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(audioHtml).toContain('data-testid="interactive-audio-transcript"');
+    expect(audioHtml).toContain('主持人');
+    expect(audioHtml).toContain('特邀嘉宾');
+    expect(audioHtml).toContain('-16.0 LUFS');
+
+    const videoHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'video_overview',
+          title: 'Tidal Explainer',
+          content: {
+            seconds: 24.5,
+            scenes: [
+              {
+                narration: 'Funnel geometry amplifies incoming Atlantic swells.',
+                visual: 'Wide aerial diagram of a funnel-shaped bay',
+                motion: true,
+                chunk_id: 'src-1:0',
+              },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(videoHtml).toContain('data-testid="interactive-video-storyboard"');
+    expect(videoHtml).toContain('镜头 1');
+    expect(videoHtml).toContain('动态运镜');
+    expect(videoHtml).toContain('24.5s');
   });
 });
