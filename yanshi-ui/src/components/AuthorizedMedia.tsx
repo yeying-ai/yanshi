@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { apiFetch, resolveApiUrl } from '../lib/api';
+import { apiFetch, resolveApiUrl, resolveEffectiveApiToken } from '../lib/api';
 import { appendInlineQuery, type MediaPreviewItem } from '../studio/mediaExtractor';
 import { InteractiveSortableTable, parseDelimitedTable } from './NotebookDeliverableViewer';
 
@@ -21,7 +21,7 @@ function formatBytes(size?: number | null): string {
 }
 
 export function requiresHeaderMediaFetch(apiToken: string, tenantId?: string): boolean {
-  if (Boolean(apiToken.trim())) {
+  if (Boolean(resolveEffectiveApiToken(apiToken))) {
     return true;
   }
   const normalizedTenant = (tenantId ?? '').trim();

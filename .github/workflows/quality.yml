@@ -170,7 +170,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - name: Install Tauri v2 Linux system libraries
         run: |
           sudo apt-get update
@@ -180,6 +180,8 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             patchelf
+      - name: Format check desktop crate
+        run: cargo fmt --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --check
       - name: Clippy desktop crate
         run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Run desktop local-engine & notebook tests

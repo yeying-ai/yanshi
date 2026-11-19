@@ -198,7 +198,7 @@ impl Yanshi {
 
     let source = LLMConfig::resolve_default_source()?;
     for warning in &source.warnings {
-      eprintln!("Warning: {warning}");
+      tracing::warn!("{warning}");
     }
 
     // Routes on `source.kind`: file-based sources go through
@@ -276,9 +276,11 @@ impl Yanshi {
         message: format!("Failed to write .env file: {}", e),
       })?;
 
-    println!("✅ Generated configuration file: {}", config_path.display());
-    println!("✅ Generated environment file: {}", env_path.display());
-    println!("⚠️  Add your API keys to ~/.yanshi/.env");
+    tracing::info!(
+      config_path = %config_path.display(),
+      env_path = %env_path.display(),
+      "Generated default Yanshi LLM configuration and .env template"
+    );
     Ok(())
   }
 
@@ -310,7 +312,7 @@ impl Yanshi {
   /// Initialize logging (no-op when logging feature is disabled)
   #[cfg(not(feature = "logging"))]
   pub fn init_logging() -> Result<()> {
-    println!("[Yanshi] Logging feature not enabled. Use --features logging to enable.");
+    tracing::debug!("yanshi-llm logging feature not enabled; skipping subscriber init");
     Ok(())
   }
 

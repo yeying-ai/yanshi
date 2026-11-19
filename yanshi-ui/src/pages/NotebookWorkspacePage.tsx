@@ -860,11 +860,14 @@ export function NotebookWorkspacePage({
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [noticeBanner, setNoticeBanner] = useState<string | null>(null);
 
+  const selectedNotebookIdRef = useRef<string>(selectedNotebookId);
+  selectedNotebookIdRef.current = selectedNotebookId;
+
   useEffect(() => {
-    if (initialNotebookId && initialNotebookId !== selectedNotebookId) {
+    if (initialNotebookId) {
       setSelectedNotebookId(initialNotebookId);
     }
-  }, [initialNotebookId, selectedNotebookId]);
+  }, [initialNotebookId]);
 
   useEffect(() => {
     writeStorage(tenantKey, tenantId);
@@ -895,18 +898,21 @@ export function NotebookWorkspacePage({
           'GET /v1/notebooks',
         );
         setNotebooks(env.notebooks);
-        setSelectedNotebookId((prev) => {
-          const target = preferId || prev;
-          if (target && env.notebooks.some((n) => n.id === target)) {
-            return target;
-          }
-          return env.notebooks[0]?.id ?? '';
-        });
+        const target = preferId || selectedNotebookIdRef.current;
+        const matched = Boolean(target && env.notebooks.some((n) => n.id === target));
+        const nextId = matched ? target : (env.notebooks[0]?.id ?? '');
+        setSelectedNotebookId(nextId);
+        if (initialNotebookId && nextId !== initialNotebookId) {
+          navigateTo(
+            nextId ? `/ui/notebooks/${encodeURIComponent(nextId)}` : '/ui/notebooks',
+            { replace: true },
+          );
+        }
       } catch (err) {
         setErrorBanner(formatApiError(err));
       }
     },
-    [apiToken, tenantId],
+    [apiToken, tenantId, initialNotebookId],
   );
 
   const loadNotebookDetailAndArtifacts = useCallback(
@@ -3456,9 +3462,7 @@ export function NotebookWorkspacePage({
                           apiToken={apiToken}
                           tenantId={tenantId}
                           headerOnly={Boolean(
-                            showDeliverableBar &&
-                              art.deliverable &&
-                              hasExclusiveDeliverableView(art.deliverable),
+                            art.deliverable && hasExclusiveDeliverableView(art.deliverable),
                           )}
                         />
                       </div>

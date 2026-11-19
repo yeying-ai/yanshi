@@ -7,6 +7,7 @@ import {
   type StreamedEvent,
 } from '../schemas';
 import {
+  extractFinalTextSummary,
   formatSpendUsd,
   reduceWorkflowEvents,
   WorkflowStudioPage,
@@ -179,5 +180,18 @@ describe('WorkflowStudioPage Phase 4 telemetry & schemas', () => {
       <WorkflowStudioPage initialMode="debug" apiToken="" onTokenChange={() => {}} />,
     );
     expect(html).toContain('studio-cost-limit-input');
+  });
+
+  it('unwraps FlowValue::Json envelopes in extractFinalTextSummary', () => {
+    const summary = extractFinalTextSummary(['normalize', 'assemble_handout'], {
+      normalize: { headline: { type: 'json', value: 'Ownership' } },
+      assemble_handout: {
+        output: { type: 'json', value: '## 课程讲义汇总\n\n核心不变式' },
+      },
+    });
+    expect(summary).toEqual({
+      nodeId: 'assemble_handout',
+      text: '## 课程讲义汇总\n\n核心不变式',
+    });
   });
 });

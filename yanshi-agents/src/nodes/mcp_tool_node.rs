@@ -88,7 +88,7 @@ impl MCPToolNode {
 #[async_trait]
 impl AsyncNode for MCPToolNode {
     async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
-        println!("🔧 MCPToolNode: Executing tool '{}'", self.tool_name);
+        tracing::debug!(tool = %self.tool_name, "MCPToolNode: executing tool");
 
         // Resolve parameters from inputs
         let parameters = self.resolve_parameters(inputs)?;
@@ -113,7 +113,7 @@ impl AsyncNode for MCPToolNode {
             message: format!("Failed to disconnect from MCP server: {}", e),
         })?;
 
-        println!("✅ MCP tool '{}' executed successfully", self.tool_name);
+        tracing::debug!(tool = %self.tool_name, "MCPToolNode: tool executed successfully");
 
         // Extract result content
         let mut result_content = json!({});

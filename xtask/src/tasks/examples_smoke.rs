@@ -176,6 +176,50 @@ pub fn examples_smoke_at(
   Ok(())
 }
 
+const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
+
+fn spawn_stderr_drain(
+  mut pipe: Option<std::process::ChildStderr>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+  std::thread::spawn(move || {
+    use std::io::Read as _;
+    let mut captured = Vec::new();
+    let Some(ref mut stderr) = pipe else {
+      return captured;
+    };
+    let mut buf = [0u8; 4096];
+    loop {
+      match stderr.read(&mut buf) {
+        Ok(0) | Err(_) => break,
+        Ok(n) => {
+          let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(captured.len());
+          if remaining > 0 {
+            captured.extend_from_slice(&buf[..n.min(remaining)]);
+          }
+        }
+      }
+    }
+    captured
+  })
+}
+
+fn format_stderr_tail(captured: &[u8]) -> String {
+  let text = String::from_utf8_lossy(captured);
+  let trimmed = text.trim();
+  if trimmed.is_empty() {
+    return String::new();
+  }
+  let tail: String = trimmed
+    .chars()
+    .rev()
+    .take(600)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
+    .collect();
+  format!(": {tail}")
+}
+
 fn run_one_example(workspace_root: &Path, example: &SmokeExample) -> Result<(), String> {
   let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
   let mut cmd = Command::new(&cargo);
@@ -193,6 +237,10 @@ fn run_one_example(workspace_root: &Path, example: &SmokeExample) -> Result<(), 
   cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
   let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+  // Drain `stderr` concurrently on a background thread so a chatty compiler
+  // warning burst or panic backtrace (>64 KiB OS pipe buffer) never deadlocks
+  // the child before `try_wait()` observes exit.
+  let stderr_handle = spawn_stderr_drain(child.stderr.take());
 
   // Poll for completion or timeout. `Child::wait_timeout` is third-party;
   // we busy-wait in 50 ms slices to avoid the extra dep.
@@ -200,21 +248,32 @@ fn run_one_example(workspace_root: &Path, example: &SmokeExample) -> Result<(), 
   loop {
     match child.try_wait() {
       Ok(Some(status)) => {
+        let stderr_bytes = stderr_handle.join().unwrap_or_default();
         if status.success() {
           return Ok(());
         }
-        return Err(format!("non-zero exit ({status})"));
+        return Err(format!(
+          "non-zero exit ({status}){}",
+          format_stderr_tail(&stderr_bytes)
+        ));
       }
       Ok(None) => {
         if Instant::now() >= deadline {
           let _ = child.kill();
           let _ = child.wait();
-          return Err(format!("timed out after {:?}", example.timeout));
+          let stderr_bytes = stderr_handle.join().unwrap_or_default();
+          return Err(format!(
+            "timed out after {:?}{}",
+            example.timeout,
+            format_stderr_tail(&stderr_bytes)
+          ));
         }
         std::thread::sleep(Duration::from_millis(50));
       }
       Err(e) => {
         let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_handle.join();
         return Err(format!("try_wait failed: {e}"));
       }
     }
@@ -270,5 +329,22 @@ mod tests {
       sum <= SMOKE_TOTAL_BUDGET,
       "per-example caps sum to {sum:?}, exceeding the total budget {SMOKE_TOTAL_BUDGET:?}",
     );
+  }
+
+  #[test]
+  fn spawn_stderr_drain_handles_large_bursts_without_pipe_deadlock() {
+    let mut child = Command::new("sh")
+      .arg("-c")
+      // Emit ~128 KiB to stderr (>64 KiB OS pipe capacity) then exit 0.
+      .arg("dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'x' >&2")
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("spawn sh");
+    let handle = spawn_stderr_drain(child.stderr.take());
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+    let captured = handle.join().expect("join stderr reader");
+    assert_eq!(captured.len(), MAX_CAPTURED_STDERR_BYTES);
   }
 }

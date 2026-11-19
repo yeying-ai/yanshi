@@ -390,6 +390,17 @@ impl AsyncNode for TextToVideoNode {
   }
 }
 
+fn default_video_duration_seconds(model: &str) -> u32 {
+  let lower = model.to_ascii_lowercase();
+  if lower.contains("veo-") {
+    8
+  } else if lower.contains("hailuo") || lower.contains("minimax") {
+    6
+  } else {
+    5
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -445,16 +456,5 @@ mod tests {
     assert_eq!(default_video_duration_seconds("MiniMax-Hailuo-2.3"), 6);
     assert_eq!(default_video_duration_seconds("kling-4.0-flash"), 5);
     assert_eq!(default_video_duration_seconds("wan2.7-t2v"), 5);
-  }
-}
-
-fn default_video_duration_seconds(model: &str) -> u32 {
-  let lower = model.to_ascii_lowercase();
-  if lower.contains("veo-") {
-    8
-  } else if lower.contains("hailuo") || lower.contains("minimax") {
-    6
-  } else {
-    5
   }
 }

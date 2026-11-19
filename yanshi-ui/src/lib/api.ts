@@ -7,10 +7,26 @@ declare global {
   interface Window {
     /** Injected by the Tauri Desktop shell when its embedded loopback engine boots. */
     __YANSHI_API_BASE__?: string;
+    /** Per-launch loopback bearer token injected by Tauri Desktop or `yanshi-studio --web`. */
+    __YANSHI_API_TOKEN__?: string;
     /** True when running inside a Tauri v2 WebView shell. */
     __TAURI_INTERNALS__?: unknown;
   }
 }
+
+/** Return the per-launch loopback bearer token injected into `window`, if any. */
+export const getEmbeddedApiToken = (): string => {
+  if (typeof window !== 'undefined' && typeof window.__YANSHI_API_TOKEN__ === 'string') {
+    return window.__YANSHI_API_TOKEN__.trim();
+  }
+  return '';
+};
+
+/** Resolve explicit operator token first, falling back to `getEmbeddedApiToken()`. */
+export const resolveEffectiveApiToken = (token: string): string => {
+  const trimmed = token.trim();
+  return trimmed || getEmbeddedApiToken();
+};
 
 /** Normalize a gateway base URL (strip trailing slashes). */
 export const normalizeApiBaseUrl = (raw: string): string => raw.trim().replace(/\/+$/, '');
@@ -63,9 +79,9 @@ export const apiFetch = (
   tenant?: string,
 ): Promise<Response> => {
   const headers = new Headers(init.headers);
-  const trimmed = token.trim();
-  if (trimmed) {
-    headers.set('Authorization', `Bearer ${trimmed}`);
+  const effectiveToken = resolveEffectiveApiToken(token);
+  if (effectiveToken) {
+    headers.set('Authorization', `Bearer ${effectiveToken}`);
   }
   const trimmedTenant = tenant?.trim();
   if (trimmedTenant) {

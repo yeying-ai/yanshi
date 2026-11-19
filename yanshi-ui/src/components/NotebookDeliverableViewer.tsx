@@ -327,20 +327,22 @@ function extractDeliverableTable(deliverable: NotebookDeliverable): ParsedDelimi
   return rows.length > 0 ? { columns, rows } : null;
 }
 
-interface AudioScriptTurn {
+export interface AudioScriptTurn {
   speaker: string;
+  speakerLabel?: string;
   text: string;
   chunkId?: string;
 }
 
-interface VideoStoryboardScene {
+export interface VideoStoryboardScene {
+  label?: string;
   narration: string;
   visual?: string;
   motion?: boolean;
   chunkId?: string;
 }
 
-function extractAudioScript(deliverable: NotebookDeliverable): {
+export function extractAudioScript(deliverable: NotebookDeliverable): {
   turns: AudioScriptTurn[];
   loudnessLufs?: number;
 } {
@@ -348,18 +350,28 @@ function extractAudioScript(deliverable: NotebookDeliverable): {
   if (!content || typeof content !== 'object') {
     return { turns: [] };
   }
-  const rawScript = Array.isArray(content.script) ? content.script : [];
+  const rawScript = Array.isArray(content.script)
+    ? content.script
+    : Array.isArray(content.turns)
+      ? content.turns
+      : [];
   const turns: AudioScriptTurn[] = [];
   for (const entry of rawScript) {
     if (!entry || typeof entry !== 'object') continue;
     const obj = entry as Record<string, unknown>;
     const speaker = typeof obj.speaker === 'string' ? obj.speaker.trim() : '';
+    const speakerLabel =
+      typeof obj.speaker_label === 'string' && obj.speaker_label.trim()
+        ? obj.speaker_label.trim()
+        : undefined;
     const text = typeof obj.text === 'string' ? obj.text.trim() : '';
     if (!text) continue;
     turns.push({
       speaker: speaker || 'host',
+      speakerLabel,
       text,
-      chunkId: typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
+      chunkId:
+        typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
     });
   }
   const loudnessLufs =
@@ -369,7 +381,7 @@ function extractAudioScript(deliverable: NotebookDeliverable): {
   return { turns, loudnessLufs };
 }
 
-function extractVideoScenes(deliverable: NotebookDeliverable): {
+export function extractVideoScenes(deliverable: NotebookDeliverable): {
   scenes: VideoStoryboardScene[];
   seconds?: number;
 } {
@@ -389,9 +401,95 @@ function extractVideoScenes(deliverable: NotebookDeliverable): {
       narration,
       visual: visual || undefined,
       motion: obj.motion === true,
-      chunkId: typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
+      chunkId:
+        typeof obj.chunk_id === 'string' && obj.chunk_id.trim() ? obj.chunk_id.trim() : undefined,
     });
   }
+
+  // Fallback 1: `tech_slides_video` stores `content.slides[]` with `steps[].spoken` / `notes` / `title`.
+  if (scenes.length === 0 && Array.isArray(content.slides)) {
+    content.slides.forEach((entry, idx) => {
+      if (!entry || typeof entry !== 'object') return;
+      const slide = entry as Record<string, unknown>;
+      const title = typeof slide.title === 'string' ? slide.title.trim() : '';
+      const steps = Array.isArray(slide.steps) ? slide.steps : [];
+      const stepLines = steps
+        .map((s) => {
+          if (!s || typeof s !== 'object') return '';
+          const stepObj = s as Record<string, unknown>;
+          if (typeof stepObj.spoken === 'string' && stepObj.spoken.trim()) {
+            return stepObj.spoken.trim();
+          }
+          if (typeof stepObj.caption === 'string' && stepObj.caption.trim()) {
+            return stepObj.caption.trim();
+          }
+          return '';
+        })
+        .filter(Boolean);
+      const notes = typeof slide.notes === 'string' ? slide.notes.trim() : '';
+      const narration =
+        stepLines.join(' ') ||
+        notes ||
+        (typeof slide.narration === 'string' ? slide.narration.trim() : '');
+      const takeaway = typeof slide.takeaway === 'string' ? slide.takeaway.trim() : '';
+      const illustrationPrompt =
+        typeof slide.illustration_prompt === 'string' ? slide.illustration_prompt.trim() : '';
+      const visualParts = [title, illustrationPrompt || takeaway].filter(Boolean);
+      const visual = visualParts.join(' · ');
+      if (!narration && !visual) return;
+      scenes.push({
+        label: `幻灯片 ${idx + 1}`,
+        narration,
+        visual: visual || undefined,
+        chunkId:
+          typeof slide.chunk_id === 'string' && slide.chunk_id.trim()
+            ? slide.chunk_id.trim()
+            : undefined,
+      });
+    });
+  }
+
+  // Fallback 2: `episodic_drama_studio` stores `content.episodes[].scenes[]`.
+  if (scenes.length === 0 && Array.isArray(content.episodes)) {
+    content.episodes.forEach((epEntry, epIdx) => {
+      if (!epEntry || typeof epEntry !== 'object') return;
+      const ep = epEntry as Record<string, unknown>;
+      const epNum =
+        typeof ep.episode_number === 'number' && Number.isFinite(ep.episode_number)
+          ? ep.episode_number
+          : epIdx + 1;
+      const epScenes = Array.isArray(ep.scenes) ? ep.scenes : [];
+      epScenes.forEach((scEntry, scIdx) => {
+        if (!scEntry || typeof scEntry !== 'object') return;
+        const sc = scEntry as Record<string, unknown>;
+        const scNum =
+          typeof sc.scene_number === 'number' && Number.isFinite(sc.scene_number)
+            ? sc.scene_number
+            : scIdx + 1;
+        const speakerName = typeof sc.speaker_name === 'string' ? sc.speaker_name.trim() : '';
+        const dialogue = typeof sc.dialogue === 'string' ? sc.dialogue.trim() : '';
+        const fallbackNarration = typeof sc.narration === 'string' ? sc.narration.trim() : '';
+        const narration =
+          speakerName && dialogue
+            ? `${speakerName}：${dialogue}`
+            : dialogue || fallbackNarration;
+        const location = typeof sc.location === 'string' ? sc.location.trim() : '';
+        const shotPrompt = typeof sc.shot_prompt_en === 'string' ? sc.shot_prompt_en.trim() : '';
+        const visualParts = [location ? `场景：${location}` : '', shotPrompt].filter(Boolean);
+        const visual = visualParts.join(' · ');
+        if (!narration && !visual) return;
+        scenes.push({
+          label: `第 ${epNum} 集 · 场 ${scNum}`,
+          narration,
+          visual: visual || undefined,
+          motion: sc.climax_motion === true || sc.motion === true,
+          chunkId:
+            typeof sc.chunk_id === 'string' && sc.chunk_id.trim() ? sc.chunk_id.trim() : undefined,
+        });
+      });
+    });
+  }
+
   const seconds =
     typeof content.seconds === 'number' && Number.isFinite(content.seconds)
       ? content.seconds
@@ -659,23 +757,32 @@ export function NotebookDeliverableViewer({
         </div>
         <ol className="nb-transcript-list" role="list">
           {audioScript.turns.map((turn, idx) => {
-            const isGuest = turn.speaker.toLowerCase() === 'guest';
-            const speakerLabel =
-              turn.speaker.toLowerCase() === 'host'
+            const roleKey = turn.speaker.toLowerCase();
+            const pillModifier =
+              roleKey === 'pro'
+                ? 'nb-speaker-pill--pro'
+                : roleKey === 'con'
+                  ? 'nb-speaker-pill--con'
+                  : roleKey === 'guest'
+                    ? 'nb-speaker-pill--guest'
+                    : 'nb-speaker-pill--host';
+            const fallbackLabel =
+              roleKey === 'host'
                 ? '主持人'
-                : isGuest
-                  ? '特邀嘉宾'
-                  : turn.speaker;
+                : roleKey === 'moderator'
+                  ? '圆桌主持'
+                  : roleKey === 'pro'
+                    ? '正方辩手'
+                    : roleKey === 'con'
+                      ? '反方辩手'
+                      : roleKey === 'guest'
+                        ? '特邀嘉宾'
+                        : turn.speaker;
+            const speakerLabel = turn.speakerLabel || fallbackLabel;
             return (
               <li key={`turn-${idx}`} className="nb-transcript-turn">
                 <div className="nb-transcript-turn__head">
-                  <span
-                    className={`nb-speaker-pill ${
-                      isGuest ? 'nb-speaker-pill--guest' : 'nb-speaker-pill--host'
-                    }`}
-                  >
-                    {speakerLabel}
-                  </span>
+                  <span className={`nb-speaker-pill ${pillModifier}`}>{speakerLabel}</span>
                   {turn.chunkId && (
                     <button
                       type="button"
@@ -712,7 +819,9 @@ export function NotebookDeliverableViewer({
             <li key={`scene-${idx}`} className="nb-storyboard-card">
               <div className="nb-transcript-turn__head">
                 <div className="nb-storyboard-badges">
-                  <span className="nb-speaker-pill nb-speaker-pill--host">镜头 {idx + 1}</span>
+                  <span className="nb-speaker-pill nb-speaker-pill--host">
+                    {scene.label ?? `镜头 ${idx + 1}`}
+                  </span>
                   {scene.motion && (
                     <span className="nb-speaker-pill nb-speaker-pill--motion">动态运镜</span>
                   )}

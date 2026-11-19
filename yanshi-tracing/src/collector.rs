@@ -680,7 +680,7 @@ impl TraceCollector {
         // Do nothing
       }
       StorageErrorPolicy::LogError => {
-        eprintln!("Trace storage error: {}", error);
+        tracing::warn!(error = %error, "Trace storage error");
       }
     }
   }

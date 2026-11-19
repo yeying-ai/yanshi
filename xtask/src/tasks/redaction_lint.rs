@@ -79,7 +79,14 @@ pub(crate) fn redaction_lint_at(
       }
     }
   }
+  for extra_rel in ["yanshi-ui/src-tauri/src", "crates/gateway/src"] {
+    let extra_src = workspace_root.join(extra_rel);
+    if extra_src.is_dir() {
+      crate_dirs.push(extra_src);
+    }
+  }
   crate_dirs.sort();
+  crate_dirs.dedup();
 
   let mut hits: Vec<RedactionLintHit> = Vec::new();
   for src in &crate_dirs {
@@ -304,5 +311,30 @@ mod redaction_lint_tests {
     redaction_lint_at(workspace, &mut stdout, &mut stderr).expect("clean workspace must pass");
     let stdout_text = String::from_utf8(stdout).unwrap();
     assert!(stdout_text.contains("redaction-lint: OK"));
+  }
+
+  #[test]
+  fn scans_tauri_and_gateway_src_trees_too() {
+    let dir = TempDir::new().unwrap();
+    let workspace = dir.path();
+    let tauri_src = workspace.join("yanshi-ui/src-tauri/src");
+    let gateway_src = workspace.join("crates/gateway/src");
+    fs::create_dir_all(&tauri_src).unwrap();
+    fs::create_dir_all(&gateway_src).unwrap();
+    fs::write(
+      tauri_src.join("local_engine.rs"),
+      "fn leak_tauri() { warn!(prompt = %raw, \"bad\"); }\n",
+    )
+    .unwrap();
+    fs::write(
+      gateway_src.join("main.rs"),
+      "fn leak_gw() { error!(request_body = %raw, \"bad\"); }\n",
+    )
+    .unwrap();
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let err = redaction_lint_at(workspace, &mut stdout, &mut stderr).unwrap_err();
+    assert!(format!("{err}").contains("2 hit"));
   }
 }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type DebugResumeOverrides,
   NodeIoInspector,
+  unwrapCapturedFlowJson,
 } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { SpaLink } from '../components/StudioSubpageHeader';
@@ -91,6 +92,23 @@ export interface WorkflowStudioPageProps {
   initialMode?: StudioPosture;
   apiToken: string;
   onTokenChange: (token: string) => void;
+}
+
+export function extractFinalTextSummary(
+  executionOrder: readonly string[],
+  nodeOutputs: Readonly<Record<string, unknown>>,
+): { nodeId: string; text: string } | null {
+  if (executionOrder.length === 0) return null;
+  for (let i = executionOrder.length - 1; i >= 0; i -= 1) {
+    const nid = executionOrder[i];
+    const rawOut = nodeOutputs[nid];
+    if (!rawOut || typeof rawOut !== 'object') continue;
+    const rec = unwrapCapturedFlowJson(rawOut);
+    if (typeof rec.output === 'string' && rec.output.trim()) {
+      return { nodeId: nid, text: rec.output };
+    }
+  }
+  return null;
 }
 
 function defaultInputString(spec: InspectedInput): string {
@@ -835,19 +853,10 @@ export function WorkflowStudioPage({
   );
 
   // Extract final text/markdown summary when a non-media workflow finishes.
-  const finalTextSummary = useMemo(() => {
-    if (inspected.execution_order.length === 0) return null;
-    for (let i = inspected.execution_order.length - 1; i >= 0; i -= 1) {
-      const nid = inspected.execution_order[i];
-      const out = reduced.nodeOutputs[nid];
-      if (!out || typeof out !== 'object') continue;
-      const rec = out as Record<string, unknown>;
-      if (typeof rec.output === 'string' && rec.output.trim()) {
-        return { nodeId: nid, text: rec.output };
-      }
-    }
-    return null;
-  }, [inspected.execution_order, reduced.nodeOutputs]);
+  const finalTextSummary = useMemo(
+    () => extractFinalTextSummary(inspected.execution_order, reduced.nodeOutputs),
+    [inspected.execution_order, reduced.nodeOutputs],
+  );
 
   const completedNodeCount = useMemo(() => {
     return inspected.nodes.filter((n) => {
@@ -1564,10 +1573,10 @@ export function WorkflowStudioPage({
     setAttachRunBusy(true);
     setBannerError(null);
     try {
+      // Omit client `kind` override so the server resolves authoritative
+      // `deliverable.kind -> run.notebook_kind -> workflow.name` without
+      // stamping a stale sidebar preset or `personal:<uuid>` ID.
       const payload: Record<string, unknown> = { run_id: runId };
-      if (selectedPresetId && selectedPresetId !== 'custom') {
-        payload.kind = selectedPresetId;
-      }
       const res = await apiFetch(
         `/v1/notebooks/${encodeURIComponent(selectedAttachNotebookId)}/artifacts`,
         apiToken,

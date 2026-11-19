@@ -20,22 +20,56 @@ struct PrintlnLintHit {
   snippet: String,
 }
 
-/// Crate `src/` trees this gate scans — exactly the three the V1.7
-/// evaluation finding named.
-const PRINTLN_LINT_CRATES: &[&str] = &["yanshi-core", "yanshi-nodes", "yanshi-nodes-ai"];
+/// Crate `src/` trees this gate scans: all 24 non-CLI workspace crates
+/// plus the Tauri desktop engine (`yanshi-ui/src-tauri`), ensuring library
+/// and server/runtime crates never regress to ad-hoc stdout/stderr logging.
+/// (`yanshi-cli`, `crates/gateway`, and `xtask` are standalone CLI/daemon
+/// binaries and are intentionally excluded at the crate level.)
+const PRINTLN_LINT_CRATES: &[&str] = &[
+  "yanshi-value",
+  "yanshi-graph",
+  "yanshi-store-spi",
+  "yanshi-agent-spi",
+  "yanshi-async-util",
+  "yanshi-tool",
+  "yanshi-core",
+  "yanshi-nodes",
+  "yanshi-nodes-ai",
+  "yanshi-config",
+  "yanshi-llm",
+  "yanshi-mcp",
+  "yanshi-rag",
+  "yanshi-agents",
+  "yanshi-tracing",
+  "yanshi-tools",
+  "yanshi-tools-ai",
+  "yanshi-memory",
+  "yanshi-skills",
+  "yanshi-db",
+  "yanshi-server",
+  "yanshi-worker",
+  "yanshi-worker-proto",
+  "yanshi-harness",
+  "yanshi-ui/src-tauri",
+];
 
-/// Deliberate, documented exceptions (see the V1.7 commit that introduced
-/// this gate):
-///  - `bin/echo_plugin.rs`: a standalone reference-plugin binary (its own
-///    process), meant as a template for plugin authors, not library code
-///    that pollutes a host application's output.
-///
-/// `shutdown.rs` used to be exempt too (its ctrl_c/SIGTERM install-failure
-/// logging had to work in consumers that didn't enable yanshi-core's
-/// `observability` feature) — W0.7 made `tracing` an unconditional
-/// dependency, so it now routes through `tracing::error!` like everything
-/// else and no longer needs the exemption.
-const PRINTLN_LINT_EXEMPT_FILES: &[&str] = &["yanshi-core/src/bin/echo_plugin.rs"];
+/// Deliberate, documented exceptions:
+///  - `yanshi-core/src/bin/echo_plugin.rs`: standalone reference-plugin binary.
+///  - `yanshi-server/src/main.rs`, `yanshi-worker/src/main.rs`,
+///    `yanshi-ui/src-tauri/src/main.rs`: binary CLI entrypoints (`--doctor`,
+///    `--help`, `--web` startup banner, fatal CLI arg errors).
+///  - `yanshi-graph/src/events.rs`: `ConsoleListener` whose sole documented
+///    contract is printing `[event_type] event` lines to stdout.
+///  - `yanshi-config/src/diagnostics.rs`: shared human-readable `doctor`
+///    report renderer invoked by `yanshi doctor` and `yanshi-server --doctor`.
+const PRINTLN_LINT_EXEMPT_FILES: &[&str] = &[
+  "yanshi-core/src/bin/echo_plugin.rs",
+  "yanshi-server/src/main.rs",
+  "yanshi-worker/src/main.rs",
+  "yanshi-ui/src-tauri/src/main.rs",
+  "yanshi-graph/src/events.rs",
+  "yanshi-config/src/diagnostics.rs",
+];
 
 pub(crate) fn println_lint_at(
   workspace_root: &Path,
@@ -254,7 +288,7 @@ mod println_lint_tests {
   }
 
   #[test]
-  fn only_scans_the_three_named_crates() {
+  fn excludes_cli_crate_while_scanning_all_library_crates() {
     let dir = TempDir::new().unwrap();
     let workspace = dir.path();
     write_crate_src(
@@ -267,6 +301,15 @@ mod println_lint_tests {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     println_lint_at(workspace, &mut stdout, &mut stderr)
-      .expect("crates outside the named three must not be scanned");
+      .expect("yanshi-cli must remain exempt from println-lint");
+
+    write_crate_src(
+      workspace,
+      "yanshi-agents",
+      "lib.rs",
+      "fn leak() { println!(\"ad-hoc log in library crate\"); }\n",
+    );
+    let err = println_lint_at(workspace, &mut stdout, &mut stderr).unwrap_err();
+    assert!(format!("{err}").contains("1 hit"));
   }
 }

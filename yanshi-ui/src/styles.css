@@ -5909,6 +5909,16 @@ button.nb-citation-chip:focus-visible {
   color: #b45309;
 }
 
+.nb-speaker-pill--pro {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.nb-speaker-pill--con {
+  background: #ffe4e6;
+  color: #be123c;
+}
+
 .nb-speaker-pill--motion {
   background: #ede9fe;
   color: #6d28d9;

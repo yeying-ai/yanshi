@@ -3782,10 +3782,9 @@ async fn load_completed_run_deliverable(
       if (ev.kind == "node.output.captured" || ev.kind == "node_output_captured")
         && ev.payload.get("node_id").and_then(Value::as_str) == Some("deliverable")
         && let Some(output) = ev.payload.get("output")
+        && let Some(deliv) = unwrap_captured_deliverable_output(output)
       {
-        if let Some(deliv) = unwrap_captured_deliverable_output(output) {
-          return Some(deliv);
-        }
+        return Some(deliv);
       }
     }
   }

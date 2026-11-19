@@ -637,5 +637,83 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(videoHtml).toContain('镜头 1');
     expect(videoHtml).toContain('动态运镜');
     expect(videoHtml).toContain('24.5s');
+
+    // `debate_podcast_show` (`speaker: moderator | pro | con` + `speaker_label`)
+    const debateHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'audio_overview',
+          title: 'AI Cinema Debate',
+          content: {
+            script: [
+              { speaker: 'moderator', speaker_label: '林主持', text: '欢迎来到圆桌交锋。' },
+              { speaker: 'pro', speaker_label: '正方·陈导', text: '技术平权降低制片门槛。' },
+              { speaker: 'con', speaker_label: '反方·周评', text: '批量生成导致审美同质化。' },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(debateHtml).toContain('林主持');
+    expect(debateHtml).toContain('nb-speaker-pill--pro');
+    expect(debateHtml).toContain('nb-speaker-pill--con');
+
+    // `tech_slides_video` (`content.slides[]`) & `episodic_drama_studio` (`content.episodes[].scenes[]`)
+    const lectureVideoHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'video_overview',
+          title: 'Rust Traits Keynote',
+          content: {
+            seconds: 48.0,
+            slides: [
+              {
+                title: '胖指针内存布局',
+                takeaway: 'data_ptr + vtable_ptr 共 16 字节',
+                steps: [{ spoken: '请看左侧栈帧中的双指针结构。' }],
+              },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(lectureVideoHtml).toContain('幻灯片 1');
+    expect(lectureVideoHtml).toContain('请看左侧栈帧中的双指针结构。');
+    expect(lectureVideoHtml).toContain('胖指针内存布局');
+
+    const dramaVideoHtml = renderToStaticMarkup(
+      <NotebookDeliverableViewer
+        deliverable={{
+          kind: 'video_overview',
+          title: '记忆当铺',
+          content: {
+            episodes: [
+              {
+                episode_number: 1,
+                scenes: [
+                  {
+                    scene_number: 2,
+                    location: '雾港地下当铺',
+                    speaker_name: '林深',
+                    dialogue: '这枚记忆晶片写着三天后的日期。',
+                    shot_prompt_en: 'Close-up neon reflection on cracked chip',
+                    climax_motion: true,
+                  },
+                ],
+              },
+            ],
+          },
+          citations: [],
+        }}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(dramaVideoHtml).toContain('第 1 集 · 场 2');
+    expect(dramaVideoHtml).toContain('林深：这枚记忆晶片写着三天后的日期。');
+    expect(dramaVideoHtml).toContain('动态运镜');
   });
 });

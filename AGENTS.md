@@ -96,7 +96,7 @@ so the tool tier carries no capability dependencies.
   incl. persistent `/ask` `messages`, `plan`, `generate-batch`, standalone Studio
   run attachment `POST /v1/notebooks/{id}/artifacts`, source `PATCH`/`:retry`,
   and `source_ids`, SSE, skills, Harness sessions/approvals),
-  Postgres-backed `yanshi-db` (18 tables / 14 repos, migrations `0001`–`0017`), per-tenant run admission
+  Postgres-backed `yanshi-db` (18 tables / 14 repos, migrations `0001`–`0018`), per-tenant run admission
   control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
   (gRPC `WorkerProtocol`, 7 node payload types), and a React/Vite Web UI
   embedded at `/ui` (`/ui/notebooks`, `/ui/studio`, `/ui/app`, `/ui/console`)
@@ -181,7 +181,7 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AG closure,
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AH closure,
 19-template Studio catalogue incl. `data_table` & multi-paradigm creative/deliberative
 studios, 24-route Notebook contract incl. persistent `messages`, portable
 `deliverables` restoration on `import`, `POST /v1/notebooks/{id}/artifacts` (`attach-run`),

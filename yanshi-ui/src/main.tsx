@@ -17,7 +17,7 @@ import {
 import { RunCreateForm } from './pages/RunCreateForm';
 import { WorkflowStudioPage } from './pages/WorkflowStudioPage';
 import { harnessSessionIdFromPath } from './lib/harness';
-import { apiFetch, formatApiError, parseSseChunk } from './lib/api';
+import { apiFetch, formatApiError, getEmbeddedApiToken, parseSseChunk } from './lib/api';
 import { navigateTo, useCurrentRoute } from './lib/router';
 import {
   eventFilterKeyPrefix,
@@ -1159,7 +1159,9 @@ function App() {
   // Q1.9.1: token comes from sessionStorage (tab-scoped) instead of
   // localStorage. Operators who close the tab re-enter it; an XSS
   // payload that fires after the operator left no longer finds it.
-  const [apiToken, setApiToken] = useState(() => readSessionStorage(tokenKey, ''));
+  const [apiToken, setApiToken] = useState(
+    () => readSessionStorage(tokenKey, '') || getEmbeddedApiToken(),
+  );
 
   useEffect(() => {
     writeSessionStorage(tokenKey, apiToken);

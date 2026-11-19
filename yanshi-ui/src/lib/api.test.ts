@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { apiFetch, formatApiError, resolveApiUrl } from './api';
+import {
+  apiFetch,
+  formatApiError,
+  getEmbeddedApiToken,
+  resolveApiUrl,
+  resolveEffectiveApiToken,
+} from './api';
+import { requiresHeaderMediaFetch } from '../components/AuthorizedMedia';
 import { makePreferenceFetcher } from '../usePreferenceSync';
 
 afterEach(() => {
@@ -53,5 +60,29 @@ describe('api helpers & preference fetcher', () => {
     const msg = formatApiError(new TypeError('Failed to fetch'));
     expect(msg).toContain('yanshi serve');
     expect(formatApiError(new Error('HTTP 401 unauthorized'))).toBe('HTTP 401 unauthorized');
+  });
+
+  it('falls back to window.__YANSHI_API_TOKEN__ across apiFetch and AuthorizedMedia', async () => {
+    (globalThis as unknown as { window?: unknown }).window = {
+      __YANSHI_API_BASE__: 'http://127.0.0.1:19421',
+      __YANSHI_API_TOKEN__: '  desktop-loopback-token  ',
+    };
+    expect(getEmbeddedApiToken()).toBe('desktop-loopback-token');
+    expect(resolveEffectiveApiToken('')).toBe('desktop-loopback-token');
+    expect(resolveEffectiveApiToken('explicit-token')).toBe('explicit-token');
+    expect(requiresHeaderMediaFetch('', 'default')).toBe(true);
+
+    const originalFetch = globalThis.fetch;
+    let seenAuth = '';
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seenAuth = new Headers(init?.headers).get('Authorization') ?? '';
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await apiFetch('/v1/notebooks', '');
+      expect(seenAuth).toBe('Bearer desktop-loopback-token');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

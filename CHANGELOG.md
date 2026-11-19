@@ -81,6 +81,20 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Security
 
+- **HTTP SSRF/redirect/response-cap hardening, SDK media URL defense, subprocess `kill_on_drop`, macOS inline `-p` sandbox profile, `PluginHost` isolation, and Tauri loopback bearer auth (`06b4017`, `e06b034`).**
+  `HttpTool` now blocks `0.0.0.0/8`, `[::]`, bracketed IPv6 (`[::1]`), `100.64.0.0/10`
+  (CGNAT), and `fd00:ec2::254` (`CloudMetadata`), caps `HttpTool::send` responses
+  at `8 MiB`, strips `Authorization`/`Cookie`/`Proxy-Authorization`/`X-Api-Key`/
+  `X-Goog-Api-Key` across cross-origin redirects, and rewrites `303` plus `POST`
+  `301`/`302` redirects to `GET` with an empty body. `yanshi-llm` modality
+  `source_image_bytes` / `resolve_source_image` now route `http(s)://` URLs through
+  SSRF-pinned `download_public_url_with_cap`; `ShellTool`/`ScriptTool` enforce
+  `kill_on_drop(true)` with `4 MiB` bounded stream reads; `MacosSandboxExecBackend`
+  passes `-p <inline_profile>` (eliminating leaked `.sb` tempfiles); `PluginHost`
+  scrubs inherited env vars (`PLUGIN_ENV_ALLOWLIST`), caps JSON-RPC lines at `4 MiB`,
+  and evicts timed-out pending requests; and the Tauri desktop / `--web` loopback
+  engine generates a random 256-bit bearer token (`window.__YANSHI_API_TOKEN__`)
+  and restricts `CorsLayer` to trusted local origins instead of `CorsLayer::permissive()`.
 - **Runtime media-source path confinement (`allowed_path_roots`), `video_ingest` trusted-host gate, Pingora port-80 `Host` validation, and GitHub Actions `env:` input binding (`77af4f1`).**
   `FlowExecutionConfig::allowed_path_roots` now confines local filesystem reads
   across `yanshi_nodes::common::utils` (`load_bytes_from_source` / `load_data_uri_*`),
@@ -154,6 +168,27 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Multi-system prompt preservation, streaming `usage` billing & modality pricing, Studio `FigureNode` `inputs.source` collision fix, Harness `0018` limit persistence, CLI `resume`/`export`/`backup`, and Web UI/lint parity (`06b4017`, `f00eee6`, `9e15624`, `e06b034`).**
+  Anthropic and Google chat providers now concatenate multiple `role == "system"`
+  messages instead of overwriting earlier persona/tool instructions; streaming
+  `TokenUsage` is now captured across Anthropic (`message_start` + `message_delta`),
+  StepFun (`stream_options.include_usage` + usage-only chunks), and Moonshot,
+  zero-argument streamed tool calls default to `{}`, Anthropic budgeted thinking
+  raises `max_tokens > budget_tokens`, `GoogleMediaProvider` supports `imagen-*`
+  `:predict` endpoints, and `config/pricing.prod.yml` + `pricing.rs` cover Veo,
+  Kling, MiniMax Hailuo/Speech, Wan, Imagen 4, and StepFun audio models. Fixed
+  `FigureNode` ignoring ambient URL/path `inputs.source` when `description` is
+  present (`repo_architecture`, `paper_reader`), `video_summarizer` (`polish_bilingual_srt=false`),
+  `worldbuilding_bible` `mindmap_tree` schema, global `chat_model` override &
+  server checkpoint persistence, `PgNotebookMessageRepo::list_for_notebook` returning
+  the newest `limit` turns, migration `0018_harness_session_limits.sql` preserving
+  `cost_limit_usd`/`max_steps` across `interrupt/answer` and `:resume`, `yanshi-worker`
+  background heartbeats & retryable `NetworkError`/`TimeoutExceeded` status derivation,
+  Tauri `attach-run` `FlowValue::Json` unwrapping, CLI `workflow resume`/`resume-plan --server`,
+  `notebook export` JSON stdout (`--brief` for Markdown), `backup`/`restore`
+  `harness_memory` SQLite support, Web UI `NotebookWorkspacePage` route-fallback &
+  `NotebookDeliverableViewer` `tech_slides_video`/`episodic_drama_studio`/`debate_podcast_show`
+  views, and expanded `xtask` `println-lint` (25 dirs) + `redaction-lint` (28 dirs).
 - **UTF-8 CJK byte-slice panics, `:resume` context & idempotent artifact registration (`0017`), `tts-1` / pricing defaults, lossless `raw_text` note editing, and CLI/doctor parity (`77af4f1`, `3afc74f`, `d92912e`, `2cad1e9`).**
   Eliminated all 6 UTF-8 multi-byte slice panics across `events_filter.rs`
   (where `?filter=中文=1` panicked SSE/history workers), `web_search.rs`,

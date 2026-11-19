@@ -924,12 +924,11 @@ impl LLMConfig {
       for vendor in &missing_providers {
         let mut affected = models_by_vendor.get(vendor).cloned().unwrap_or_default();
         affected.sort_unstable();
-        eprintln!(
-          "Warning: provider '{}' has no API key configured; \
-           {} model(s) unavailable until the key is set: {}",
-          vendor,
-          affected.len(),
-          affected.join(", ")
+        tracing::warn!(
+          provider = %vendor,
+          unavailable_models = affected.len(),
+          models = %affected.join(", "),
+          "provider has no API key configured; models unavailable until key is set"
         );
       }
     }

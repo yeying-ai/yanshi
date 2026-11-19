@@ -13,7 +13,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Instant;
 
-#[cfg(feature = "logging")]
 use tracing::{debug, error, info, warn};
 
 /// Q3.6.2: stable, non-cryptographic fingerprint of a prompt or response
@@ -265,100 +264,73 @@ impl LLMClient {
 
   /// Log request start information
   fn log_request_start(&self) {
-    #[cfg(feature = "logging")]
-    {
-      info!(
-        "Starting LLM request: model={}, prompt_len={}, temp={:?}, format={:?}",
-        self.model_name,
-        self.prompt.len(),
-        self.temperature,
-        self.response_format
-      );
+    info!(
+      "Starting LLM request: model={}, prompt_len={}, temp={:?}, format={:?}",
+      self.model_name,
+      self.prompt.len(),
+      self.temperature,
+      self.response_format
+    );
 
-      // Q3.6.2: do NOT log the full prompt at DEBUG. Prompts routinely
-      // contain PII, retrieved documents, system prompts with internal
-      // architecture details, etc. Default tracing config can be
-      // CRIT/DEBUG without anyone realising they signed up for full
-      // prompt persistence. Surface a short SHA-256 fingerprint + length
-      // at DEBUG so operators can correlate requests across logs without
-      // exposing content; the full prompt only lands at TRACE level,
-      // which production setups intentionally exclude.
-      debug!(
-        "Prompt fingerprint: len={} sha256_prefix={}",
-        self.prompt.len(),
-        prompt_fingerprint(&self.prompt)
-      );
-      tracing::trace!("Full prompt: {}", self.prompt);
+    // Q3.6.2: do NOT log the full prompt at DEBUG. Prompts routinely
+    // contain PII, retrieved documents, system prompts with internal
+    // architecture details, etc. Default tracing config can be
+    // CRIT/DEBUG without anyone realising they signed up for full
+    // prompt persistence. Surface a short SHA-256 fingerprint + length
+    // at DEBUG so operators can correlate requests across logs without
+    // exposing content; the full prompt only lands at TRACE level,
+    // which production setups intentionally exclude.
+    debug!(
+      "Prompt fingerprint: len={} sha256_prefix={}",
+      self.prompt.len(),
+      prompt_fingerprint(&self.prompt)
+    );
+    tracing::trace!("Full prompt: {}", self.prompt);
 
-      if let Some(tools) = &self.tools {
-        debug!("Tools enabled: {} functions", tools.len());
-      }
-    }
-
-    #[cfg(not(feature = "logging"))]
-    {
-      println!(
-        "[Yanshi] Request: {} ({})",
-        self.model_name,
-        self.prompt.len()
-      );
+    if let Some(tools) = &self.tools {
+      debug!("Tools enabled: {} functions", tools.len());
     }
   }
 
   /// Log request completion information
   fn log_request_complete(&self, result: &Result<String>, duration: std::time::Duration) {
-    #[cfg(feature = "logging")]
-    {
-      match result {
-        Ok(response) => {
-          info!(
-            "LLM request completed: model={}, duration={}ms, response_len={}",
-            self.model_name,
-            duration.as_millis(),
-            response.len()
-          );
+    match result {
+      Ok(response) => {
+        info!(
+          "LLM request completed: model={}, duration={}ms, response_len={}",
+          self.model_name,
+          duration.as_millis(),
+          response.len()
+        );
 
-          // Q3.6.2: see prompt-logging note above. Responses can echo
-          // back PII, contain LLM-rendered customer data, or recite
-          // a tool's secrets. DEBUG gets a fingerprint + length; full
-          // response body is TRACE-only.
-          debug!(
-            "Response fingerprint: len={} sha256_prefix={}",
-            response.len(),
-            prompt_fingerprint(response)
-          );
-          tracing::trace!("Response content: {}", response);
+        // Q3.6.2: see prompt-logging note above. Responses can echo
+        // back PII, contain LLM-rendered customer data, or recite
+        // a tool's secrets. DEBUG gets a fingerprint + length; full
+        // response body is TRACE-only.
+        debug!(
+          "Response fingerprint: len={} sha256_prefix={}",
+          response.len(),
+          prompt_fingerprint(response)
+        );
+        tracing::trace!("Response content: {}", response);
 
-          // Validate JSON if JSON format was requested
-          if let Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. }) =
-            &self.response_format
-          {
-            match serde_json::from_str::<Value>(response) {
-              Ok(_) => debug!("✅ Response is valid JSON"),
-              Err(e) => warn!("⚠️ Invalid JSON response: {}", e),
-            }
+        // Validate JSON if JSON format was requested
+        if let Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. }) =
+          &self.response_format
+        {
+          match serde_json::from_str::<Value>(response) {
+            Ok(_) => debug!("✅ Response is valid JSON"),
+            Err(e) => warn!("⚠️ Invalid JSON response: {}", e),
           }
         }
-        Err(e) => {
-          error!(
-            "LLM request failed: model={}, duration={}ms, error={}",
-            self.model_name,
-            duration.as_millis(),
-            e
-          );
-        }
       }
-    }
-
-    #[cfg(not(feature = "logging"))]
-    {
-      match result {
-        Ok(response) => println!(
-          "[Yanshi] ✅ Response: {} chars in {}ms",
-          response.len(),
-          duration.as_millis()
-        ),
-        Err(e) => println!("[Yanshi] ❌ Error: {} ({}ms)", e, duration.as_millis()),
+      Err(e) => {
+        error!(
+          "LLM request failed: model={}, duration={}ms, error={}",
+          self.model_name,
+          duration.as_millis(),
+          e
+        );
       }
     }
   }
@@ -530,19 +502,12 @@ impl LLMClient {
     .await;
 
     if self.enable_logging {
-      #[cfg(feature = "logging")]
       match &result {
         Ok(_) => info!(
           "Streaming request started successfully: {}",
           self.model_name
         ),
         Err(e) => error!("Streaming request failed: {}", e),
-      }
-
-      #[cfg(not(feature = "logging"))]
-      match &result {
-        Ok(_) => println!("[Yanshi] 📡 Streaming started: {}", self.model_name),
-        Err(e) => println!("[Yanshi] ❌ Streaming failed: {}", e),
       }
     }
 
