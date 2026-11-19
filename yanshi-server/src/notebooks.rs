@@ -18,12 +18,13 @@
 //!
 //! Ingestion: fetch (`url`, through the http tool's SSRF filter: the URL
 //! is tenant-supplied), or take the pasted `text`, or decode an uploaded
-//! `file` (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.csv`, `.tsv`, `.json`),
-//! or transcribe an uploaded audio `recording` via a configured ASR model;
-//! extract text (HTML and PDF via the RAG loaders with `pdftotext` fallback,
-//! DOCX via pure-Rust WordprocessingML extraction, CSV/TSV/JSON with header
-//! labels preserved per row); chunk by paragraph; store the chunks in
-//! `source_chunks`; mark the source `ready` (or `failed`, with the reason).
+//! `file` (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`,
+//! `.tsv`, `.json`), or transcribe an uploaded audio `recording` via a
+//! configured ASR model; extract text (HTML and PDF via the RAG loaders with
+//! `pdftotext` fallback, DOCX/XLSX/PPTX via pure-Rust OOXML extraction,
+//! CSV/TSV/JSON with header labels preserved per row); chunk by paragraph;
+//! store the chunks in `source_chunks`; mark the source `ready` (or `failed`,
+//! with the reason).
 //!
 //! The index is derived, not stored: a notebook's BM25 index is built
 //! from its ready chunks on first search, cached in this process, and
@@ -53,8 +54,8 @@ use crate::{AppState, error::ApiError, tenant::TenantId};
 
 /// Uploaded / pasted sources larger than this are refused at submit.
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
-/// Uncompressed XML read ceiling when unpacking `.docx` archives (zip-bomb guard).
-const MAX_DOCX_XML_BYTES: usize = 16 * 1024 * 1024;
+/// Uncompressed XML read ceiling when unpacking `.docx` / `.xlsx` / `.pptx` archives (zip-bomb guard).
+const MAX_OOXML_XML_BYTES: usize = 16 * 1024 * 1024;
 /// Paragraph chunking: target size and overlap, in characters.
 const CHUNK_SIZE: usize = 1200;
 const CHUNK_OVERLAP: usize = 150;
@@ -244,8 +245,8 @@ pub enum AddSourceRequest {
     #[serde(default)]
     title: Option<String>,
   },
-  /// An uploaded document (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.csv`,
-  /// `.tsv`, `.json`), base64-encoded.
+  /// An uploaded document (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.xlsx`,
+  /// `.pptx`, `.csv`, `.tsv`, `.json`), base64-encoded.
   File {
     filename: String,
     content_base64: String,
@@ -276,6 +277,8 @@ enum BytesFormat {
   Html,
   Pdf,
   Docx,
+  Xlsx,
+  Pptx,
   Csv,
   Tsv,
   Json,
@@ -359,12 +362,14 @@ pub async fn add_source(
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
         "pdf" => BytesFormat::Pdf,
         "docx" => BytesFormat::Docx,
+        "xlsx" => BytesFormat::Xlsx,
+        "pptx" => BytesFormat::Pptx,
         "csv" => BytesFormat::Csv,
         "tsv" => BytesFormat::Tsv,
         "json" => BytesFormat::Json,
         other => {
           return Err(ApiError::BadRequest(format!(
-            "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .csv, .tsv or .json"
+            "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv or .json"
           )));
         }
       };
@@ -384,10 +389,15 @@ pub async fn add_source(
           "file is not a valid PDF (missing %PDF- header)".into(),
         ));
       }
-      if format == BytesFormat::Docx && !bytes.starts_with(b"PK\x03\x04") {
-        return Err(ApiError::BadRequest(
-          "file is not a valid DOCX (missing PK zip header)".into(),
-        ));
+      if matches!(
+        format,
+        BytesFormat::Docx | BytesFormat::Xlsx | BytesFormat::Pptx
+      ) && !bytes.starts_with(b"PK\x03\x04")
+      {
+        return Err(ApiError::BadRequest(format!(
+          "file is not a valid {} archive (missing PK zip header)",
+          extension.to_ascii_uppercase()
+        )));
       }
       let resolved_title = title
         .filter(|t| !t.trim().is_empty())
@@ -549,6 +559,8 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
     BytesFormat::Html => html_text(&bytes).await,
     BytesFormat::Pdf => pdf_text(&bytes).await,
     BytesFormat::Docx => docx_text(&bytes),
+    BytesFormat::Xlsx => xlsx_text(&bytes),
+    BytesFormat::Pptx => pptx_text(&bytes),
     BytesFormat::Csv => delimited_text(&bytes, b','),
     BytesFormat::Tsv => delimited_text(&bytes, b'\t'),
     BytesFormat::Json => json_text(&bytes),
@@ -556,6 +568,35 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
       String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())
     }
   }
+}
+
+fn sniff_ooxml_zip_format(bytes: &[u8], ext: Option<&str>) -> Option<BytesFormat> {
+  if !bytes.starts_with(b"PK\x03\x04") {
+    return None;
+  }
+  match ext {
+    Some("docx") => return Some(BytesFormat::Docx),
+    Some("xlsx") => return Some(BytesFormat::Xlsx),
+    Some("pptx") => return Some(BytesFormat::Pptx),
+    _ => {}
+  }
+  let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+  for name in archive.file_names() {
+    let Ok(name) = name else {
+      continue;
+    };
+    let name: &str = name.as_ref();
+    if name == "word/document.xml" {
+      return Some(BytesFormat::Docx);
+    }
+    if name == "xl/workbook.xml" || name.starts_with("xl/worksheets/sheet") {
+      return Some(BytesFormat::Xlsx);
+    }
+    if name == "ppt/presentation.xml" || name.starts_with("ppt/slides/slide") {
+      return Some(BytesFormat::Pptx);
+    }
+  }
+  None
 }
 
 fn url_path_extension(raw_url: &str) -> Option<String> {
@@ -594,8 +635,8 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   let ext = url_path_extension(url);
   let format = if bytes.starts_with(b"%PDF-") {
     BytesFormat::Pdf
-  } else if bytes.starts_with(b"PK\x03\x04") && ext.as_deref() == Some("docx") {
-    BytesFormat::Docx
+  } else if let Some(ooxml) = sniff_ooxml_zip_format(&bytes, ext.as_deref()) {
+    ooxml
   } else {
     let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
     let lowered = sample.trim_start().to_ascii_lowercase();
@@ -686,47 +727,58 @@ async fn pdftotext_fallback(pdf_path: &FsPath, id: Uuid) -> Result<String, Strin
   result
 }
 
+fn read_zip_xml_bounded(
+  archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+  entry_name: &str,
+  budget_remaining: &mut usize,
+  label: &str,
+) -> Result<Option<String>, String> {
+  use std::io::Read as _;
+  let mut entry = match archive.by_name(entry_name) {
+    Ok(file) => file,
+    Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+    Err(e) => return Err(format!("reading {entry_name} failed: {e}")),
+  };
+  let mut xml_bytes = Vec::new();
+  entry
+    .by_ref()
+    .take((*budget_remaining as u64).saturating_add(1))
+    .read_to_end(&mut xml_bytes)
+    .map_err(|e| format!("decompressing {entry_name} failed: {e}"))?;
+  if xml_bytes.len() > *budget_remaining {
+    return Err(format!(
+      "{label} uncompressed XML exceeds {MAX_OOXML_XML_BYTES} bytes safety limit"
+    ));
+  }
+  *budget_remaining -= xml_bytes.len();
+  String::from_utf8(xml_bytes)
+    .map(Some)
+    .map_err(|_| format!("{entry_name} is not valid UTF-8 XML"))
+}
+
 /// Pure-Rust OOXML `.docx` text extraction (`word/document.xml`, plus optional
 /// `word/footnotes.xml` and `word/endnotes.xml`), preserving paragraph breaks
 /// and table rows (`| cell1 | cell2 |`) while bounding uncompressed XML bytes
 /// against zip-bomb payloads.
 fn docx_text(bytes: &[u8]) -> Result<String, String> {
-  use std::io::Read as _;
   let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
     .map_err(|e| format!("invalid DOCX archive: {e}"))?;
 
-  let mut budget_remaining = MAX_DOCX_XML_BYTES;
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
   let mut sections: Vec<String> = Vec::new();
   for entry_name in [
     "word/document.xml",
     "word/footnotes.xml",
     "word/endnotes.xml",
   ] {
-    let mut entry = match archive.by_name(entry_name) {
-      Ok(file) => file,
-      Err(zip::result::ZipError::FileNotFound) => {
-        if entry_name == "word/document.xml" {
-          return Err("invalid DOCX archive: missing word/document.xml".to_string());
-        }
-        continue;
+    let Some(xml) = read_zip_xml_bounded(&mut archive, entry_name, &mut budget_remaining, "DOCX")?
+    else {
+      if entry_name == "word/document.xml" {
+        return Err("invalid DOCX archive: missing word/document.xml".to_string());
       }
-      Err(e) => return Err(format!("reading {entry_name} failed: {e}")),
+      continue;
     };
-    let mut xml_bytes = Vec::new();
-    entry
-      .by_ref()
-      .take((budget_remaining as u64).saturating_add(1))
-      .read_to_end(&mut xml_bytes)
-      .map_err(|e| format!("decompressing {entry_name} failed: {e}"))?;
-    if xml_bytes.len() > budget_remaining {
-      return Err(format!(
-        "DOCX uncompressed XML exceeds {MAX_DOCX_XML_BYTES} bytes safety limit"
-      ));
-    }
-    budget_remaining -= xml_bytes.len();
-    let xml =
-      String::from_utf8(xml_bytes).map_err(|_| format!("{entry_name} is not valid UTF-8 XML"))?;
-    let extracted = extract_wordprocessingml_text(&xml);
+    let extracted = extract_ooxml_rich_text(&xml);
     if !extracted.trim().is_empty() {
       sections.push(extracted);
     }
@@ -734,7 +786,442 @@ fn docx_text(bytes: &[u8]) -> Result<String, String> {
   Ok(sections.join("\n\n"))
 }
 
-fn extract_wordprocessingml_text(xml: &str) -> String {
+/// Pure-Rust OOXML `.pptx` slide & speaker-notes extraction (`ppt/slides/slide*.xml`
+/// + optional `ppt/notesSlides/notesSlide*.xml`), ordered numerically by slide
+/// index and preserving paragraph breaks and `<a:tbl>` rows.
+fn pptx_text(bytes: &[u8]) -> Result<String, String> {
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    .map_err(|e| format!("invalid PPTX archive: {e}"))?;
+
+  let mut slide_entries: Vec<(usize, String)> = archive
+    .file_names()
+    .filter_map(|name| {
+      let name = name.ok()?;
+      let stem = name
+        .as_ref()
+        .strip_prefix("ppt/slides/slide")?
+        .strip_suffix(".xml")?;
+      let num = stem.parse::<usize>().ok()?;
+      Some((num, name.into_owned()))
+    })
+    .collect();
+  if slide_entries.is_empty() {
+    return Err("invalid PPTX archive: missing ppt/slides/slide*.xml".to_string());
+  }
+  slide_entries.sort_by_key(|(num, _)| *num);
+
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
+  let mut slides_out: Vec<String> = Vec::new();
+  for (slide_num, entry_name) in slide_entries {
+    let Some(slide_xml) =
+      read_zip_xml_bounded(&mut archive, &entry_name, &mut budget_remaining, "PPTX")?
+    else {
+      continue;
+    };
+    let body = extract_ooxml_rich_text(&slide_xml);
+    let notes_entry = format!("ppt/notesSlides/notesSlide{slide_num}.xml");
+    let notes = read_zip_xml_bounded(&mut archive, &notes_entry, &mut budget_remaining, "PPTX")?
+      .map(|xml| extract_ooxml_rich_text(&xml))
+      .unwrap_or_default();
+    let cleaned_notes: Vec<&str> = notes
+      .lines()
+      .map(str::trim)
+      .filter(|line| !line.is_empty() && line.parse::<usize>().ok() != Some(slide_num))
+      .collect();
+
+    if body.trim().is_empty() && cleaned_notes.is_empty() {
+      continue;
+    }
+    let mut section = format!("Slide {slide_num}:");
+    if !body.trim().is_empty() {
+      section.push('\n');
+      section.push_str(body.trim());
+    }
+    if !cleaned_notes.is_empty() {
+      section.push_str("\nSpeaker notes: ");
+      section.push_str(&cleaned_notes.join(" "));
+    }
+    slides_out.push(section);
+  }
+  Ok(slides_out.join("\n\n"))
+}
+
+/// Pure-Rust OOXML `.xlsx` workbook extraction (`xl/sharedStrings.xml`,
+/// `xl/workbook.xml`, and `xl/worksheets/sheet*.xml`), formatting rows with
+/// sheet and column header labels (`Header: Value | ...`) for BM25 recall.
+fn xlsx_text(bytes: &[u8]) -> Result<String, String> {
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    .map_err(|e| format!("invalid XLSX archive: {e}"))?;
+
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
+  let shared_strings = match read_zip_xml_bounded(
+    &mut archive,
+    "xl/sharedStrings.xml",
+    &mut budget_remaining,
+    "XLSX",
+  )? {
+    Some(xml) => parse_xlsx_shared_strings(&xml),
+    None => Vec::new(),
+  };
+
+  let sheet_titles = match read_zip_xml_bounded(
+    &mut archive,
+    "xl/workbook.xml",
+    &mut budget_remaining,
+    "XLSX",
+  )? {
+    Some(xml) => parse_xlsx_sheet_titles(&xml),
+    None => Vec::new(),
+  };
+
+  let mut sheet_entries: Vec<(usize, String)> = archive
+    .file_names()
+    .filter_map(|name| {
+      let name = name.ok()?;
+      let stem = name
+        .as_ref()
+        .strip_prefix("xl/worksheets/sheet")?
+        .strip_suffix(".xml")?;
+      let num = stem.parse::<usize>().ok()?;
+      Some((num, name.into_owned()))
+    })
+    .collect();
+  if sheet_entries.is_empty() {
+    return Err("invalid XLSX archive: missing xl/worksheets/sheet*.xml".to_string());
+  }
+  sheet_entries.sort_by_key(|(num, _)| *num);
+
+  let mut sections: Vec<String> = Vec::new();
+  for (pos, (sheet_num, entry_name)) in sheet_entries.into_iter().enumerate() {
+    let Some(sheet_xml) =
+      read_zip_xml_bounded(&mut archive, &entry_name, &mut budget_remaining, "XLSX")?
+    else {
+      continue;
+    };
+    let rows = parse_xlsx_sheet_rows(&sheet_xml, &shared_strings);
+    if rows.is_empty() {
+      continue;
+    }
+    let sheet_title = sheet_titles
+      .get(pos)
+      .cloned()
+      .unwrap_or_else(|| format!("Sheet{sheet_num}"));
+    sections.push(format_xlsx_sheet_rows(&sheet_title, &rows));
+  }
+  Ok(sections.join("\n\n"))
+}
+
+fn xml_attr_value(tag_body: &str, attr_name: &str) -> Option<String> {
+  let mut rest = tag_body;
+  while let Some(eq_idx) = rest.find('=') {
+    let before = rest[..eq_idx].trim_end();
+    let key = before
+      .rsplit_once(char::is_whitespace)
+      .map_or(before, |(_, k)| k);
+    let after = rest[eq_idx + 1..].trim_start();
+    let Some(quote) = after.chars().next().filter(|&c| c == '"' || c == '\'') else {
+      rest = after;
+      continue;
+    };
+    let val_rest = &after[quote.len_utf8()..];
+    let Some(end_idx) = val_rest.find(quote) else {
+      break;
+    };
+    if key == attr_name {
+      return Some(decode_xml_entities(&val_rest[..end_idx]));
+    }
+    rest = &val_rest[end_idx + quote.len_utf8()..];
+  }
+  None
+}
+
+fn parse_xlsx_shared_strings(xml: &str) -> Vec<String> {
+  let mut items = Vec::new();
+  let mut current = String::new();
+  let mut in_si = false;
+  let mut in_t = false;
+  let mut phonetic_depth: usize = 0;
+
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    if in_si && in_t && phonetic_depth == 0 && lt > 0 {
+      current.push_str(&decode_xml_entities(&rest[..lt]));
+    }
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let is_closing = raw_tag.starts_with('/');
+    let is_self_closing = raw_tag.ends_with('/');
+    let tag_body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
+    let local = tag_body
+      .split_whitespace()
+      .next()
+      .unwrap_or_default()
+      .rsplit_once(':')
+      .map_or_else(
+        || tag_body.split_whitespace().next().unwrap_or_default(),
+        |(_, l)| l,
+      );
+    match (local, is_closing, is_self_closing) {
+      ("si", false, false) => {
+        in_si = true;
+        current.clear();
+      }
+      ("si", false, true) => {
+        items.push(String::new());
+      }
+      ("si", true, _) => {
+        if in_si {
+          items.push(current.clone());
+        }
+        in_si = false;
+        in_t = false;
+        current.clear();
+      }
+      ("rPh", false, false) => {
+        phonetic_depth += 1;
+      }
+      ("rPh", true, _) => {
+        phonetic_depth = phonetic_depth.saturating_sub(1);
+      }
+      ("t", false, false) if in_si => {
+        in_t = true;
+      }
+      ("t", true, _) => {
+        in_t = false;
+      }
+      _ => {}
+    }
+  }
+  items
+}
+
+fn parse_xlsx_sheet_titles(xml: &str) -> Vec<String> {
+  let mut titles = Vec::new();
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('/') || raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let tag_body = raw_tag.trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+    let local = tag_name.rsplit_once(':').map_or(tag_name, |(_, l)| l);
+    if local == "sheet"
+      && let Some(name) = xml_attr_value(tag_body, "name")
+      && !name.trim().is_empty()
+    {
+      titles.push(name.trim().to_string());
+    }
+  }
+  titles
+}
+
+fn xlsx_col_index_from_ref(cell_ref: &str) -> Option<usize> {
+  let letters: String = cell_ref
+    .chars()
+    .take_while(char::is_ascii_alphabetic)
+    .collect();
+  if letters.is_empty() {
+    return None;
+  }
+  let mut idx: usize = 0;
+  for ch in letters.chars() {
+    let digit = (ch.to_ascii_uppercase() as u8).saturating_sub(b'A') as usize + 1;
+    idx = idx.saturating_mul(26).saturating_add(digit);
+  }
+  idx.checked_sub(1)
+}
+
+fn xlsx_col_letters(mut col_idx: usize) -> String {
+  let mut chars = Vec::new();
+  loop {
+    chars.push((b'A' + (col_idx % 26) as u8) as char);
+    if col_idx < 26 {
+      break;
+    }
+    col_idx = col_idx / 26 - 1;
+  }
+  chars.into_iter().rev().collect()
+}
+
+fn parse_xlsx_sheet_rows(xml: &str, shared_strings: &[String]) -> Vec<Vec<(usize, String)>> {
+  let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
+  let mut current_row: Vec<(usize, String)> = Vec::new();
+  let mut in_row = false;
+  let mut in_cell = false;
+  let mut next_col_idx: usize = 0;
+  let mut cell_col_idx: usize = 0;
+  let mut cell_type = String::new();
+  let mut in_v = false;
+  let mut in_is_t = false;
+  let mut cell_v = String::new();
+  let mut cell_inline = String::new();
+
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    if in_cell && lt > 0 {
+      if in_v {
+        cell_v.push_str(&decode_xml_entities(&rest[..lt]));
+      } else if in_is_t {
+        cell_inline.push_str(&decode_xml_entities(&rest[..lt]));
+      }
+    }
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let is_closing = raw_tag.starts_with('/');
+    let is_self_closing = raw_tag.ends_with('/');
+    let tag_body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+    let local = tag_name.rsplit_once(':').map_or(tag_name, |(_, l)| l);
+
+    match (local, is_closing, is_self_closing) {
+      ("row", false, false) => {
+        in_row = true;
+        current_row.clear();
+        next_col_idx = 0;
+      }
+      ("row", true, _) => {
+        if in_row && !current_row.is_empty() {
+          rows.push(std::mem::take(&mut current_row));
+        }
+        in_row = false;
+      }
+      ("c", false, false) if in_row => {
+        in_cell = true;
+        cell_col_idx = xml_attr_value(tag_body, "r")
+          .and_then(|r| xlsx_col_index_from_ref(&r))
+          .unwrap_or(next_col_idx);
+        next_col_idx = cell_col_idx + 1;
+        cell_type = xml_attr_value(tag_body, "t").unwrap_or_default();
+        cell_v.clear();
+        cell_inline.clear();
+      }
+      ("c", false, true) if in_row => {
+        let col = xml_attr_value(tag_body, "r")
+          .and_then(|r| xlsx_col_index_from_ref(&r))
+          .unwrap_or(next_col_idx);
+        next_col_idx = col + 1;
+      }
+      ("c", true, _) if in_cell => {
+        let resolved = match cell_type.as_str() {
+          "s" => cell_v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|idx| shared_strings.get(idx).cloned())
+            .unwrap_or_default(),
+          "inlineStr" => cell_inline.clone(),
+          "b" => match cell_v.trim() {
+            "1" => "true".to_string(),
+            "0" => "false".to_string(),
+            other => other.to_string(),
+          },
+          _ => cell_v.clone(),
+        };
+        let trimmed = resolved.trim();
+        if !trimmed.is_empty() {
+          current_row.push((cell_col_idx, trimmed.to_string()));
+        }
+        in_cell = false;
+        in_v = false;
+        in_is_t = false;
+      }
+      ("v", false, false) if in_cell => {
+        in_v = true;
+      }
+      ("v", true, _) => {
+        in_v = false;
+      }
+      ("t", false, false) if in_cell => {
+        in_is_t = true;
+      }
+      ("t", true, _) => {
+        in_is_t = false;
+      }
+      _ => {}
+    }
+  }
+  rows
+}
+
+fn format_xlsx_sheet_rows(sheet_title: &str, rows: &[Vec<(usize, String)>]) -> String {
+  let max_col = rows
+    .iter()
+    .flat_map(|r| r.iter().map(|(col, _)| *col))
+    .max()
+    .unwrap_or(0);
+  if rows.len() == 1 {
+    let pairs: Vec<String> = rows[0]
+      .iter()
+      .map(|(col, val)| format!("{}: {val}", xlsx_col_letters(*col)))
+      .collect();
+    return format!("Sheet: {sheet_title}\nRow 1: {}", pairs.join(" | "));
+  }
+
+  let mut headers = vec![String::new(); max_col + 1];
+  for (col, val) in &rows[0] {
+    if let Some(slot) = headers.get_mut(*col) {
+      *slot = val.clone();
+    }
+  }
+  for (col_idx, slot) in headers.iter_mut().enumerate() {
+    if slot.trim().is_empty() {
+      *slot = format!("col_{}", xlsx_col_letters(col_idx));
+    }
+  }
+
+  let mut blocks = vec![format!(
+    "Sheet: {sheet_title}\nColumns: {}",
+    headers.join(" | ")
+  )];
+  let mut current_group: Vec<String> = Vec::new();
+  for (row_idx, row) in rows[1..].iter().enumerate() {
+    let pairs: Vec<String> = row
+      .iter()
+      .map(|(col, val)| {
+        let label = headers
+          .get(*col)
+          .cloned()
+          .unwrap_or_else(|| format!("col_{}", xlsx_col_letters(*col)));
+        format!("{label}: {val}")
+      })
+      .collect();
+    if !pairs.is_empty() {
+      current_group.push(format!("Row {}: {}", row_idx + 1, pairs.join(" | ")));
+      if current_group.len() >= 10 {
+        blocks.push(current_group.join("\n"));
+        current_group.clear();
+      }
+    }
+  }
+  if !current_group.is_empty() {
+    blocks.push(current_group.join("\n"));
+  }
+  blocks.join("\n\n")
+}
+
+/// Shared paragraph + table extractor for WordprocessingML (`w:*`, `.docx`) and
+/// DrawingML / PresentationML (`a:*`, `.pptx`).
+fn extract_ooxml_rich_text(xml: &str) -> String {
   let mut blocks: Vec<String> = Vec::new();
   let mut current_para = String::new();
   let mut in_text_run = false;
@@ -762,19 +1249,19 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
     let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
 
     match (tag_name, is_closing, is_self_closing) {
-      ("w:t" | "t", false, false) => {
+      ("w:t" | "a:t" | "t", false, false) => {
         in_text_run = true;
       }
-      ("w:t" | "t", true, _) => {
+      ("w:t" | "a:t" | "t", true, _) => {
         in_text_run = false;
       }
-      ("w:tab", false, _) => {
+      ("w:tab" | "a:tab", false, _) => {
         current_para.push('\t');
       }
-      ("w:br" | "w:cr", false, _) => {
+      ("w:br" | "w:cr" | "a:br", false, _) => {
         current_para.push('\n');
       }
-      ("w:tbl", false, false) => {
+      ("w:tbl" | "a:tbl", false, false) => {
         let trimmed = current_para.trim();
         if !trimmed.is_empty() {
           blocks.push(trimmed.to_string());
@@ -782,17 +1269,17 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
         current_para.clear();
         table_depth += 1;
       }
-      ("w:tbl", true, _) => {
+      ("w:tbl" | "a:tbl", true, _) => {
         table_depth = table_depth.saturating_sub(1);
       }
-      ("w:tr", false, false) if table_depth > 0 => {
+      ("w:tr" | "a:tr", false, false) if table_depth > 0 => {
         current_row.clear();
       }
-      ("w:tc", false, false) if table_depth > 0 => {
+      ("w:tc" | "a:tc", false, false) if table_depth > 0 => {
         current_cell_paras.clear();
         current_para.clear();
       }
-      ("w:p", true, _) => {
+      ("w:p" | "a:p", true, _) => {
         let trimmed = current_para.trim();
         if !trimmed.is_empty() {
           if table_depth > 0 {
@@ -803,11 +1290,11 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
         }
         current_para.clear();
       }
-      ("w:tc", true, _) if table_depth > 0 => {
+      ("w:tc" | "a:tc", true, _) if table_depth > 0 => {
         current_row.push(current_cell_paras.join(" "));
         current_cell_paras.clear();
       }
-      ("w:tr", true, _) if table_depth > 0 => {
+      ("w:tr" | "a:tr", true, _) if table_depth > 0 => {
         if current_row.iter().any(|c| !c.trim().is_empty()) {
           blocks.push(format!("| {} |", current_row.join(" | ")));
         }
@@ -2032,10 +2519,10 @@ mod tests {
       "{extracted}"
     );
 
-    // Oversized deflated XML (> MAX_DOCX_XML_BYTES) is rejected cleanly.
+    // Oversized deflated XML (> MAX_OOXML_XML_BYTES) is rejected cleanly.
     let huge_xml = format!(
       "<w:document><w:body><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:body></w:document>",
-      "A".repeat(MAX_DOCX_XML_BYTES + 1024)
+      "A".repeat(MAX_OOXML_XML_BYTES + 1024)
     );
     let bomb = build_docx_bytes(&huge_xml);
     assert!(
@@ -2044,6 +2531,118 @@ mod tests {
     );
     let err = docx_text(&bomb).expect_err("must reject oversized uncompressed XML");
     assert!(err.contains("safety limit"), "{err}");
+  }
+
+  fn build_zip_archive(entries: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+      let mut zip = zip::ZipWriter::new(&mut cursor);
+      let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+      for (name, body) in entries {
+        zip.start_file(*name, opts).expect("start");
+        zip.write_all(body.as_bytes()).expect("write");
+      }
+      zip.finish().expect("finish");
+    }
+    cursor.into_inner()
+  }
+
+  #[test]
+  fn xlsx_extracts_sheets_shared_strings_inline_cells_and_sniffs_zip() {
+    let xlsx = build_zip_archive(&[
+      (
+        "xl/workbook.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+        <workbook><sheets><sheet name="TideBench" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+      ),
+      (
+        "xl/sharedStrings.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+        <sst count="3" uniqueCount="3">
+          <si><t>Estuary</t></si>
+          <si><t>PeakRangeM</t></si>
+          <si><r><t>Ungava</t></r><r><t> Bay</t></r></si>
+        </sst>"#,
+      ),
+      (
+        "xl/worksheets/sheet1.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+        <worksheet><sheetData>
+          <row r="1">
+            <c r="A1" t="s"><v>0</v></c>
+            <c r="B1" t="s"><v>1</v></c>
+            <c r="C1" t="inlineStr"><is><t>Macrotidal</t></is></c>
+          </row>
+          <row r="2">
+            <c r="A2" t="s"><v>2</v></c>
+            <c r="B2"><v>16.8</v></c>
+            <c r="C2" t="b"><v>1</v></c>
+          </row>
+        </sheetData></worksheet>"#,
+      ),
+    ]);
+    assert_eq!(sniff_ooxml_zip_format(&xlsx, None), Some(BytesFormat::Xlsx));
+    let out = xlsx_text(&xlsx).expect("xlsx text");
+    assert!(out.contains("Sheet: TideBench"), "{out}");
+    assert!(
+      out.contains("Columns: Estuary | PeakRangeM | Macrotidal"),
+      "{out}"
+    );
+    assert!(
+      out.contains("Row 1: Estuary: Ungava Bay | PeakRangeM: 16.8 | Macrotidal: true"),
+      "{out}"
+    );
+  }
+
+  #[test]
+  fn pptx_orders_slides_numerically_and_extracts_tables_and_speaker_notes() {
+    let pptx = build_zip_archive(&[
+      ("ppt/presentation.xml", "<p:presentation/>"),
+      (
+        "ppt/slides/slide10.xml",
+        r#"<p:sld><p:cSld><p:spTree>
+          <p:sp><p:txBody><a:p><a:r><a:t>Tenth Slide Closing Takeaway</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#,
+      ),
+      (
+        "ppt/slides/slide2.xml",
+        r#"<p:sld><p:cSld><p:spTree>
+          <p:sp><p:txBody><a:p><a:r><a:t>Second Slide Harmonic Constituents</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>Constituent</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>PeriodHours</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>M2</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>12.42</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+          </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#,
+      ),
+      (
+        "ppt/notesSlides/notesSlide2.xml",
+        r#"<p:notes><p:cSld><p:spTree>
+          <p:sp><p:txBody><a:p><a:r><a:t>Emphasize principal lunar semidiurnal M2 dominance.</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:txBody><a:p><a:r><a:t>2</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:notes>"#,
+      ),
+    ]);
+    assert_eq!(sniff_ooxml_zip_format(&pptx, None), Some(BytesFormat::Pptx));
+    let out = pptx_text(&pptx).expect("pptx text");
+    let pos2 = out.find("Slide 2:").expect("slide 2");
+    let pos10 = out.find("Slide 10:").expect("slide 10");
+    assert!(
+      pos2 < pos10,
+      "Slide 2 must appear before Slide 10 (numeric ordering): {out}"
+    );
+    assert!(out.contains("| M2 | 12.42 |"), "{out}");
+    assert!(
+      out.contains("Speaker notes: Emphasize principal lunar semidiurnal M2 dominance."),
+      "{out}"
+    );
   }
 
   #[test]

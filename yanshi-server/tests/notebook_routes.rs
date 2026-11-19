@@ -275,6 +275,90 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   .await;
   assert_eq!(code, StatusCode::OK, "{csv_src}");
 
+  let xlsx_bytes = {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+      let mut zip = zip::ZipWriter::new(&mut cursor);
+      let opts = zip::write::SimpleFileOptions::default();
+      zip.start_file("xl/workbook.xml", opts).expect("start");
+      zip
+        .write_all(
+          br#"<workbook><sheets><sheet name="Macrotidal" sheetId="1"/></sheets></workbook>"#,
+        )
+        .expect("write");
+      zip.start_file("xl/sharedStrings.xml", opts).expect("start");
+      zip
+        .write_all(
+          br#"<sst><si><t>Basin</t></si><si><t>RangeM</t></si><si><t>UngavaBay</t></si></sst>"#,
+        )
+        .expect("write");
+      zip
+        .start_file("xl/worksheets/sheet1.xml", opts)
+        .expect("start");
+      zip
+        .write_all(
+          br#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>16.8</v></c></row></sheetData></worksheet>"#,
+        )
+        .expect("write");
+      zip.finish().expect("finish");
+    }
+    cursor.into_inner()
+  };
+  let (code, xlsx_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "ungava.xlsx",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(&xlsx_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{xlsx_src}");
+
+  let pptx_bytes = {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+      let mut zip = zip::ZipWriter::new(&mut cursor);
+      let opts = zip::write::SimpleFileOptions::default();
+      zip
+        .start_file("ppt/slides/slide1.xml", opts)
+        .expect("start");
+      zip
+        .write_all(
+          br#"<p:sld><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>K1 Diurnal Constituent Overview</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+        )
+        .expect("write");
+      zip
+        .start_file("ppt/notesSlides/notesSlide1.xml", opts)
+        .expect("start");
+      zip
+        .write_all(
+          br#"<p:notes><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Lunisolar diurnal K1 period is 23.93 hours.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>"#,
+        )
+        .expect("write");
+      zip.finish().expect("finish");
+    }
+    cursor.into_inner()
+  };
+  let (code, pptx_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "harmonics.pptx",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(&pptx_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{pptx_src}");
+
   let dir = std::env::temp_dir().join(format!("yanshi-nb-routes-{}", std::process::id()));
   std::fs::create_dir_all(&dir).expect("dir");
   let models_yml = dir.join("models.yml");
@@ -303,7 +387,7 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(code, StatusCode::OK, "{rec_src}");
 
   let sources = settled_sources(&state, &tenant, &id).await;
-  assert_eq!(sources.len(), 7);
+  assert_eq!(sources.len(), 9);
   let by_kind = |kind: &str| {
     sources
       .iter()
@@ -383,6 +467,16 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(
     csv_hits["chunks"][0]["source_id"], csv_src["id"],
     "CSV rows are searchable with column headers: {csv_hits}"
+  );
+  let (_, xlsx_hits) = search(state.clone(), "UngavaBay").await;
+  assert_eq!(
+    xlsx_hits["chunks"][0]["source_id"], xlsx_src["id"],
+    "XLSX workbook rows are searchable with sheet and column headers: {xlsx_hits}"
+  );
+  let (_, pptx_hits) = search(state.clone(), "Lunisolar").await;
+  assert_eq!(
+    pptx_hits["chunks"][0]["source_id"], pptx_src["id"],
+    "PPTX slide body and speaker notes are searchable: {pptx_hits}"
   );
   let (_, rec_hits) = search(state.clone(), "transcript").await;
   assert_eq!(
