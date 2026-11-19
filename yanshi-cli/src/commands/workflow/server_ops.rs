@@ -61,6 +61,91 @@ pub async fn cancel(
   print_server_response("workflow cancel", format, &body)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn resume(
+  server_url: &str,
+  auth_token: Option<&str>,
+  tenant: Option<&str>,
+  run_id: &str,
+  output_dir: Option<&std::path::Path>,
+  poll_timeout: std::time::Duration,
+  format: &str,
+) -> Result<()> {
+  let client = build_client(server_url, auth_token, tenant)?;
+  let is_envelope = format == "json-envelope";
+  let body = client.resume_run(run_id).await?;
+  let status0 = body["status"].as_str().unwrap_or("queued");
+  let progress_line = format!("🔁 Resumed run {run_id}; status: {status0}");
+  if is_envelope {
+    eprintln!("{progress_line}");
+  } else if format == "text" {
+    println!("{progress_line}");
+  }
+
+  let deadline = std::time::Instant::now() + poll_timeout.max(std::time::Duration::from_millis(1));
+  loop {
+    let row = client.get_run(run_id).await?;
+    let status = row["status"].as_str().unwrap_or("unknown");
+    if matches!(status, "succeeded" | "failed" | "cancelled") {
+      if status == "succeeded"
+        && let Some(out_dir) = output_dir
+      {
+        let count = download_server_run_artifacts(&client, run_id, out_dir).await?;
+        let dl_msg = format!(
+          "📤 Downloaded {count} artifact(s) to {} (manifest: {})",
+          out_dir.display(),
+          super::artifacts::MANIFEST_FILE
+        );
+        if is_envelope || format == "json" {
+          eprintln!("{dl_msg}");
+        } else {
+          println!("{dl_msg}");
+        }
+      }
+      if is_envelope {
+        let errors: Vec<String> = if status == "succeeded" {
+          Vec::new()
+        } else {
+          vec![format!("run {run_id} ended with status '{status}'")]
+        };
+        let envelope =
+          crate::json_envelope::CliJsonEnvelope::with_errors("workflow resume", &row, errors);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+      } else {
+        println!("{}", serde_json::to_string_pretty(&row)?);
+      }
+      if status != "succeeded" {
+        let err_detail = row["error"]
+          .as_str()
+          .filter(|e| !e.trim().is_empty())
+          .map(|e| format!(": {e}"))
+          .unwrap_or_default();
+        anyhow::bail!("resumed run {run_id} ended with status '{status}'{err_detail}");
+      }
+      return Ok(());
+    }
+    if std::time::Instant::now() >= deadline {
+      anyhow::bail!(
+        "resumed run {run_id} did not reach a terminal status within {poll_timeout:?}; last status: {status}"
+      );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+  }
+}
+
+pub async fn resume_plan(
+  server_url: &str,
+  auth_token: Option<&str>,
+  tenant: Option<&str>,
+  run_id: &str,
+  force_replay: bool,
+  format: &str,
+) -> Result<()> {
+  let client = build_client(server_url, auth_token, tenant)?;
+  let body = client.get_run_resume_plan(run_id, force_replay).await?;
+  print_server_response("workflow resume-plan", format, &body)
+}
+
 /// P10.11.4: reject `workflow run` flags that are local-only when
 /// the operator is dispatching via `--server`. Today the
 /// `POST /v1/runs` wire body only accepts `{ workflow, tenant_id }`

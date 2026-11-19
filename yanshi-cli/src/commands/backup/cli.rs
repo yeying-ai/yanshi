@@ -19,8 +19,8 @@ pub struct BackupArgs {
   #[arg(long)]
   force: bool,
   /// Restrict to one or more includes (repeat the flag). Empty =
-  /// all 6 (db, run_dir, trace_dir, marketplace_cache,
-  /// skills_dir, plugins_dir). Aliases accepted: `runs` →
+  /// all 7 (db, run_dir, trace_dir, marketplace_cache,
+  /// skills_dir, plugins_dir, harness_memory). Aliases accepted: `runs` →
   /// `run_dir`, `traces` → `trace_dir`, `database` → `db`, etc.
   #[arg(long = "include", short = 'i', value_name = "INCLUDE", num_args = 0..)]
   includes: Vec<String>,

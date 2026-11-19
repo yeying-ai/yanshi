@@ -5329,10 +5329,12 @@ async fn import_notebook(
   let mut artifacts: Vec<LocalNotebookArtifact> = Vec::new();
 
   for (idx, deliv) in bundle.deliverables.iter().take(200).enumerate() {
-    let kind_clean = deliv.kind.trim();
-    if kind_clean.is_empty() {
+    let raw_kind = deliv.kind.trim();
+    if raw_kind.is_empty() {
       continue;
     }
+    let safe_kind = sanitize_local_zip_segment(raw_kind, "deliverable");
+    let kind_clean = safe_kind.as_str();
     let is_text = is_local_synthesizable_text_deliverable(&deliv.name, deliv.mime_type.as_deref());
     if !is_text
       && (runs_with_text_sibling.contains(&deliv.run_id)

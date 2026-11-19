@@ -31,11 +31,15 @@ pub fn run() {
   let builder = tauri::Builder::default().setup(|app| {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-      let api_base = tauri::async_runtime::block_on(local_engine::start_loopback_engine(None))
-        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+      let (api_base, api_token) =
+        tauri::async_runtime::block_on(local_engine::start_authenticated_loopback_engine(None))
+          .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
       let serialized_base = serde_json::to_string(&api_base)?;
-      let init_script = format!("window.__YANSHI_API_BASE__ = {serialized_base};");
+      let serialized_token = serde_json::to_string(&api_token)?;
+      let init_script = format!(
+        "window.__YANSHI_API_BASE__ = {serialized_base}; window.__YANSHI_API_TOKEN__ = {serialized_token};"
+      );
       let webview_url = resolve_desktop_webview_url(&api_base)?;
 
       WebviewWindowBuilder::new(app, "main", webview_url)

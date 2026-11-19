@@ -272,6 +272,36 @@ impl ServerClient {
     expect_success(response).await
   }
 
+  /// `POST /v1/runs/{id}:resume`.
+  pub async fn resume_run(&self, run_id: &str) -> Result<Value> {
+    let response = self
+      .http
+      .post(self.url(&format!("/v1/runs/{run_id}:resume")))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body("{}")
+      .send()
+      .await
+      .context("failed to POST /v1/runs/{id}:resume")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/runs/{id}/resume-plan`.
+  pub async fn get_run_resume_plan(&self, run_id: &str, force_replay: bool) -> Result<Value> {
+    let mut url = self.url(&format!("/v1/runs/{run_id}/resume-plan"));
+    if force_replay {
+      url.push_str("?force_replay=true");
+    }
+    let response = self
+      .http
+      .get(url)
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/runs/{id}/resume-plan")?;
+    expect_success(response).await
+  }
+
   /// `POST /v1/skills/{name}:run` — submit a skill execution. The
   /// server resolves `skill_name` against the catalog loaded from
   /// `YANSHI_SKILLS_INDEX` and 404s when the name is unknown,

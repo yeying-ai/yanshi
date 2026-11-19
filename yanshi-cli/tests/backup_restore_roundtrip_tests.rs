@@ -295,6 +295,88 @@ fn restore_help_lists_documented_flags() {
 }
 
 #[test]
+fn harness_memory_sqlite_backup_and_restore_round_trips_and_clears_stale_wal_on_force() {
+  let work = TempDir::new().unwrap();
+  let source_db = work.path().join("source_harness.sqlite");
+
+  if which("sqlite3") {
+    let status = std::process::Command::new("sqlite3")
+      .arg("-batch")
+      .arg(&source_db)
+      .arg(
+        "PRAGMA journal_mode=WAL; CREATE TABLE mem(k TEXT PRIMARY KEY, v TEXT); \
+         INSERT INTO mem VALUES ('s1', 'persisted-turn');",
+      )
+      .status()
+      .unwrap();
+    assert!(status.success(), "sqlite3 fixture setup must succeed");
+  } else {
+    // Empty file is a valid empty SQLite DB and also works via std::fs::copy fallback.
+    fs::write(&source_db, b"").unwrap();
+  }
+
+  let bundle_dir = work.path().join("harness_bundle");
+  Command::cargo_bin("yanshi")
+    .unwrap()
+    .args([
+      "backup",
+      "--output",
+      bundle_dir.to_str().unwrap(),
+      "--include",
+      "harness_memory",
+    ])
+    .env("YANSHI_HARNESS_MEMORY_DB", &source_db)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("harness_memory"))
+    .stdout(predicate::str::contains("executed"));
+  assert!(bundle_dir.join("harness_memory.sqlite").is_file());
+
+  let restored_db = work.path().join("nested").join("restored_harness.sqlite");
+  Command::cargo_bin("yanshi")
+    .unwrap()
+    .args(["restore", bundle_dir.to_str().unwrap()])
+    .env("YANSHI_HARNESS_MEMORY_DB", &restored_db)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("harness_memory"))
+    .stdout(predicate::str::contains("executed"));
+  assert!(restored_db.is_file());
+
+  if which("sqlite3") {
+    let out = std::process::Command::new("sqlite3")
+      .arg("-batch")
+      .arg("-noheader")
+      .arg(&restored_db)
+      .arg("SELECT v FROM mem WHERE k='s1';")
+      .output()
+      .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+      String::from_utf8_lossy(&out.stdout).trim(),
+      "persisted-turn"
+    );
+  }
+
+  // Create a stale -wal sidecar and verify `--force` clears it on overwrite.
+  let stale_wal = work
+    .path()
+    .join("nested")
+    .join("restored_harness.sqlite-wal");
+  fs::write(&stale_wal, b"stale-wal-bytes").unwrap();
+  Command::cargo_bin("yanshi")
+    .unwrap()
+    .args(["restore", bundle_dir.to_str().unwrap(), "--force"])
+    .env("YANSHI_HARNESS_MEMORY_DB", &restored_db)
+    .assert()
+    .success();
+  assert!(
+    !stale_wal.exists(),
+    "--force restore must remove stale -wal sidecar"
+  );
+}
+
+#[test]
 fn restore_reports_a_clear_error_for_a_non_bundle_directory() {
   let work = TempDir::new().unwrap();
   Command::cargo_bin("yanshi")

@@ -75,7 +75,7 @@ pub enum NotebookCommands {
   Export {
     /// Notebook UUID
     notebook_id: String,
-    /// Optional path to write the portable JSON bundle (prints to stdout when omitted)
+    /// Optional path to write the portable JSON bundle (prints JSON bundle to stdout when omitted)
     #[arg(
       short = 'f',
       long = "out",
@@ -86,6 +86,9 @@ pub enum NotebookCommands {
     /// Optional path to write the cited Markdown research dossier (`markdown_brief`)
     #[arg(long, value_name = "PATH")]
     brief_out: Option<PathBuf>,
+    /// Print the cited Markdown research dossier (`markdown_brief`) to stdout instead of the JSON bundle
+    #[arg(long)]
+    brief: bool,
   },
   /// Import a portable notebook JSON bundle (`POST /v1/notebooks/import`)
   Import {
@@ -485,6 +488,7 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
       notebook_id,
       out,
       brief_out,
+      brief,
     } => {
       let bundle = client.export_notebook(&notebook_id).await?;
       if let Some(path) = &out {
@@ -521,13 +525,20 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
           println!("{}", serde_json::to_string_pretty(&bundle)?);
         }
       } else if out.is_none() && brief_out.is_none() {
-        println!("{}", bundle["markdown_brief"].as_str().unwrap_or(""));
+        if brief {
+          println!("{}", bundle["markdown_brief"].as_str().unwrap_or(""));
+        } else {
+          println!("{}", serde_json::to_string_pretty(&bundle)?);
+        }
       } else {
         if let Some(path) = &out {
           println!("Exported notebook bundle -> {}", path.display());
         }
         if let Some(path) = &brief_out {
           println!("Exported markdown brief -> {}", path.display());
+        }
+        if brief && brief_out.is_none() {
+          println!("{}", bundle["markdown_brief"].as_str().unwrap_or(""));
         }
       }
     }
@@ -1376,6 +1387,12 @@ async fn execute_cli_batch(
 
   let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
   let mut finished_runs: Vec<Value> = Vec::with_capacity(dispatched.len());
+  let mut kind_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+  for entry in &dispatched {
+    let raw_kind = entry["kind"].as_str().unwrap_or("deliverable");
+    let safe_kind = sanitize_path_segment(raw_kind, "deliverable");
+    *kind_counts.entry(safe_kind).or_insert(0) += 1;
+  }
 
   for entry in &dispatched {
     let run_id = entry["run_id"]
@@ -1407,7 +1424,16 @@ async fn execute_cli_batch(
     let mut run_downloaded: Vec<Value> = Vec::new();
     if let Some(out_dir) = &output_dir {
       let safe_kind = sanitize_path_segment(&kind, "deliverable");
-      let kind_root = out_dir.join(&safe_kind);
+      let dir_segment = if kind_counts.get(&safe_kind).copied().unwrap_or(0) > 1 {
+        let run_prefix: String = sanitize_path_segment(&run_id, "run")
+          .chars()
+          .take(8)
+          .collect();
+        format!("{safe_kind}-{run_prefix}")
+      } else {
+        safe_kind
+      };
+      let kind_root = out_dir.join(&dir_segment);
       std::fs::create_dir_all(&kind_root)
         .with_context(|| format!("failed to create {}", kind_root.display()))?;
       let art_env = client.list_run_artifacts(&run_id).await?;

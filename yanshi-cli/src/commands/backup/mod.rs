@@ -71,16 +71,20 @@ pub enum BackupInclude {
   /// `$YANSHI_PLUGINS_DIR` (installed plugin binaries +
   /// manifests).
   PluginsDir,
+  /// `$YANSHI_HARNESS_MEMORY_DB` (opt-in persistent SQLite harness
+  /// conversation memory store).
+  HarnessMemory,
 }
 
 impl BackupInclude {
-  pub const ALL: [BackupInclude; 6] = [
+  pub const ALL: [BackupInclude; 7] = [
     BackupInclude::Db,
     BackupInclude::RunDir,
     BackupInclude::TraceDir,
     BackupInclude::MarketplaceCache,
     BackupInclude::SkillsDir,
     BackupInclude::PluginsDir,
+    BackupInclude::HarnessMemory,
   ];
 
   pub fn parse(s: &str) -> Option<Self> {
@@ -91,6 +95,7 @@ impl BackupInclude {
       "marketplace_cache" | "marketplace-cache" | "marketplace" => BackupInclude::MarketplaceCache,
       "skills_dir" | "skills-dir" | "skills" => BackupInclude::SkillsDir,
       "plugins_dir" | "plugins-dir" | "plugins" => BackupInclude::PluginsDir,
+      "harness_memory" | "harness-memory" => BackupInclude::HarnessMemory,
       _ => return None,
     })
   }
@@ -104,6 +109,7 @@ impl BackupInclude {
       BackupInclude::MarketplaceCache => "marketplace_cache.tar.gz",
       BackupInclude::SkillsDir => "skills_dir.tar.gz",
       BackupInclude::PluginsDir => "plugins_dir.tar.gz",
+      BackupInclude::HarnessMemory => "harness_memory.sqlite",
     }
   }
 
@@ -116,6 +122,7 @@ impl BackupInclude {
       BackupInclude::MarketplaceCache => "marketplace_cache",
       BackupInclude::SkillsDir => "skills_dir",
       BackupInclude::PluginsDir => "plugins_dir",
+      BackupInclude::HarnessMemory => "harness_memory",
     }
   }
 }
@@ -312,6 +319,7 @@ async fn run_one(include: BackupInclude, output: &Path, args: &BackupArgs) -> Ba
   let started = std::time::Instant::now();
   match include {
     BackupInclude::Db => run_pg_dump(output, args, started).await,
+    BackupInclude::HarnessMemory => run_sqlite_file(include, output, args, started).await,
     other => run_tar_dir(other, output, args, started).await,
   }
 }
@@ -440,6 +448,148 @@ async fn run_pg_dump(
         },
       }
     }
+  }
+}
+
+async fn run_sqlite_file(
+  include: BackupInclude,
+  output: &Path,
+  args: &BackupArgs,
+  started: std::time::Instant,
+) -> BackupStepReport {
+  let source = match resolve_include_dir(include) {
+    Some(p) => p,
+    None => {
+      return BackupStepReport {
+        include: include.tag().to_string(),
+        source: "<unresolved>".to_string(),
+        artifact: include.artifact_name().to_string(),
+        status: "skipped".to_string(),
+        bytes: 0,
+        duration_ms: started.elapsed().as_millis() as u64,
+        sha256: None,
+        reason: Some(format!(
+          "could not resolve {} (no env override and no home directory)",
+          include.tag()
+        )),
+      };
+    }
+  };
+
+  let artifact = output.join(include.artifact_name());
+  let source_display = source.display().to_string();
+
+  if !source.is_file() {
+    return BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "skipped".to_string(),
+      bytes: 0,
+      duration_ms: started.elapsed().as_millis() as u64,
+      sha256: None,
+      reason: Some(format!(
+        "source SQLite file does not exist; nothing to back up for {}",
+        include.tag()
+      )),
+    };
+  }
+
+  if args.dry_run {
+    return BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "dry_run".to_string(),
+      bytes: 0,
+      duration_ms: started.elapsed().as_millis() as u64,
+      sha256: None,
+      reason: None,
+    };
+  }
+
+  if source.parent().is_none() {
+    return BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      bytes: 0,
+      duration_ms: started.elapsed().as_millis() as u64,
+      sha256: None,
+      reason: Some(format!(
+        "refusing to back up a top-level path: {}",
+        source.display()
+      )),
+    };
+  }
+
+  // Prefer `sqlite3 <src> ".backup '<dst>'"` when available on PATH so an
+  // active WAL-mode database (`-wal` / `-shm`) is consolidated into a single
+  // consistent SQLite file; fall back to `std::fs::copy` when `sqlite3` CLI
+  // is absent.
+  let copy_err: Option<String> = if which_in_path("sqlite3").is_some() {
+    let escaped_dst = artifact.to_string_lossy().replace('\'', "''");
+    let backup_cmd = format!(".backup '{escaped_dst}'");
+    match Command::new("sqlite3")
+      .arg("-batch")
+      .arg(&source)
+      .arg(&backup_cmd)
+      .output()
+      .await
+    {
+      Err(err) => Some(format!("failed to spawn sqlite3: {err}")),
+      Ok(out) if !out.status.success() => Some(format!(
+        "sqlite3 .backup exited {}: {}",
+        exit_label(&out.status),
+        String::from_utf8_lossy(&out.stderr).trim()
+      )),
+      Ok(_) => None,
+    }
+  } else {
+    std::fs::copy(&source, &artifact)
+      .err()
+      .map(|err| format!("failed to copy SQLite file: {err}"))
+  };
+
+  let elapsed_ms = started.elapsed().as_millis() as u64;
+  if let Some(reason) = copy_err {
+    return BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      bytes: 0,
+      duration_ms: elapsed_ms,
+      sha256: None,
+      reason: Some(reason),
+    };
+  }
+
+  let bytes = std::fs::metadata(&artifact).map(|m| m.len()).unwrap_or(0);
+  match sha256_file(&artifact) {
+    Ok(sha256) => BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "executed".to_string(),
+      bytes,
+      duration_ms: elapsed_ms,
+      sha256: Some(sha256),
+      reason: None,
+    },
+    Err(err) => BackupStepReport {
+      include: include.tag().to_string(),
+      source: source_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      bytes,
+      duration_ms: elapsed_ms,
+      sha256: None,
+      reason: Some(format!(
+        "SQLite backup succeeded but hashing the artifact for the manifest failed: {err}"
+      )),
+    },
   }
 }
 
@@ -700,6 +850,11 @@ pub(crate) fn resolve_include_dir(include: BackupInclude) -> Option<PathBuf> {
     BackupInclude::PluginsDir => {
       resolve_env_or_default(home.as_deref(), "YANSHI_PLUGINS_DIR", &["plugins"])
     }
+    BackupInclude::HarnessMemory => resolve_env_or_default(
+      home.as_deref(),
+      "YANSHI_HARNESS_MEMORY_DB",
+      &["harness_memory.sqlite"],
+    ),
   }
 }
 

@@ -296,3 +296,95 @@ fn resume_plan_fails_clearly_when_checkpoint_missing() {
     .failure()
     .stderr(predicate::str::contains("no checkpoint found"));
 }
+
+#[test]
+fn resume_plan_resolves_default_run_dir_checkpoint_layout() {
+  let tmp = TempDir::new().unwrap();
+  let run_id = "run-layout-default";
+  // `workflow run --checkpoint` writes `<run-dir>/<run_id>/checkpoint/<run_id>/checkpoint_latest.json`.
+  let run_checkpoint_root = tmp.path().join(run_id).join("checkpoint");
+  write_checkpoint(
+    &run_checkpoint_root,
+    run_id,
+    vec![tool_record(
+      "call-1",
+      "http",
+      1,
+      "idempotent",
+      "replay_allowed",
+      None,
+    )],
+  );
+
+  let output = Command::cargo_bin("yanshi")
+    .unwrap()
+    .env("YANSHI_RUN_DIR", tmp.path())
+    .env_remove("YANSHI_SERVER_URL")
+    .args(["workflow", "resume-plan", run_id, "--format", "json"])
+    .output()
+    .unwrap();
+  assert!(output.status.success(), "resume-plan failed: {output:?}");
+  let plan: serde_json::Value =
+    serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+  assert_eq!(plan["workflow_id"], run_id);
+  assert_eq!(plan["summary"]["to_replay"], 1);
+}
+
+#[tokio::test]
+async fn resume_plan_fetches_remote_checkpoint_via_server_flag() {
+  use axum::{Json, Router, routing::get};
+
+  let run_id = "00000000-0000-0000-0000-000000000042";
+  let router = Router::new().route(
+    "/v1/runs/:id/resume-plan",
+    get(move || async move {
+      Json(json!({
+        "workflow_id": run_id,
+        "schema_version": 1,
+        "force_replay": false,
+        "summary": {
+          "total": 1,
+          "to_replay": 0,
+          "to_skip": 0,
+          "requires_manual": 1
+        },
+        "tool_calls": [{
+          "call_id": "remote-call-1",
+          "tool": "send_invoice",
+          "decision": "requires_manual"
+        }]
+      }))
+    }),
+  );
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let server_url = format!("http://{}", listener.local_addr().unwrap());
+  let handle = tokio::spawn(async move {
+    let _ = axum::serve(listener, router).await;
+  });
+
+  let out = tokio::task::spawn_blocking(move || {
+    Command::cargo_bin("yanshi")
+      .unwrap()
+      .args([
+        "workflow",
+        "resume-plan",
+        run_id,
+        "--server",
+        &server_url,
+        "--format",
+        "json",
+      ])
+      .output()
+      .unwrap()
+  })
+  .await
+  .unwrap();
+
+  handle.abort();
+  assert!(out.status.success(), "remote resume-plan failed: {out:?}");
+  let plan: serde_json::Value =
+    serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+  assert_eq!(plan["summary"]["requires_manual"], 1);
+  assert_eq!(plan["tool_calls"][0]["tool"], "send_invoice");
+}

@@ -98,9 +98,10 @@ fn run_local_web_mode(bind: std::net::SocketAddr) -> Result<(), String> {
     .map_err(|err| format!("failed to initialize Tokio runtime: {err}"))?;
 
   rt.block_on(async move {
-    let (listener, app) = yanshi_studio_lib::local_engine::bind_local_web_listener(bind, None)
-      .await
-      .map_err(|err| err.to_string())?;
+    let (listener, app, _token) =
+      yanshi_studio_lib::local_engine::bind_authenticated_local_web_listener(bind, None)
+        .await
+        .map_err(|err| err.to_string())?;
     let actual = listener
       .local_addr()
       .map_err(|err| format!("failed to inspect bound address: {err}"))?;
@@ -109,6 +110,9 @@ fn run_local_web_mode(bind: std::net::SocketAddr) -> Result<(), String> {
     println!("   Studio DAG : {base}/ui/studio");
     println!("   Notebooks  : {base}/ui/notebooks");
     println!("   Harness    : {base}/ui/harness/sessions");
+    println!(
+      "   Auth       : per-session loopback bearer token enabled (auto-injected in same-origin UI)"
+    );
     println!("   Press Ctrl+C to stop.");
 
     axum::serve(listener, app)

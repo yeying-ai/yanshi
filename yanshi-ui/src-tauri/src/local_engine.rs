@@ -173,6 +173,7 @@ pub struct LocalEngineState {
   harness: crate::local_harness::LocalHarnessState,
   notebooks: crate::local_notebooks::LocalNotebooksState,
   base_dir: PathBuf,
+  api_token: Option<Arc<str>>,
 }
 
 impl LocalEngineState {
@@ -189,7 +190,21 @@ impl LocalEngineState {
       harness,
       notebooks,
       base_dir,
+      api_token: None,
     }
+  }
+
+  pub fn with_api_token(mut self, token: impl Into<String>) -> Self {
+    let trimmed = token.into();
+    let trimmed = trimmed.trim();
+    if !trimmed.is_empty() {
+      self.api_token = Some(Arc::from(trimmed));
+    }
+    self
+  }
+
+  pub fn api_token(&self) -> Option<&str> {
+    self.api_token.as_deref()
   }
 
   pub fn base_dir(&self) -> &Path {
@@ -436,6 +451,37 @@ const EMBEDDED_INDEX_HTML: &str = include_str!("../../dist/index.html");
 const EMBEDDED_APP_JS: &str = include_str!("../../dist/assets/app.js");
 const EMBEDDED_STYLES_CSS: &str = include_str!("../../dist/assets/styles.css");
 
+/// Generate a per-launch 256-bit loopback bearer token, honoring an explicit
+/// non-empty `YANSHI_API_TOKEN` env override when supplied by the operator.
+pub fn generate_loopback_api_token() -> String {
+  if let Ok(explicit) = std::env::var("YANSHI_API_TOKEN") {
+    let trimmed = explicit.trim();
+    if !trimmed.is_empty() {
+      return trimmed.to_string();
+    }
+  }
+  format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// Start the embedded loopback engine on `127.0.0.1:0` with bearer-token
+/// authentication enabled and return `(base_url, api_token)`.
+pub async fn start_authenticated_loopback_engine(
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(String, String)> {
+  let base_dir = custom_base_dir.unwrap_or_else(default_studio_runs_dir);
+  tokio::fs::create_dir_all(&base_dir).await?;
+  let token = generate_loopback_api_token();
+  let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
+  let app = build_local_router(state);
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+  let addr: SocketAddr = listener.local_addr()?;
+  tokio::spawn(async move {
+    let _ = axum::serve(listener, app).await;
+  });
+  Ok((format!("http://127.0.0.1:{}", addr.port()), token))
+}
+
 /// Start the embedded loopback engine on `127.0.0.1:0` and return its base URL
 /// (e.g. `http://127.0.0.1:54123`).
 pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::Result<String> {
@@ -450,6 +496,27 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
     let _ = axum::serve(listener, app).await;
   });
   Ok(format!("http://127.0.0.1:{}", addr.port()))
+}
+
+/// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication.
+pub async fn bind_authenticated_local_web_listener(
+  bind: SocketAddr,
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(tokio::net::TcpListener, Router, String)> {
+  if !bind.ip().is_loopback() {
+    anyhow::bail!(
+      "refusing to bind local web engine on non-loopback address {bind}; \
+       use 127.0.0.1:<port> or [::1]:<port> (or `yanshi serve` with YANSHI_API_TOKEN)"
+    );
+  }
+  let base_dir = custom_base_dir.unwrap_or_else(default_studio_runs_dir);
+  tokio::fs::create_dir_all(&base_dir).await?;
+  let token = generate_loopback_api_token();
+  let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
+  let app = build_local_router(state);
+  let listener = tokio::net::TcpListener::bind(bind).await?;
+  Ok((listener, app, token))
 }
 
 /// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
@@ -475,12 +542,108 @@ pub async fn bind_local_web_listener(
   Ok((listener, app))
 }
 
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+  let ab = a.as_bytes();
+  let bb = b.as_bytes();
+  let mut diff = ab.len() ^ bb.len();
+  let max_len = ab.len().max(bb.len());
+  for idx in 0..max_len {
+    let lhs = ab.get(idx).copied().unwrap_or(0);
+    let rhs = bb.get(idx).copied().unwrap_or(0);
+    diff |= usize::from(lhs ^ rhs);
+  }
+  diff == 0
+}
+
+async fn require_local_api_token(
+  State(state): State<LocalEngineState>,
+  req: axum::extract::Request,
+  next: axum::middleware::Next,
+) -> Response {
+  let Some(expected) = state.api_token() else {
+    return next.run(req).await;
+  };
+  let provided = req
+    .headers()
+    .get(header::AUTHORIZATION)
+    .and_then(|v| v.to_str().ok())
+    .and_then(|raw| {
+      raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+    })
+    .map(str::trim);
+  match provided {
+    Some(tok) if constant_time_str_eq(tok, expected) => next.run(req).await,
+    _ => (
+      StatusCode::UNAUTHORIZED,
+      Json(serde_json::json!({
+        "error": {
+          "code": "unauthorized",
+          "message": "missing or invalid bearer token"
+        }
+      })),
+    )
+      .into_response(),
+  }
+}
+
+fn is_trusted_local_origin(origin: &HeaderValue, req_parts: &axum::http::request::Parts) -> bool {
+  let Ok(orig_str) = origin.to_str() else {
+    return false;
+  };
+  let trimmed = orig_str.trim().trim_end_matches('/');
+  if matches!(
+    trimmed,
+    "tauri://localhost"
+      | "http://tauri.localhost"
+      | "https://tauri.localhost"
+      | "http://127.0.0.1:5173"
+      | "http://localhost:5173"
+  ) {
+    return true;
+  }
+  if let Some(host) = req_parts
+    .headers
+    .get(header::HOST)
+    .and_then(|v| v.to_str().ok())
+  {
+    let same_http = format!("http://{}", host.trim());
+    if trimmed.eq_ignore_ascii_case(&same_http) {
+      return true;
+    }
+  }
+  false
+}
+
+fn build_local_cors_layer() -> CorsLayer {
+  use axum::http::Method;
+  use tower_http::cors::AllowOrigin;
+  CorsLayer::new()
+    .allow_origin(AllowOrigin::predicate(is_trusted_local_origin))
+    .allow_methods([
+      Method::GET,
+      Method::POST,
+      Method::PUT,
+      Method::PATCH,
+      Method::DELETE,
+      Method::HEAD,
+      Method::OPTIONS,
+    ])
+    .allow_headers([
+      header::AUTHORIZATION,
+      header::CONTENT_TYPE,
+      header::ACCEPT,
+      header::HeaderName::from_static("x-yanshi-tenant"),
+      header::HeaderName::from_static("last-event-id"),
+    ])
+}
+
 pub fn build_local_router(state: LocalEngineState) -> Router {
   let harness_router = crate::local_harness::build_harness_router(state.harness.clone());
   let notebooks_router = crate::local_notebooks::build_notebooks_router(state.clone());
-  let ui_router = build_embedded_ui_router();
-  Router::new()
-    .route("/health", get(health))
+  let ui_router = build_embedded_ui_router(state.clone());
+  let v1_router = Router::new()
     .route("/v1/diagnostics", get(get_diagnostics))
     .route(
       "/v1/preferences",
@@ -510,14 +673,22 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
       get(download_artifact),
     )
     .route("/v1/runs/:id/preview", get(preview_file))
-    .with_state(state)
+    .with_state(state.clone())
     .merge(harness_router)
     .merge(notebooks_router)
+    .route_layer(axum::middleware::from_fn_with_state(
+      state,
+      require_local_api_token,
+    ));
+
+  Router::new()
+    .route("/health", get(health))
+    .merge(v1_router)
     .merge(ui_router)
-    .layer(CorsLayer::permissive())
+    .layer(build_local_cors_layer())
 }
 
-fn build_embedded_ui_router() -> Router {
+fn build_embedded_ui_router(state: LocalEngineState) -> Router {
   Router::new()
     .route("/", get(|| async { Redirect::temporary("/ui/studio") }))
     .route("/ui", get(embedded_index_html))
@@ -540,10 +711,28 @@ fn build_embedded_ui_router() -> Router {
     .route("/ui/diagnostics", get(embedded_index_html))
     .route("/ui/assets/app.js", get(embedded_app_js))
     .route("/ui/assets/styles.css", get(embedded_styles_css))
+    .with_state(state)
 }
 
-async fn embedded_index_html() -> Html<&'static str> {
-  Html(EMBEDDED_INDEX_HTML)
+async fn embedded_index_html(State(state): State<LocalEngineState>) -> Response {
+  let body = match state.api_token() {
+    Some(tok) => {
+      let escaped = serde_json::to_string(tok).unwrap_or_else(|_| "\"\"".to_string());
+      let snippet = format!("<script>window.__YANSHI_API_TOKEN__ = {escaped};</script></head>");
+      if EMBEDDED_INDEX_HTML.contains("</head>") {
+        EMBEDDED_INDEX_HTML.replacen("</head>", &snippet, 1)
+      } else {
+        format!("<script>window.__YANSHI_API_TOKEN__ = {escaped};</script>{EMBEDDED_INDEX_HTML}")
+      }
+    }
+    None => EMBEDDED_INDEX_HTML.to_string(),
+  };
+  (
+    StatusCode::OK,
+    [(header::CACHE_CONTROL, "no-store")],
+    Html(body),
+  )
+    .into_response()
 }
 
 async fn embedded_app_js() -> Response {
@@ -906,17 +1095,25 @@ impl LocalEngineState {
     };
 
     let mut deliverable = None;
-    for ev in events.iter().rev() {
-      if (ev.kind == "node.output.captured" || ev.kind == "node_output_captured")
-        && ev.payload.get("node_id").and_then(|v| v.as_str()) == Some("deliverable")
-        && let Some(output) = ev.payload.get("output")
+    if let Some(ref dir_str) = record.run_dir {
+      let step_path = Path::new(dir_str).join("deliverable_outputs.json");
+      if let Ok(bytes) = std::fs::read(&step_path)
+        && let Ok(result) =
+          serde_json::from_slice::<yanshi_core::async_node::AsyncNodeResult>(&bytes)
       {
-        if let Some(inner) = output.get("deliverable").filter(|v| v.is_object()) {
-          deliverable = Some(inner.clone());
-          break;
-        }
-        if output.get("kind").is_some() && output.get("title").is_some() {
-          deliverable = Some(output.clone());
+        let mut state_map = HashMap::new();
+        state_map.insert("deliverable".to_string(), result);
+        deliverable = yanshi_config::content::extract_deliverable_from_state(&state_map);
+      }
+    }
+    if deliverable.is_none() {
+      for ev in events.iter().rev() {
+        if (ev.kind == "node.output.captured" || ev.kind == "node_output_captured")
+          && ev.payload.get("node_id").and_then(|v| v.as_str()) == Some("deliverable")
+          && let Some(output) = ev.payload.get("output")
+          && let Some(unwrapped) = unwrap_local_captured_deliverable(output)
+        {
+          deliverable = Some(unwrapped);
           break;
         }
       }
@@ -948,7 +1145,44 @@ impl LocalEngineState {
       notebook_kind: nb_kind,
     })
   }
+}
 
+fn unwrap_local_flow_json(val: &serde_json::Value) -> &serde_json::Value {
+  if val.get("type").and_then(|t| t.as_str()) == Some("json")
+    && let Some(inner) = val.get("value")
+  {
+    return inner;
+  }
+  val
+}
+
+fn unwrap_local_captured_deliverable(output: &serde_json::Value) -> Option<serde_json::Value> {
+  if let Some(raw_deliv) = output.get("deliverable") {
+    let candidate = unwrap_local_flow_json(raw_deliv);
+    if candidate.get("kind").is_some() && candidate.get("title").is_some() {
+      return Some(candidate.clone());
+    }
+  }
+  if let Some(raw_out) = output.get("output") {
+    let inner_out = unwrap_local_flow_json(raw_out);
+    if let Some(nested) = inner_out.get("deliverable") {
+      let candidate = unwrap_local_flow_json(nested);
+      if candidate.get("kind").is_some() && candidate.get("title").is_some() {
+        return Some(candidate.clone());
+      }
+    }
+    if inner_out.get("kind").is_some() && inner_out.get("title").is_some() {
+      return Some(inner_out.clone());
+    }
+  }
+  let direct = unwrap_local_flow_json(output);
+  if direct.get("kind").is_some() && direct.get("title").is_some() {
+    return Some(direct.clone());
+  }
+  None
+}
+
+impl LocalEngineState {
   pub(crate) async fn spawn_workflow_run(
     &self,
     params: SpawnLocalRunParams,
@@ -1032,23 +1266,43 @@ async fn create_run(
     return error_json(StatusCode::BAD_REQUEST, "max_concurrency must be >= 1");
   }
   let header_tenant = extract_tenant(&headers);
-  let resolved_tenant = match req
+  if let Some(explicit) = req
     .tenant_id
     .as_deref()
     .map(str::trim)
     .filter(|s| !s.is_empty())
+    && explicit != header_tenant
   {
-    Some(explicit) if headers.contains_key("x-yanshi-tenant") && explicit != header_tenant => {
+    return error_json(
+      StatusCode::FORBIDDEN,
+      &format!(
+        "request body tenant_id '{explicit}' does not match X-Yanshi-Tenant '{header_tenant}'"
+      ),
+    );
+  }
+  let resolved_tenant = header_tenant;
+
+  let parsed_def = match yanshi_config::executor::parse_workflow_definition(&req.workflow) {
+    Ok(def) => def,
+    Err(err) => {
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        &format!("invalid workflow YAML: {err}"),
+      );
+    }
+  };
+  for key in req.inputs.keys() {
+    if !parsed_def.inputs.contains_key(key) {
       return error_json(
         StatusCode::BAD_REQUEST,
         &format!(
-          "request body tenant_id '{explicit}' conflicts with X-Yanshi-Tenant header '{header_tenant}'"
+          "unknown input '{key}': workflow '{}' declares {:?}",
+          parsed_def.name,
+          parsed_def.inputs.keys().collect::<Vec<_>>()
         ),
       );
     }
-    Some(explicit) => explicit.to_string(),
-    None => header_tenant,
-  };
+  }
 
   let debug_enabled = req.run_mode == RunMode::Debug
     || !req.breakpoints.is_empty()
@@ -1200,6 +1454,11 @@ async fn execute_local_flow(
         .into_iter()
         .map(|(k, v)| (k, FlowValue::Json(v)))
         .collect();
+      yanshi_config::executor::seed_chat_model_from_override(
+        &flow_def,
+        &mut initial_inputs,
+        model_override.as_deref(),
+      );
       yanshi_config::executor::apply_declared_inputs(&flow_def, &mut initial_inputs)?;
       flow
         .execute_from_inputs_with_id_and_config(run_id.to_string(), initial_inputs, exec_cfg)
@@ -1831,14 +2090,10 @@ async fn post_run_action(
       return error_json(StatusCode::NOT_FOUND, "run not found");
     };
     let Some(ctrl) = entry.debug_controller.clone() else {
-      return Json(DebugStatusResponse {
-        run_id,
-        status: entry.record.status.clone(),
-        active: false,
-        snapshot: None,
-        resumed: Some(false),
-      })
-      .into_response();
+      return error_json(
+        StatusCode::BAD_REQUEST,
+        "run does not have an active debug controller",
+      );
     };
     let status = entry.record.status.clone();
     drop(guard);
@@ -3939,5 +4194,109 @@ nodes:
       msg.contains("root_llm") && msg.contains("provider quota exhausted"),
       "must report upstream root cause rather than random DependencyNotMet cascade: {msg}"
     );
+  }
+
+  #[tokio::test]
+  async fn authenticated_loopback_enforces_bearer_token_strict_cors_and_unwraps_deliverable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (base_url, token) = start_authenticated_loopback_engine(Some(temp.path().to_path_buf()))
+      .await
+      .expect("start authenticated engine");
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("test client");
+
+    // 1. Unauthenticated `/v1/runs` is rejected with 401.
+    let unauth = client
+      .get(format!("{base_url}/v1/runs"))
+      .send()
+      .await
+      .expect("unauth get");
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Authenticated `/v1/runs` succeeds, while `/ui/studio` embeds the session token.
+    let ok = client
+      .get(format!("{base_url}/v1/runs"))
+      .bearer_auth(&token)
+      .send()
+      .await
+      .expect("auth get");
+    assert_eq!(ok.status(), StatusCode::OK);
+    let ui_html = client
+      .get(format!("{base_url}/ui/studio"))
+      .send()
+      .await
+      .expect("ui get")
+      .text()
+      .await
+      .expect("html text");
+    assert!(ui_html.contains("window.__YANSHI_API_TOKEN__"));
+
+    // 3. Evil cross-origin preflight receives NO Access-Control-Allow-Origin, whereas `tauri://localhost` is allowed.
+    let evil_preflight = client
+      .request(reqwest::Method::OPTIONS, format!("{base_url}/v1/runs"))
+      .header("Origin", "https://evil.example")
+      .header("Access-Control-Request-Method", "POST")
+      .send()
+      .await
+      .expect("evil preflight");
+    assert!(
+      evil_preflight
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none()
+    );
+
+    let tauri_preflight = client
+      .request(reqwest::Method::OPTIONS, format!("{base_url}/v1/runs"))
+      .header("Origin", "tauri://localhost")
+      .header("Access-Control-Request-Method", "POST")
+      .send()
+      .await
+      .expect("tauri preflight");
+    assert_eq!(
+      tauri_preflight
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok()),
+      Some("tauri://localhost")
+    );
+
+    // 4. Tenant mismatch returns 403 and undeclared input returns 400.
+    let mismatch = client
+      .post(format!("{base_url}/v1/runs"))
+      .bearer_auth(&token)
+      .json(&serde_json::json!({
+        "tenant_id": "acme",
+        "workflow": "name: T\nnodes:\n  - id: a\n    type: template\n    parameters:\n      template: ok"
+      }))
+      .send()
+      .await
+      .expect("tenant mismatch");
+    assert_eq!(mismatch.status(), StatusCode::FORBIDDEN);
+
+    let bad_input = client
+      .post(format!("{base_url}/v1/runs"))
+      .bearer_auth(&token)
+      .json(&serde_json::json!({
+        "workflow": "name: T\nnodes:\n  - id: a\n    type: template\n    parameters:\n      template: ok",
+        "inputs": { "undeclared_key": 1 }
+      }))
+      .send()
+      .await
+      .expect("undeclared input");
+    assert_eq!(bad_input.status(), StatusCode::BAD_REQUEST);
+
+    // 5. `FlowValue::Json` envelope in `node.output.captured` is unwrapped cleanly.
+    let wrapped = serde_json::json!({
+      "deliverable": {
+        "type": "json",
+        "value": { "kind": "report", "title": "Studio Report", "files": [] }
+      }
+    });
+    let unwrapped = unwrap_local_captured_deliverable(&wrapped).expect("unwrap");
+    assert_eq!(unwrapped["kind"], "report");
+    assert_eq!(unwrapped["title"], "Studio Report");
   }
 }

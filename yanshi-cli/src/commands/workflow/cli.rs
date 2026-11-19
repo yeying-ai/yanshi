@@ -152,15 +152,15 @@ enum WorkflowCommands {
     #[arg(long = "explain-permissions")]
     explain_permissions: bool,
   },
-  /// Continue a run started with `workflow run --checkpoint`: only the
-  /// nodes that did not finish run again, with the run's original
-  /// inputs, scheduling and cost limit.
+  /// Continue a run started with `workflow run --checkpoint` (or a server
+  /// run via `--server`): only the nodes that did not finish run again,
+  /// with the run's original inputs, scheduling and cost limit.
   Resume {
-    /// Run id printed by `workflow run --checkpoint`
+    /// Run id printed by `workflow run --checkpoint` or `workflow run --server`
     run_id: String,
-    /// The workflow file the run was started from
-    workflow_file: String,
-    /// Override the model used by LLM nodes when resuming (defaults to the original run's `--model` if recorded)
+    /// The workflow file the run was started from (required for local mode; optional with `--server`)
+    workflow_file: Option<String>,
+    /// Override the model used by LLM nodes when resuming locally (defaults to the original run's `--model` if recorded)
     #[arg(short = 'm', long)]
     model: Option<String>,
     /// Run base directory the run used (default: YANSHI_RUN_DIR or ~/.yanshi/runs)
@@ -174,17 +174,44 @@ enum WorkflowCommands {
     /// Copy the run's artifacts to `<DIR>/<node_id>/<file>` (see `run`)
     #[arg(long, value_name = "DIR")]
     output_dir: Option<String>,
+    /// Server base URL (overrides `YANSHI_SERVER_URL`) for `POST /v1/runs/{id}:resume`
+    #[arg(long)]
+    server: Option<String>,
+    /// Bearer token for `--server` (overrides `YANSHI_API_TOKEN`)
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
+    /// Tenant scope (`X-Yanshi-Tenant`) for `--server`
+    #[arg(long)]
+    tenant: Option<String>,
+    /// Poll timeout in seconds when waiting for `--server` resume completion
+    #[arg(long, default_value_t = 300)]
+    timeout: u64,
+    /// Output format for `--server` mode (`text`, `json`, `json-envelope`)
+    #[arg(long, default_value = "text", value_parser = ["text", "json", "json-envelope"])]
+    format: String,
   },
   /// Inspect the resume plan for a checkpointed workflow run
   ResumePlan {
     /// Run / workflow id whose checkpoint should be inspected
     run_id: String,
-    /// Checkpoint directory (default: ~/.yanshi/checkpoints)
+    /// Explicit checkpoint directory override (default: `<run-dir>/<run_id>/checkpoint`)
     #[arg(long)]
     checkpoint_dir: Option<String>,
+    /// Run base directory used by `workflow run --checkpoint` (default: YANSHI_RUN_DIR or ~/.yanshi/runs)
+    #[arg(long)]
+    run_dir: Option<String>,
     /// Treat `Unknown` idempotency calls as safe to replay
     #[arg(long)]
     force_replay: bool,
+    /// Server base URL (overrides `YANSHI_SERVER_URL`) for `GET /v1/runs/{id}/resume-plan`
+    #[arg(long)]
+    server: Option<String>,
+    /// Bearer token for `--server` (overrides `YANSHI_API_TOKEN`)
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
+    /// Tenant scope (`X-Yanshi-Tenant`) for `--server`
+    #[arg(long)]
+    tenant: Option<String>,
     /// Output format: text, json (legacy bare body), or json-envelope
     /// (canonical `CliJsonEnvelope` — `yanshi.cli/1` wire schema)
     #[arg(long, default_value = "text", value_parser = ["text", "json", "json-envelope"])]
@@ -486,7 +513,36 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       force_replay,
       output,
       output_dir,
+      server,
+      auth_token,
+      tenant,
+      timeout,
+      format,
     } => {
+      if let Some(server_url) = crate::server_client::resolve_server_url(server.as_deref()) {
+        if run_dir.is_some() || output.is_some() || model.is_some() {
+          anyhow::bail!(
+            "--run-dir, --output, and --model overrides are local-only on `workflow resume`; \
+             server `:resume` automatically restores the run's persisted workflow, model, and budget."
+          );
+        }
+        let out_path = output_dir.as_deref().map(std::path::Path::new);
+        return server_ops::resume(
+          &server_url,
+          auth_token.as_deref(),
+          tenant.as_deref(),
+          &run_id,
+          out_path,
+          std::time::Duration::from_secs(timeout),
+          &format,
+        )
+        .await;
+      }
+      let Some(workflow_file) = workflow_file else {
+        anyhow::bail!(
+          "local `workflow resume` requires <WORKFLOW_FILE> (or pass --server <url> to resume a server run)"
+        );
+      };
       resume::execute(
         run_id,
         workflow_file,
@@ -501,9 +557,26 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
     WorkflowCommands::ResumePlan {
       run_id,
       checkpoint_dir,
+      run_dir,
       force_replay,
+      server,
+      auth_token,
+      tenant,
       format,
-    } => resume_plan::execute(run_id, checkpoint_dir, force_replay, format).await,
+    } => {
+      if let Some(server_url) = crate::server_client::resolve_server_url(server.as_deref()) {
+        return server_ops::resume_plan(
+          &server_url,
+          auth_token.as_deref(),
+          tenant.as_deref(),
+          &run_id,
+          force_replay,
+          &format,
+        )
+        .await;
+      }
+      resume_plan::execute(run_id, checkpoint_dir, run_dir, force_replay, format).await
+    }
     WorkflowCommands::Debug {
       workflow_file,
       visualize,

@@ -18,14 +18,26 @@ use yanshi_core::{ResumeDecision, ResumePlan, ResumePlanOptions, build_resume_pl
 pub async fn execute(
   run_id: String,
   checkpoint_dir: Option<String>,
+  run_dir: Option<String>,
   force_replay: bool,
   format: String,
 ) -> Result<()> {
   let format = OutputFormat::parse(&format)?;
-  let mut config = CheckpointConfig::default();
-  if let Some(dir) = checkpoint_dir {
-    config = config.with_checkpoint_dir(PathBuf::from(dir));
-  }
+  let resolved_dir = if let Some(dir) = checkpoint_dir {
+    PathBuf::from(dir)
+  } else {
+    let base = super::run::parse_execution_config("serial", 1, run_dir)?
+      .resolved_run_base_dir()
+      .context("Failed to resolve the run base directory")?;
+    let per_run_dir = super::run::checkpoint_dir(&base, &run_id);
+    if per_run_dir.is_dir() {
+      per_run_dir
+    } else {
+      let legacy = CheckpointConfig::default().checkpoint_dir;
+      if legacy.is_dir() { legacy } else { per_run_dir }
+    }
+  };
+  let config = CheckpointConfig::default().with_checkpoint_dir(resolved_dir);
   let manager = CheckpointManager::new(config).context("failed to open checkpoint manager")?;
   let checkpoint = manager
     .load_latest_checkpoint(&run_id)

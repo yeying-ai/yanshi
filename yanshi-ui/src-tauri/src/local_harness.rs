@@ -80,6 +80,10 @@ pub struct LocalHarnessSession {
   pub pending_question: Option<String>,
   #[serde(default)]
   pub pending_question_step_index: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cost_limit_usd: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -662,6 +666,8 @@ async fn submit_harness_session(
     error: None,
     pending_question: None,
     pending_question_step_index: None,
+    cost_limit_usd: req.cost_limit_usd,
+    max_steps: req.max_steps,
   };
 
   let session_dir = state.session_dir(session_id);
@@ -986,8 +992,8 @@ async fn resume_harness_session(
     model: updated_session.model.clone(),
     skill_name: updated_session.skill_name.clone(),
     skill_dir,
-    cost_limit_usd: None,
-    max_steps: None,
+    cost_limit_usd: updated_session.cost_limit_usd,
+    max_steps: updated_session.max_steps,
     initial_seq,
     cancellation_token: cancel_guard.token(),
   };
@@ -1327,8 +1333,8 @@ async fn answer_interrupt(
     model: updated_session.model.clone(),
     skill_name: updated_session.skill_name.clone(),
     skill_dir,
-    cost_limit_usd: None,
-    max_steps: None,
+    cost_limit_usd: updated_session.cost_limit_usd,
+    max_steps: updated_session.max_steps,
     initial_seq,
     cancellation_token: cancel_guard.token(),
   };

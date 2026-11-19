@@ -75,6 +75,7 @@ pub async fn execute(
   // caller forgot to pass should fail clearly here, not with a confusing
   // downstream input_mapping error deep into a real run.
   let mut initial_inputs = parse_inputs(input)?;
+  crate::executor::seed_chat_model_from_override(&flow_def, &mut initial_inputs, model.as_deref());
   crate::executor::apply_declared_inputs(&flow_def, &mut initial_inputs)?;
   if !initial_inputs.is_empty() {
     println!("📥 Loaded {} input value(s).", initial_inputs.len());

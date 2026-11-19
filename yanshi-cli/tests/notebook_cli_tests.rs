@@ -183,13 +183,25 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
           async move {
             let items = body["items"].as_array().expect("batch items");
             assert!(!items.is_empty());
+            let runs: Vec<Value> = items
+              .iter()
+              .enumerate()
+              .map(|(idx, item)| {
+                let rid = if idx == 0 {
+                  run_batch.clone()
+                } else {
+                  format!("bbbbbbbb-{idx:04}-0000-0000-000000000000")
+                };
+                json!({
+                  "run_id": rid,
+                  "kind": item["kind"],
+                  "status": "queued"
+                })
+              })
+              .collect();
             Json(json!({
               "notebook_id": id,
-              "runs": [{
-                "run_id": run_batch,
-                "kind": items[0]["kind"],
-                "status": "queued"
-              }]
+              "runs": runs
             }))
           }
         }
@@ -569,6 +581,92 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
   .await
   .expect("generate-batch");
   assert_eq!(batch_sub["runs"][0]["kind"], "flashcards");
+
+  // Duplicate `kind` items in a batch must disambiguate `<kind>-<run_prefix>` output dirs.
+  let dup_batch_dir = temp.path().join("dup-batch-out");
+  let dup_batch = bin_run(vec![
+    "generate-batch".into(),
+    nb_id.clone(),
+    "--kinds".into(),
+    "flashcards,flashcards".into(),
+    "--model".into(),
+    "mock-ask".into(),
+    "--output-dir".into(),
+    dup_batch_dir.display().to_string(),
+  ])
+  .await
+  .expect("duplicate generate-batch");
+  assert_eq!(dup_batch["runs"].as_array().map(Vec::len), Some(2));
+  let first_prefix: String = run_id.chars().take(8).collect();
+  assert!(
+    dup_batch_dir
+      .join(format!("flashcards-{first_prefix}"))
+      .join("table_csv")
+      .join("1.csv")
+      .is_file()
+  );
+  assert!(
+    dup_batch_dir
+      .join("flashcards-bbbbbbbb")
+      .join("table_csv")
+      .join("1.csv")
+      .is_file()
+  );
+
+  // Default `--output text` `export` without `--out` prints portable JSON; `--brief` prints Markdown.
+  {
+    let server_url_text = server_url.clone();
+    let nb_id_text = nb_id.clone();
+    let (stdout_json_raw, stdout_brief_raw) = tokio::task::spawn_blocking(move || {
+      let out_json = Command::cargo_bin("yanshi")
+        .expect("yanshi binary")
+        .args([
+          "notebook",
+          "--server",
+          &server_url_text,
+          "--token",
+          "secret-tok",
+          "--tenant",
+          "cli-team",
+          "export",
+          &nb_id_text,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+      let out_brief = Command::cargo_bin("yanshi")
+        .expect("yanshi binary")
+        .args([
+          "notebook",
+          "--server",
+          &server_url_text,
+          "--token",
+          "secret-tok",
+          "--tenant",
+          "cli-team",
+          "export",
+          &nb_id_text,
+          "--brief",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+      (out_json, out_brief)
+    })
+    .await
+    .expect("join text export");
+    let parsed_stdout_bundle: Value =
+      serde_json::from_slice(&stdout_json_raw).expect("default export stdout must be valid JSON");
+    assert_eq!(parsed_stdout_bundle["version"], 1);
+    assert!(
+      String::from_utf8_lossy(&stdout_brief_raw).contains("# Macrotidal Estuaries"),
+      "--brief must print markdown_brief to stdout"
+    );
+  }
 
   let attached = bin_run(vec![
     "attach-run".into(),

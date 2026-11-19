@@ -39,11 +39,12 @@ use crate::json_envelope::CliJsonEnvelope;
 /// Fixed restore order — see the module doc for the rationale. Does
 /// NOT depend on `--include` order or the manifest's own artifact
 /// order.
-const RESTORE_ORDER: [BackupInclude; 6] = [
+const RESTORE_ORDER: [BackupInclude; 7] = [
   BackupInclude::Db,
   BackupInclude::MarketplaceCache,
   BackupInclude::SkillsDir,
   BackupInclude::PluginsDir,
+  BackupInclude::HarnessMemory,
   BackupInclude::TraceDir,
   BackupInclude::RunDir,
 ];
@@ -216,6 +217,9 @@ async fn restore_one(
   let started = std::time::Instant::now();
   match include {
     BackupInclude::Db => restore_db(input, args, artifact_meta, started).await,
+    BackupInclude::HarnessMemory => {
+      restore_file(include, input, args, artifact_meta, started).await
+    }
     other => restore_dir(other, input, args, artifact_meta, started).await,
   }
 }
@@ -408,6 +412,177 @@ fn reject_unsafe_restore_target(target: &Path) -> Option<String> {
     ))
   } else {
     None
+  }
+}
+
+fn sqlite_sidecar_path(target: &Path, suffix: &str) -> PathBuf {
+  let mut os = target.as_os_str().to_os_string();
+  os.push(suffix);
+  PathBuf::from(os)
+}
+
+async fn restore_file(
+  include: BackupInclude,
+  input: &Path,
+  args: &RestoreArgs,
+  artifact_meta: &BundleManifestArtifact,
+  started: std::time::Instant,
+) -> RestoreStepReport {
+  let artifact = input.join(include.artifact_name());
+  let Some(target) = resolve_include_dir(include) else {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: "<unresolved>".to_string(),
+      artifact: include.artifact_name().to_string(),
+      status: "skipped".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: Some(format!(
+        "could not resolve target path for {} (no env override and no home directory)",
+        include.tag()
+      )),
+    };
+  };
+  let target_display = target.display().to_string();
+
+  if !artifact.is_file() {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: Some(format!(
+        "manifest references {} but the file is missing from the bundle",
+        artifact.display()
+      )),
+    };
+  }
+
+  if args.dry_run {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "dry_run".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: None,
+    };
+  }
+
+  let integrity_warning =
+    match verify_artifact_integrity(&artifact, artifact_meta, args.skip_integrity_check) {
+      Ok(warning) => warning,
+      Err(reason) => {
+        return RestoreStepReport {
+          include: include.tag().to_string(),
+          target: target_display,
+          artifact: include.artifact_name().to_string(),
+          status: "failed".to_string(),
+          duration_ms: started.elapsed().as_millis() as u64,
+          reason: Some(reason),
+        };
+      }
+    };
+
+  if let Some(reason) = reject_unsafe_restore_target(&target) {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: Some(reason),
+    };
+  }
+
+  if target.is_dir() {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: Some(format!(
+        "target path {} is a directory, expected SQLite file path",
+        target.display()
+      )),
+    };
+  }
+
+  if target.exists() {
+    if !args.force {
+      return RestoreStepReport {
+        include: include.tag().to_string(),
+        target: target_display,
+        artifact: include.artifact_name().to_string(),
+        status: "failed".to_string(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        reason: Some(format!(
+          "target file {} already exists; pass --force to overwrite",
+          target.display()
+        )),
+      };
+    }
+    if let Err(err) = std::fs::remove_file(&target) {
+      return RestoreStepReport {
+        include: include.tag().to_string(),
+        target: target_display,
+        artifact: include.artifact_name().to_string(),
+        status: "failed".to_string(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        reason: Some(format!(
+          "failed to remove existing target file {}: {err}",
+          target.display()
+        )),
+      };
+    }
+    // Remove stale WAL/SHM sidecars so SQLite never replays an older WAL over
+    // the freshly restored single-file snapshot.
+    for suffix in ["-wal", "-shm"] {
+      let sidecar = sqlite_sidecar_path(&target, suffix);
+      if sidecar.is_file() {
+        let _ = std::fs::remove_file(&sidecar);
+      }
+    }
+  }
+
+  if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty())
+    && let Err(err) = std::fs::create_dir_all(parent)
+  {
+    return RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      duration_ms: started.elapsed().as_millis() as u64,
+      reason: Some(format!(
+        "failed to create parent directory {}: {err}",
+        parent.display()
+      )),
+    };
+  }
+
+  let elapsed_ms = started.elapsed().as_millis() as u64;
+  match std::fs::copy(&artifact, &target) {
+    Ok(_) => RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "executed".to_string(),
+      duration_ms: elapsed_ms,
+      reason: integrity_warning,
+    },
+    Err(err) => RestoreStepReport {
+      include: include.tag().to_string(),
+      target: target_display,
+      artifact: include.artifact_name().to_string(),
+      status: "failed".to_string(),
+      duration_ms: elapsed_ms,
+      reason: Some(format!(
+        "failed to write restored SQLite file {}: {err}",
+        target.display()
+      )),
+    },
   }
 }
 
