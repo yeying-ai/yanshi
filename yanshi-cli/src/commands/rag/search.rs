@@ -192,11 +192,10 @@ pub async fn execute(
     println!("   {}: {}", "ID".cyan(), result.id);
     println!("   {}: {:.4}", "Score".yellow(), result.score);
 
-    // Display content (truncate if too long)
-    let content = if result.content.len() > 200 {
-      format!("{}...", &result.content[..200])
-    } else {
-      result.content.clone()
+    // Display content (truncate cleanly on character boundary if too long)
+    let content = match result.content.char_indices().nth(200) {
+      Some((idx, _)) => format!("{}...", &result.content[..idx]),
+      None => result.content.clone(),
     };
     println!("   {}:", "Content".green());
     println!("   {}", content.dimmed());

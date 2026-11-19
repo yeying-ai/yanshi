@@ -278,7 +278,12 @@ async fn load_file_payload(
   path: &Path,
   mime_type: Option<&str>,
 ) -> Result<ResolvedAsrInput, YanshiError> {
-  let bytes = tokio::fs::read(path)
+  let resolved = yanshi_core::run_context::resolve_confined_path(path).map_err(|msg| {
+    YanshiError::NodeInputError {
+      message: format!("{node_name}: {msg}"),
+    }
+  })?;
+  let bytes = tokio::fs::read(&resolved)
     .await
     .map_err(|err| YanshiError::NodeInputError {
       message: format!("{node_name}: failed to read '{}': {err}", path.display()),
@@ -286,14 +291,14 @@ async fn load_file_payload(
   let is_sub = mime_type.is_some_and(|m| {
     let lower = m.to_ascii_lowercase();
     lower.contains("subrip") || lower.contains("vtt")
-  }) || is_subtitle_extension(path);
+  }) || is_subtitle_extension(&resolved);
 
   if is_sub {
     return Ok(ResolvedAsrInput::SubtitleText(
       String::from_utf8_lossy(&bytes).into_owned(),
     ));
   }
-  let filename = path
+  let filename = resolved
     .file_name()
     .map(|n| n.to_string_lossy().into_owned())
     .unwrap_or_else(|| "audio.mp3".to_string());

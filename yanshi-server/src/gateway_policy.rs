@@ -132,6 +132,42 @@ impl GatewayPolicy {
         let what = format!("input '{key}' (node '{}')", node.id);
         self.check_json_reach(&what, reach, value)?;
       }
+      // Also enforce reach ceilings on indirect `inputs` keys referenced by a
+      // node parameter (`parameters: { audio_source: target }` with `inputs.target`).
+      for (param_key, param_val) in &node.parameters {
+        let Some(reach) = reach_of(&node.node_type, param_key) else {
+          continue;
+        };
+        if let Some(ref_key) = param_val.as_str().map(str::trim)
+          && is_identifier_key(ref_key)
+          && !node.input_mapping.contains_key(ref_key)
+          && let Some(input_val) = inputs.get(ref_key)
+          && !input_val.is_null()
+        {
+          let what = format!(
+            "input '{ref_key}' (referenced by node '{}' '{param_key}')",
+            node.id
+          );
+          self.check_json_reach(&what, reach, input_val)?;
+        } else if reach == Reach::MediaSourceList
+          && let Some(seq) = param_val.as_sequence()
+        {
+          for item in seq {
+            if let Some(ref_key) = item.as_str().map(str::trim)
+              && is_identifier_key(ref_key)
+              && !node.input_mapping.contains_key(ref_key)
+              && let Some(input_val) = inputs.get(ref_key)
+              && !input_val.is_null()
+            {
+              let what = format!(
+                "input '{ref_key}' (referenced by node '{}' '{param_key}')",
+                node.id
+              );
+              self.check_json_reach(&what, Reach::MediaSource, input_val)?;
+            }
+          }
+        }
+      }
       Ok(())
     })
   }
@@ -231,6 +267,9 @@ fn reach_of(node_type: &str, key: &str) -> Option<Reach> {
       None
     }
     "audio_source" | "image_source" | "source_image" | "reference_image" => {
+      Some(Reach::MediaSource)
+    }
+    "source" if matches!(node_type, "pdf_extract" | "video_ingest" | "repo_snapshot") => {
       Some(Reach::MediaSource)
     }
     "image" if node_type == "text_to_video" => Some(Reach::MediaSource),
@@ -382,6 +421,11 @@ impl GatewayPolicy {
     }
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
       url::Url::parse(trimmed).map_err(|e| format!("{what} '{trimmed}' is not a URL: {e}"))?;
+      return Ok(());
+    }
+    if trimmed.starts_with("github.com/") {
+      url::Url::parse(&format!("https://{trimmed}"))
+        .map_err(|e| format!("{what} '{trimmed}' is not a valid GitHub URL: {e}"))?;
       return Ok(());
     }
     if let Some((def, node)) = yaml_ctx {
@@ -811,6 +855,30 @@ mod tests {
     assert!(
       GatewayPolicy::default()
         .check_run_inputs(&report_def, &report_inputs)
+        .is_ok()
+    );
+
+    // Indirect workflow inputs (`parameters: { audio_source: target }`) must also
+    // obey `Reach::MediaSource` so host paths cannot bypass `check_run_inputs`.
+    let indirect_asr = workflow(
+      "name: w\ninputs:\n  target:\n    required: true\nnodes:\n  - id: t\n    type: asr\n    parameters:\n      model: mock-asr\n      audio_source: target\n",
+    );
+    assert!(
+      GatewayPolicy::default()
+        .check_workflow(&indirect_asr)
+        .is_ok()
+    );
+    let mut sneaky_indirect = serde_json::Map::new();
+    sneaky_indirect.insert("target".into(), serde_json::json!("/etc/hosts"));
+    assert!(
+      GatewayPolicy::default()
+        .check_run_inputs(&indirect_asr, &sneaky_indirect)
+        .is_err()
+    );
+    sneaky_indirect.insert("target".into(), serde_json::json!("/srv/work/clip.mp3"));
+    assert!(
+      policy
+        .check_run_inputs(&indirect_asr, &sneaky_indirect)
         .is_ok()
     );
   }

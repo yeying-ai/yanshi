@@ -302,7 +302,17 @@ async fn load_video_input_image(
   path_or_uri: &str,
 ) -> Result<yanshi_llm::VideoInputImage, YanshiError> {
   use base64::{Engine as _, engine::general_purpose::STANDARD};
-  if let Some(rest) = path_or_uri.strip_prefix("data:") {
+  let trimmed = path_or_uri.trim();
+  if trimmed.starts_with("data:")
+    || trimmed.starts_with("http://")
+    || trimmed.starts_with("https://")
+  {
+    let data_uri = yanshi_nodes::common::utils::load_data_uri_from_str(trimmed).await?;
+    let rest = data_uri
+      .strip_prefix("data:")
+      .ok_or_else(|| YanshiError::ConfigurationError {
+        message: "data: URI for TextToVideoNode image must start with data:".to_string(),
+      })?;
     let (mime, b64) =
       rest
         .split_once(";base64,")
@@ -318,13 +328,14 @@ async fn load_video_input_image(
       },
     });
   }
-  let bytes =
-    tokio::fs::read(path_or_uri)
-      .await
-      .map_err(|err| YanshiError::ConfigurationError {
-        message: format!("Failed to read TextToVideoNode input image '{path_or_uri}': {err}"),
-      })?;
-  let lower = path_or_uri.to_ascii_lowercase();
+  let resolved = yanshi_core::run_context::resolve_confined_path(std::path::Path::new(trimmed))
+    .map_err(|message| YanshiError::NodeInputError { message })?;
+  let bytes = tokio::fs::read(&resolved)
+    .await
+    .map_err(|err| YanshiError::ConfigurationError {
+      message: format!("Failed to read TextToVideoNode input image '{trimmed}': {err}"),
+    })?;
+  let lower = trimmed.to_ascii_lowercase();
   let mime_type = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
     "image/jpeg"
   } else if lower.ends_with(".webp") {

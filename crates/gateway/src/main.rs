@@ -103,11 +103,8 @@ impl AppGateway {
     let host = extract_request_host(req)?;
     let target_base = self.host_redirects.get(&host)?;
     let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    if path.starts_with('/') {
-      Some(format!("{target_base}{path}"))
-    } else {
-      Some(format!("{target_base}/{path}"))
-    }
+    let clean_path = sanitize_redirect_path(path);
+    Some(format!("{target_base}{clean_path}"))
   }
 }
 
@@ -423,7 +420,41 @@ fn apply_security_headers(resp: &mut ResponseHeader) {
   }
 }
 
-/// Port 80 service: redirects all plain HTTP traffic to `https://<host><path>`.
+fn is_valid_host_authority(host: &str) -> bool {
+  let Some(normalized) = normalize_host(host) else {
+    return false;
+  };
+  if normalized.starts_with('[') && normalized.ends_with(']') {
+    return normalized[1..normalized.len() - 1]
+      .chars()
+      .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+  }
+  normalized
+    .chars()
+    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
+fn sanitize_redirect_path(raw_path: &str) -> String {
+  let trimmed = raw_path.trim_start_matches('/');
+  format!("/{trimmed}")
+}
+
+fn build_https_redirect_location(req: &RequestHeader) -> Option<String> {
+  let raw_host = req
+    .uri
+    .host()
+    .or_else(|| req.headers.get("host").and_then(|v| v.to_str().ok()))?
+    .trim();
+  if !is_valid_host_authority(raw_host) {
+    return None;
+  }
+  let host = normalize_host(raw_host)?;
+  let raw_path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+  let clean_path = sanitize_redirect_path(raw_path);
+  Some(format!("https://{host}{clean_path}"))
+}
+
+/// Port 80 service: redirects plain HTTP traffic with a valid `Host` to `https://<host><path>`.
 struct HttpToHttps;
 
 #[async_trait]
@@ -435,13 +466,14 @@ impl ProxyHttp for HttpToHttps {
   async fn request_filter(&self, session: &mut Session, _ctx: &mut ()) -> Result<bool> {
     cap_keepalive(session);
     let req = session.req_header();
-    let host = req
-      .headers
-      .get("host")
-      .and_then(|v| v.to_str().ok())
-      .unwrap_or("");
-    let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let location = format!("https://{host}{path}");
+    let Some(location) = build_https_redirect_location(req) else {
+      let mut bad = ResponseHeader::build(400, None)
+        .map_err(|_| pingora_core::Error::new_str("failed to build HTTP 400 header"))?;
+      bad.append_header("Server", "yanshi-gateway").ok();
+      bad.append_header("Content-Length", "0").ok();
+      session.write_response_header_ref(&bad, true).await.ok();
+      return Ok(true);
+    };
 
     let mut resp = ResponseHeader::build(301, None)
       .map_err(|_| pingora_core::Error::new_str("failed to build HTTP->HTTPS 301 header"))?;
@@ -648,5 +680,26 @@ mod tests {
     assert!(host_matches_domain("yanshi.yeying.dev", "yeying.dev"));
     assert!(host_matches_domain("yeying.dev", "yeying.dev"));
     assert!(!host_matches_domain("fakeyeying.dev", "yeying.dev"));
+  }
+
+  #[test]
+  fn http_to_https_redirect_rejects_missing_or_malformed_host_and_collapses_double_slashes() {
+    let missing_host = RequestHeader::build("GET", b"//evil.example/steal", None).unwrap();
+    assert_eq!(build_https_redirect_location(&missing_host), None);
+
+    let mut bad_host = RequestHeader::build("GET", b"/v1/runs", None).unwrap();
+    bad_host
+      .insert_header("Host", "evil.example/injected@yanshi.yeying.dev")
+      .unwrap();
+    assert_eq!(build_https_redirect_location(&bad_host), None);
+
+    let mut double_slash = RequestHeader::build("GET", b"//ui/notebooks?x=1", None).unwrap();
+    double_slash
+      .insert_header("Host", "Yanshi.Yeying.DEV:80")
+      .unwrap();
+    assert_eq!(
+      build_https_redirect_location(&double_slash).as_deref(),
+      Some("https://yanshi.yeying.dev/ui/notebooks?x=1")
+    );
   }
 }

@@ -919,8 +919,13 @@ fn parse_duckduckgo_html(html: &str, max_results: usize) -> Vec<SearchResultItem
       break;
     }
     let after_marker = &rest[idx + marker.len()..];
-    // Look backwards in a small window before `result__a` or forward before `>` for `href="..."`
-    let window_start = idx.saturating_sub(256);
+    // Look backwards in a small window before `result__a` or forward before `>` for `href="..."`.
+    // Walk `window_start` back to a valid UTF-8 boundary so CJK/emoji snippets from the
+    // preceding result never slice mid-codepoint.
+    let mut window_start = idx.saturating_sub(256);
+    while window_start > 0 && !rest.is_char_boundary(window_start) {
+      window_start -= 1;
+    }
     let tag_head = &rest[window_start..idx + marker.len()];
     let Some(close_angle) = after_marker.find('>') else {
       break;
@@ -1149,5 +1154,29 @@ mod tests {
       hits[0].snippet,
       "Tokio is an asynchronous runtime for Rust."
     );
+  }
+
+  #[test]
+  fn parses_duckduckgo_html_with_multibyte_cjk_snippets_across_256_byte_window() {
+    let long_cjk_snippet =
+      "多模态内容生成引擎与分布式运行时架构设计指南，支持原生幻灯片渲染与可验证引用溯源。"
+        .repeat(3);
+    let html = format!(
+      r##"
+      <div class="result">
+        <a class="result__a" href="https://example.org/one">第一篇中文架构解析</a>
+        <a class="result__snippet" href="#">{long_cjk_snippet}</a>
+      </div>
+      <div class="result">
+        <a href="https://example.org/two" class="result__a">第二篇多模态评测</a>
+        <a class="result__snippet" href="#">包含完整的端到端测试指标与成本封顶验证。</a>
+      </div>
+    "##
+    );
+    let hits = parse_duckduckgo_html(&html, 5);
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].title, "第一篇中文架构解析");
+    assert_eq!(hits[1].title, "第二篇多模态评测");
+    assert_eq!(hits[1].url, "https://example.org/two");
   }
 }

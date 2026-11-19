@@ -173,7 +173,7 @@ impl AsyncNode for TTSNode {
       .synthesize(request)
       .await
       .map_err(|e| crate::vendor_error::vendor_error("TTS synthesis failed", e))?;
-    let seconds = crate::cost::wav_duration_seconds(&tts_response.audio);
+    let seconds = crate::cost::audio_duration_seconds(&tts_response.audio, &tts_response.mime_type);
     crate::cost::record(&model, |p| p.cost_for_speech(input_chars, seconds))?;
 
     let value = match self.output_format {

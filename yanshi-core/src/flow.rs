@@ -1496,15 +1496,18 @@ impl<'f> FlowExecutor<'f> {
       ))
     });
     let run_once = || async {
-      let execute = crate::run_context::with_question_handler(
-        config.question_handler.as_ref().map(|h| h.0.clone()),
-        crate::run_context::with_node_reporter(
-          reporter.clone(),
-          crate::run_context::with_cost_meter(
-            node_meter.clone(),
-            crate::run_context::with_artifact_root(
-              run_dir.to_path_buf(),
-              self.execute_node_type(node_type, inputs, config),
+      let execute = crate::run_context::with_allowed_path_roots(
+        config.allowed_path_roots.clone(),
+        crate::run_context::with_question_handler(
+          config.question_handler.as_ref().map(|h| h.0.clone()),
+          crate::run_context::with_node_reporter(
+            reporter.clone(),
+            crate::run_context::with_cost_meter(
+              node_meter.clone(),
+              crate::run_context::with_artifact_root(
+                run_dir.to_path_buf(),
+                self.execute_node_type(node_type, inputs, config),
+              ),
             ),
           ),
         ),
@@ -1617,6 +1620,7 @@ impl<'f> FlowExecutor<'f> {
       run_base_dir: execution_config.run_base_dir.clone(),
       cancellation_token: execution_config.cancellation_token.clone(),
       question_handler: execution_config.question_handler.clone(),
+      allowed_path_roots: execution_config.allowed_path_roots.clone(),
       ..FlowExecutionConfig::serial()
     };
     (sub_flow, sub_config)
@@ -1820,32 +1824,36 @@ impl<'f> FlowExecutor<'f> {
         // run's artifact root into the sub-flow task so Map items file
         // their artifacts under the parent run, not their own uuid dir.
         let artifact_root = crate::run_context::current_artifact_root();
+        let allowed_path_roots = crate::run_context::current_allowed_path_roots();
         // Y2.3: same for the cost meter, so item spend counts toward the
         // Map node.
         let cost_meter = crate::run_context::current_cost_meter();
         let handle = tokio::spawn(crate::run_context::with_cost_meter(
           cost_meter,
-          crate::run_context::with_inherited_artifact_root(artifact_root, async move {
-            // Hold the permit for the entire sub-flow execution so the
-            // concurrent count is a tight upper bound, not just a
-            // start-rate cap. Acquired permits drop on task end (any
-            // exit path) so cancellation / errors release them.
-            let _permit = match permit_holder.as_ref() {
-              Some(sem) => match sem.clone().acquire_owned().await {
-                Ok(p) => Some(p),
-                Err(_) => {
-                  return Err(YanshiError::FlowExecutionFailed {
-                    message: "Map semaphore closed before sub-flow could acquire permit"
-                      .to_string(),
-                  });
-                }
-              },
-              None => None,
-            };
-            FlowExecutor::new(&sub_flow)
-              .execute_from_inputs_with_config(initial_inputs, sub_config)
-              .await
-          }),
+          crate::run_context::with_inherited_allowed_path_roots(
+            allowed_path_roots,
+            crate::run_context::with_inherited_artifact_root(artifact_root, async move {
+              // Hold the permit for the entire sub-flow execution so the
+              // concurrent count is a tight upper bound, not just a
+              // start-rate cap. Acquired permits drop on task end (any
+              // exit path) so cancellation / errors release them.
+              let _permit = match permit_holder.as_ref() {
+                Some(sem) => match sem.clone().acquire_owned().await {
+                  Ok(p) => Some(p),
+                  Err(_) => {
+                    return Err(YanshiError::FlowExecutionFailed {
+                      message: "Map semaphore closed before sub-flow could acquire permit"
+                        .to_string(),
+                    });
+                  }
+                },
+                None => None,
+              };
+              FlowExecutor::new(&sub_flow)
+                .execute_from_inputs_with_config(initial_inputs, sub_config)
+                .await
+            }),
+          ),
         ));
         abort_on_drop.0.push(handle.abort_handle());
         handles.push(handle);

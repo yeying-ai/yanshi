@@ -244,6 +244,7 @@ impl VideoIngestNode {
       })?;
 
     if !looks_like_direct_media_url(raw_url)
+      && allows_ytdlp_for_url(raw_url)
       && let Some(ytdlp) = sandboxed::find_tool("yt-dlp")
       && let Ok(outcome) = self
         .try_ytdlp(
@@ -583,7 +584,13 @@ async fn run_ytdlp_command(
   no_proxy: bool,
 ) -> Result<std::process::Output, YanshiError> {
   let mut cmd = tokio::process::Command::new(ytdlp);
-  cmd.args(args).current_dir(workdir).kill_on_drop(true);
+  cmd
+    .arg("--ignore-config")
+    .arg("--compat-options")
+    .arg("no-external-downloader")
+    .args(args)
+    .current_dir(workdir)
+    .kill_on_drop(true);
   cmd.env_clear();
   for key in [
     "PATH",
@@ -723,6 +730,38 @@ fn normalize_subtitle_content(raw: &str) -> String {
   out.trim_end().to_string() + "\n"
 }
 
+fn allows_ytdlp_for_url(raw_url: &str) -> bool {
+  // On local CLI / SDK runs (`current_allowed_path_roots() == None`), allow yt-dlp
+  // on any SSRF-validated URL. On the multi-tenant gateway, restrict yt-dlp
+  // (which follows HTTP redirects and HLS/HTML manifests outside HttpTool's
+  // per-hop DNS pinning) to known public video platforms; all other URLs go
+  // through SSRF-pinned `HttpTool::send_bytes` + sandboxed `ffmpeg`.
+  if run_context::current_allowed_path_roots().is_none() {
+    return true;
+  }
+  let Ok(parsed) = reqwest::Url::parse(raw_url) else {
+    return false;
+  };
+  let Some(host) = parsed
+    .host_str()
+    .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+  else {
+    return false;
+  };
+  [
+    "youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "bilibili.com",
+    "b23.tv",
+    "vimeo.com",
+    "ted.com",
+    "twitch.tv",
+  ]
+  .iter()
+  .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 fn looks_like_direct_media_url(raw_url: &str) -> bool {
   let path_part = raw_url.split(['?', '#']).next().unwrap_or(raw_url);
   let lower = path_part.to_ascii_lowercase();
@@ -812,7 +851,8 @@ fn resolve_readable_path(
       ),
     ));
   }
-  let canonical = path
+  let canonical = run_context::resolve_confined_path(path)
+    .map_err(|msg| input_err(node, msg))?
     .canonicalize()
     .map_err(|err| input_err(node, format!("cannot resolve '{}': {err}", path.display())))?;
 

@@ -94,6 +94,7 @@ COPY --from=builder /out/yanshi /usr/local/bin/yanshi
 USER yanshi
 ENV PORT=3000
 ENV RUST_LOG=info
+ENV YANSHI_PRICING_TABLE=/etc/yanshi/pricing.yml
 EXPOSE 3000
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/yanshi"]

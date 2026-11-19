@@ -273,6 +273,8 @@ pub struct RunContext {
   pub debug_controller: Option<FlowDebugController>,
   /// Interactive HITL `ask_user` question registry for inline workflow agents.
   pub question_registry: crate::run_questions::RunQuestionRegistry,
+  /// Optional host-path ceiling enforced at runtime by modality/source nodes.
+  pub allowed_path_roots: Option<Vec<PathBuf>>,
 }
 
 /// Process-local registry of active [`FlowDebugController`] handles keyed by `run_id`.
@@ -896,6 +898,7 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     ctx.run_base_dir.clone(),
     ctx.cancellation_token.clone(),
     ctx.run_max_concurrency,
+    ctx.allowed_path_roots.clone(),
   )
   .with_question_handler(Arc::new(
     crate::run_questions::ServerRunQuestionHandler::new(
@@ -1150,6 +1153,7 @@ async fn run_skill_agent(
     Some(skill_run_dir.clone()),
     ctx.cancellation_token.clone(),
     ctx.run_max_concurrency,
+    ctx.allowed_path_roots.clone(),
   )
   .with_question_handler(Arc::new(
     crate::run_questions::ServerRunQuestionHandler::new(
@@ -1528,11 +1532,16 @@ fn server_execution_config(
   run_base_dir: Option<PathBuf>,
   cancellation_token: FlowCancellationToken,
   max_concurrency: usize,
+  allowed_path_roots: Option<Vec<PathBuf>>,
 ) -> FlowExecutionConfig {
   let base_dir = run_base_dir.unwrap_or_else(default_run_base_dir);
-  FlowExecutionConfig::concurrent(max_concurrency)
+  let mut cfg = FlowExecutionConfig::concurrent(max_concurrency)
     .with_run_base_dir(base_dir)
-    .with_cancellation_token(cancellation_token)
+    .with_cancellation_token(cancellation_token);
+  if let Some(roots) = allowed_path_roots {
+    cfg = cfg.with_allowed_path_roots(roots);
+  }
+  cfg
 }
 
 fn default_run_base_dir() -> PathBuf {
@@ -1943,6 +1952,7 @@ fn dispatch_run<G: Send + 'static>(
   let question_registry = state.question_registry.clone();
   let live_state_registry = state.live_state_registry.clone();
   let approval_registry = state.approval_registry.clone();
+  let allowed_path_roots = Some(state.gateway_policy.path_roots.clone());
   let run_max_concurrency = run.max_concurrency.map_or(state.run_max_concurrency, |n| {
     n.clamp(1, state.run_max_concurrency.max(1))
   });
@@ -1980,6 +1990,7 @@ fn dispatch_run<G: Send + 'static>(
         notebook: run.notebook,
         debug_controller: run.debug_controller,
         question_registry: task_question_registry.clone(),
+        allowed_path_roots,
       })
       .await;
     task_question_registry.clear_run(run_id);
@@ -2771,7 +2782,7 @@ mod server_execution_config_tests {
 
   #[test]
   fn builds_concurrent_mode_with_the_given_max_concurrency() {
-    let config = server_execution_config(None, FlowCancellationToken::new(), 4);
+    let config = server_execution_config(None, FlowCancellationToken::new(), 4, None);
     assert_eq!(config.mode, FlowExecutionMode::Concurrent);
     assert_eq!(config.max_concurrency, 4);
   }
@@ -2781,7 +2792,7 @@ mod server_execution_config_tests {
   /// the engine now takes the `Concurrent` code path to get there.
   #[test]
   fn max_concurrency_one_still_clamps_to_at_least_one() {
-    let config = server_execution_config(None, FlowCancellationToken::new(), 0);
+    let config = server_execution_config(None, FlowCancellationToken::new(), 0, None);
     assert_eq!(
       config.max_concurrency, 1,
       "FlowExecutionConfig::concurrent must clamp 0 up to 1"
@@ -2790,15 +2801,24 @@ mod server_execution_config_tests {
 
   #[test]
   fn falls_back_to_default_run_base_dir_when_none() {
-    let config = server_execution_config(None, FlowCancellationToken::new(), 1);
+    let config = server_execution_config(None, FlowCancellationToken::new(), 1, None);
     assert!(config.run_base_dir.is_some());
   }
 
   #[test]
   fn honors_an_explicit_run_base_dir() {
     let explicit = PathBuf::from("/tmp/yanshi-w4-3a-test");
-    let config = server_execution_config(Some(explicit.clone()), FlowCancellationToken::new(), 1);
+    let config = server_execution_config(
+      Some(explicit.clone()),
+      FlowCancellationToken::new(),
+      1,
+      Some(vec![PathBuf::from("/srv/media")]),
+    );
     assert_eq!(config.run_base_dir, Some(explicit));
+    assert_eq!(
+      config.allowed_path_roots,
+      Some(vec![PathBuf::from("/srv/media")])
+    );
   }
 }
 

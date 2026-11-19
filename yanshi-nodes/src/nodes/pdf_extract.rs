@@ -303,7 +303,8 @@ fn resolve_readable_path(
     ));
   }
 
-  let canonical = path
+  let canonical = run_context::resolve_confined_path(path)
+    .map_err(|msg| input_err(node, msg))?
     .canonicalize()
     .map_err(|err| input_err(node, format!("cannot resolve '{}': {err}", path.display())))?;
 

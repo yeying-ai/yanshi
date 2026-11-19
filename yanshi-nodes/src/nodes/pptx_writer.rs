@@ -2619,6 +2619,17 @@ fn register_media_bytes(
   filename
 }
 
+fn data_uri_digest_key(bytes: &[u8]) -> String {
+  let mut crc = flate2::Crc::new();
+  crc.update(bytes);
+  let mut fnv: u64 = 0xcbf2_9ce4_8422_2325;
+  for &b in bytes {
+    fnv ^= u64::from(b);
+    fnv = fnv.wrapping_mul(0x0100_0000_01b3);
+  }
+  format!("data:{}:{:08x}:{fnv:016x}", bytes.len(), crc.sum())
+}
+
 fn load_run_media(
   src: &str,
   media_assets: &mut Vec<MediaAsset>,
@@ -2629,7 +2640,8 @@ fn load_run_media(
     let (_meta, b64) = rest.split_once(";base64,")?;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     let decoded = B64.decode(b64.trim()).ok()?;
-    (decoded, format!("data:{}", &b64[..b64.len().min(64)]))
+    let key = data_uri_digest_key(&decoded);
+    (decoded, key)
   } else {
     let root = yanshi_core::run_context::current_artifact_root()?;
     let canonical_root = root.canonicalize().ok()?;
@@ -3435,5 +3447,29 @@ mod tests {
         .expect("utf-8");
     }
     assert!(all_notes_xml.contains("第一页重点对比编译期展开与运行期双指针内存结构"));
+  }
+
+  #[test]
+  fn distinct_data_uri_images_sharing_64_byte_prefix_do_not_collide_in_media_dedup() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    let svg_a = format!(
+      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><!-- {} --><rect width=\"200\" height=\"120\" fill=\"#112233\"/></svg>",
+      "A".repeat(96)
+    );
+    let svg_b = format!(
+      "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><!-- {} --><rect width=\"200\" height=\"120\" fill=\"#994422\"/></svg>",
+      "A".repeat(96)
+    );
+    let uri_a = format!("data:image/svg+xml;base64,{}", B64.encode(svg_a.as_bytes()));
+    let uri_b = format!("data:image/svg+xml;base64,{}", B64.encode(svg_b.as_bytes()));
+
+    let mut media_assets = Vec::new();
+    let mut media_dedup = HashMap::new();
+    let res_a = load_run_media(&uri_a, &mut media_assets, &mut media_dedup).expect("media A");
+    let res_b = load_run_media(&uri_b, &mut media_assets, &mut media_dedup).expect("media B");
+    assert_ne!(
+      res_a.primary_filename, res_b.primary_filename,
+      "distinct images sharing identical first 64 base64 chars must not collide"
+    );
   }
 }

@@ -507,6 +507,8 @@ impl RepoSnapshotNode {
         ),
       });
     }
+    yanshi_core::run_context::resolve_confined_path(path)
+      .map_err(|message| YanshiError::NodeInputError { message })?;
     if let Some(reason) = self.policy.path_denial_reason(path) {
       return Err(YanshiError::AsyncExecutionError {
         message: format!("sandbox policy denied: {reason}"),

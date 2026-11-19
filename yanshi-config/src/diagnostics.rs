@@ -693,9 +693,12 @@ pub struct PricingReport {
 
 fn pricing_report() -> PricingReport {
   let source = match std::env::var("YANSHI_PRICING_TABLE") {
-    Ok(path) => format!("YANSHI_PRICING_TABLE={path}"),
-    Err(_) => match dirs::home_dir().map(|home| home.join(".yanshi").join("pricing.yml")) {
+    Ok(path) if !path.trim().is_empty() => format!("YANSHI_PRICING_TABLE={path}"),
+    _ => match dirs::home_dir().map(|home| home.join(".yanshi").join("pricing.yml")) {
       Some(path) if path.exists() => path.display().to_string(),
+      _ if std::path::Path::new("/etc/yanshi/pricing.yml").exists() => {
+        "/etc/yanshi/pricing.yml".to_string()
+      }
       _ => "none".to_string(),
     },
   };

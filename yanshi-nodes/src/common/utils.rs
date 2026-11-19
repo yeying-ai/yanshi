@@ -17,13 +17,19 @@ pub fn flow_value_to_string(value: &FlowValue) -> String {
   }
 }
 
+fn resolve_local_media_path(path: &std::path::Path) -> Result<std::path::PathBuf, YanshiError> {
+  yanshi_core::run_context::resolve_confined_path(path)
+    .map_err(|message| YanshiError::NodeInputError { message })
+}
+
 async fn read_file_as_data_uri(path: &std::path::Path) -> Result<String, YanshiError> {
-  let data = tokio::fs::read(path)
+  let resolved = resolve_local_media_path(path)?;
+  let data = tokio::fs::read(&resolved)
     .await
     .map_err(|e| YanshiError::NodeInputError {
       message: format!("Failed to read file at {:?}: {}", path, e),
     })?;
-  let mime_type = mime_guess::from_path(path).first_or_octet_stream();
+  let mime_type = mime_guess::from_path(&resolved).first_or_octet_stream();
   Ok(format!(
     "data:{};base64,{}",
     mime_type,
@@ -198,7 +204,8 @@ pub async fn load_bytes_from_source(
         })
       }
       FlowValue::File { path, .. } => {
-        tokio::fs::read(path)
+        let resolved = resolve_local_media_path(path)?;
+        tokio::fs::read(&resolved)
           .await
           .map_err(|e| YanshiError::NodeInputError {
             message: format!("Failed to read file at {:?}: {}", path, e),
@@ -216,7 +223,8 @@ pub async fn load_bytes_from_source(
     return fetch_remote_media(trimmed).await.map(|(bytes, _)| bytes);
   }
 
-  tokio::fs::read(trimmed)
+  let resolved = resolve_local_media_path(std::path::Path::new(trimmed))?;
+  tokio::fs::read(&resolved)
     .await
     .map_err(|e| YanshiError::NodeInputError {
       message: format!("Failed to read file at {}: {}", trimmed, e),
@@ -264,5 +272,41 @@ mod tests {
         || msg.contains("ssrf"),
       "expected SSRF policy rejection, got: {err}"
     );
+  }
+
+  #[tokio::test]
+  async fn gateway_allowed_path_roots_blocks_host_reads_outside_artifact_root() {
+    let run_dir = tempfile::tempdir().expect("run dir");
+    let host_dir = tempfile::tempdir().expect("host dir");
+    let inside_file = run_dir.path().join("inside.png");
+    let outside_file = host_dir.path().join("secret.txt");
+    tokio::fs::write(&inside_file, b"ok")
+      .await
+      .expect("write inside");
+    tokio::fs::write(&outside_file, b"secret")
+      .await
+      .expect("write outside");
+
+    yanshi_core::run_context::with_allowed_path_roots(
+      Some(Vec::new()),
+      yanshi_core::run_context::with_artifact_root(run_dir.path().to_path_buf(), async {
+        let ok = load_data_uri_from_str(&inside_file.to_string_lossy())
+          .await
+          .expect("file inside run artifact root must be readable");
+        assert!(ok.starts_with("data:image/png;base64,"));
+
+        let err = load_data_uri_from_str(&outside_file.to_string_lossy())
+          .await
+          .expect_err("file outside run artifact root must be blocked on gateway");
+        assert!(err.to_string().contains("outside this run's artifacts"));
+
+        let json_obj = FlowValue::Json(json!({ "path": outside_file.to_string_lossy() }));
+        let err_obj = load_data_uri_from_flow_value(&json_obj, "image_source")
+          .await
+          .expect_err("JSON {path} outside artifact root must also be blocked");
+        assert!(err_obj.to_string().contains("outside this run's artifacts"));
+      }),
+    )
+    .await;
   }
 }

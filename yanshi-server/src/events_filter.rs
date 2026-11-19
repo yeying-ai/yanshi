@@ -210,12 +210,9 @@ fn parse_clause(raw: &str) -> Result<Clause, FilterParseError> {
 }
 
 fn strip_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
-  if input.len() < prefix.len() {
-    return None;
-  }
-  let head = &input[..prefix.len()];
+  let head = input.get(..prefix.len())?;
   if head.eq_ignore_ascii_case(prefix) {
-    Some(&input[prefix.len()..])
+    input.get(prefix.len()..)
   } else {
     None
   }
@@ -513,5 +510,18 @@ mod tests {
     let expr = parse_filter("kind!=run_started").unwrap();
     assert!(!matches(&event(0, "run_started", json!({})), &expr));
     assert!(matches(&event(0, "run_finished", json!({})), &expr));
+  }
+
+  #[test]
+  fn multibyte_cjk_filter_clause_returns_clean_parse_error_without_panic() {
+    for raw in ["中文=1", "步骤>=2", "🔥=yes", "kind=中文事件"] {
+      if let Some(val) = raw.strip_prefix("kind=") {
+        let expr = parse_filter(raw).expect("multibyte kind value must parse");
+        assert!(matches(&event(0, val, json!({})), &expr));
+      } else {
+        let err = parse_filter(raw).expect_err("non-ASCII clause prefix must fail cleanly");
+        assert!(err.0.contains(raw));
+      }
+    }
   }
 }

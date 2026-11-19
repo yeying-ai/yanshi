@@ -133,17 +133,27 @@ impl PricingTable {
   }
 
   /// The operator's table: `YANSHI_PRICING_TABLE` when set, else
-  /// `~/.yanshi/pricing.yml` when it exists, else empty (every model
+  /// `~/.yanshi/pricing.yml` when it exists, else `/etc/yanshi/pricing.yml`
+  /// when bundled in the production container, else empty (every model
   /// costs $0). A missing file is not an error; a malformed one is, so a
   /// cost limit the operator expected is never silently disabled.
   pub fn load_default() -> Result<Self, PricingError> {
-    if let Ok(path) = std::env::var("YANSHI_PRICING_TABLE") {
+    if let Ok(path) = std::env::var("YANSHI_PRICING_TABLE")
+      && !path.trim().is_empty()
+    {
       return Self::load_from_yaml(path);
     }
-    match dirs::home_dir().map(|home| home.join(".yanshi").join("pricing.yml")) {
-      Some(path) if path.exists() => Self::load_from_yaml(path),
-      _ => Ok(Self::empty()),
+    if let Some(path) = dirs::home_dir()
+      .map(|home| home.join(".yanshi").join("pricing.yml"))
+      .filter(|p| p.exists())
+    {
+      return Self::load_from_yaml(path);
     }
+    let system_path = std::path::Path::new("/etc/yanshi/pricing.yml");
+    if system_path.exists() {
+      return Self::load_from_yaml(system_path);
+    }
+    Ok(Self::empty())
   }
 
   /// [`Self::load_default`], loaded once per process. Nodes price every

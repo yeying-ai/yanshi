@@ -74,6 +74,10 @@ pub struct FlowExecutionConfig {
   /// Optional interactive question handler enabling HITL `ask_user` prompts
   /// inside workflow nodes (`None` in headless / batch runs).
   pub question_handler: Option<crate::run_context::RunQuestionHandle>,
+  /// Optional host-path ceiling enforced at runtime by modality/file readers
+  /// (`None` in local CLI / SDK; `Some(roots)` on multi-tenant gateway runs,
+  /// where local reads must stay within the run's artifact root or `roots`).
+  pub allowed_path_roots: Option<Vec<PathBuf>>,
 }
 
 impl FlowExecutionConfig {
@@ -108,6 +112,7 @@ impl FlowExecutionConfig {
       cost_limit_usd: None,
       debug_controller: None,
       question_handler: None,
+      allowed_path_roots: None,
     }
   }
 
@@ -163,6 +168,12 @@ impl FlowExecutionConfig {
     self.resource_limits = Some(limits);
     self
   }
+
+  /// Confine runtime local media/file reads to this run's artifact root plus `roots`.
+  pub fn with_allowed_path_roots(mut self, roots: Vec<PathBuf>) -> Self {
+    self.allowed_path_roots = Some(roots);
+    self
+  }
 }
 
 impl Default for FlowExecutionConfig {
@@ -180,6 +191,7 @@ impl Default for FlowExecutionConfig {
       cost_limit_usd: None,
       debug_controller: None,
       question_handler: None,
+      allowed_path_roots: None,
     }
   }
 }

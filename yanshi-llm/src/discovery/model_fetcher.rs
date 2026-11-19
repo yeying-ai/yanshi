@@ -125,7 +125,7 @@ impl ModelFetcher {
     debug!(
       "Response from {}: {}",
       vendor_name,
-      &response_text[..response_text.len().min(500)]
+      truncate_utf8_prefix(&response_text, 500)
     );
 
     let model_response: ModelListResponse =
@@ -183,9 +183,27 @@ impl ModelFetcher {
 // panic-inside-`default()` would violate the user-rules "no unwrap/expect in
 // production" sweep (Q5.1).
 
+fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
+  if s.len() <= max_bytes {
+    return s;
+  }
+  let mut end = max_bytes;
+  while end > 0 && !s.is_char_boundary(end) {
+    end -= 1;
+  }
+  &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn truncate_utf8_prefix_handles_cjk_across_byte_cap() {
+    let text = "模".repeat(200); // 600 bytes; 500 % 3 == 2 (mid-codepoint)
+    let prefix = truncate_utf8_prefix(&text, 500);
+    assert_eq!(prefix.len(), 498);
+  }
   use std::env;
 
   #[tokio::test]

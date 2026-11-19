@@ -1611,13 +1611,14 @@ fn replace_unquoted_token(s: &str, from: &str, to: &str) -> String {
   while i < bytes.len() {
     let b = bytes[i];
     if esc {
-      out.push(b as char);
+      let ch = s[i..].chars().next().unwrap_or(b as char);
+      out.push(ch);
       esc = false;
-      i += 1;
+      i += ch.len_utf8();
       continue;
     }
     if b == b'\\' && in_quotes {
-      out.push(b as char);
+      out.push('\\');
       esc = true;
       i += 1;
       continue;
@@ -2529,6 +2530,11 @@ client -> "svc_user": HTTPS
     let cleaned = sanitize_d2_source(raw);
     assert!(cleaned.contains("style.fill: \"#e1f5fe\""));
     assert!(cleaned.contains("\"svc_user\": {shape: rectangle; label: \"user-svc\\nJava SB3\"}"));
+
+    let escaped_cjk =
+      sanitize_d2_source("node_a: { label: \"路径\\中文节点 --> 下游\" }\nnode_a --> node_b");
+    assert!(escaped_cjk.contains("\"路径\\中文节点 --> 下游\""));
+    assert!(escaped_cjk.contains("node_a -> node_b"));
 
     if sandboxed::find_tool("d2").is_none() {
       return;

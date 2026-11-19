@@ -152,6 +152,16 @@ models:
     type: embedding
     accepts: [text]
     base_url: null
+  tts-1:
+    vendor: openai
+    type: tts
+    accepts: [text]
+    base_url: null
+  tts-1-hd:
+    vendor: openai
+    type: tts
+    accepts: [text]
+    base_url: null
   whisper-1:
     vendor: openai
     type: asr

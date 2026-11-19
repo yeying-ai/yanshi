@@ -236,14 +236,18 @@ impl SkillValidator for CommandValidator {
 }
 
 /// 2 KiB cap on the stderr snippet surfaced into outcomes, per the
-/// design doc. Truncation is at byte boundaries with a clear marker.
+/// design doc. Truncation walks back to a valid UTF-8 character boundary.
 fn trim_stderr(bytes: &[u8]) -> String {
   const MAX: usize = 2 * 1024;
   let s = String::from_utf8_lossy(bytes);
   if s.len() <= MAX {
     s.into_owned().trim().to_string()
   } else {
-    let mut out = s[..MAX].to_string();
+    let mut end = MAX;
+    while end > 0 && !s.is_char_boundary(end) {
+      end -= 1;
+    }
+    let mut out = s[..end].to_string();
     out.push_str("…[truncated]");
     out.trim().to_string()
   }
@@ -602,5 +606,13 @@ env_allowlist = ["PATH"]
       let s = toml::to_string(&cfg).unwrap();
       let _back: ValidationConfig = toml::from_str(&s).unwrap();
     }
+  }
+
+  #[test]
+  fn trim_stderr_truncates_multibyte_utf8_without_panicking() {
+    // 700 3-byte CJK chars = 2100 bytes; byte 2048 falls inside a 3-byte sequence (`2048 % 3 == 2`).
+    let cjk = "验".repeat(700);
+    let trimmed = trim_stderr(cjk.as_bytes());
+    assert!(trimmed.ends_with("…[truncated]"));
   }
 }

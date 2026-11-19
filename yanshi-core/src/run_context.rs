@@ -59,6 +59,80 @@ pub async fn with_inherited_artifact_root<F: Future>(root: Option<PathBuf>, fut:
 }
 
 tokio::task_local! {
+  static ALLOWED_PATH_ROOTS: Vec<PathBuf>;
+}
+
+/// Optional host-path ceiling configured by a multi-tenant gateway
+/// (`FlowExecutionConfig::allowed_path_roots`). `None` in local CLI / SDK runs.
+pub fn current_allowed_path_roots() -> Option<Vec<PathBuf>> {
+  ALLOWED_PATH_ROOTS.try_with(|roots| roots.clone()).ok()
+}
+
+/// Scope `fut` with `roots` when `Some`, preserving any already-established
+/// outer ceiling across nested sub-flows.
+pub async fn with_allowed_path_roots<F: Future>(roots: Option<Vec<PathBuf>>, fut: F) -> F::Output {
+  if current_allowed_path_roots().is_some() {
+    fut.await
+  } else if let Some(roots) = roots {
+    ALLOWED_PATH_ROOTS.scope(roots, fut).await
+  } else {
+    fut.await
+  }
+}
+
+/// Re-enter captured `allowed_path_roots` inside a spawned sub-flow task.
+pub async fn with_inherited_allowed_path_roots<F: Future>(
+  roots: Option<Vec<PathBuf>>,
+  fut: F,
+) -> F::Output {
+  match roots {
+    Some(roots) => ALLOWED_PATH_ROOTS.scope(roots, fut).await,
+    None => fut.await,
+  }
+}
+
+/// Resolve `path` for local reading inside a node.
+///
+/// - When [`current_allowed_path_roots`] is `None` (local CLI / SDK), returns
+///   `path` unchanged so local workflows can read caller-supplied files.
+/// - When `Some(roots)` (multi-tenant gateway), rejects `..` traversal and
+///   requires the canonicalized target to reside inside [`current_artifact_root`]
+///   or one of `roots`.
+pub fn resolve_confined_path(path: &Path) -> Result<PathBuf, String> {
+  let Some(roots) = current_allowed_path_roots() else {
+    return Ok(path.to_path_buf());
+  };
+  if path
+    .components()
+    .any(|c| matches!(c, std::path::Component::ParentDir))
+  {
+    return Err(format!(
+      "local path '{}' cannot contain '..' on the gateway",
+      path.display()
+    ));
+  }
+  let canonical = path
+    .canonicalize()
+    .map_err(|e| format!("cannot resolve '{}': {e}", path.display()))?;
+  if let Some(art_root) = current_artifact_root() {
+    let canon_art = art_root.canonicalize().unwrap_or(art_root);
+    if canonical.starts_with(&canon_art) {
+      return Ok(canonical);
+    }
+  }
+  for root in &roots {
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+    if canonical.starts_with(&canon_root) {
+      return Ok(canonical);
+    }
+  }
+  Err(format!(
+    "local path '{}' is outside this run's artifacts and allowed gateway roots",
+    path.display()
+  ))
+}
+
+tokio::task_local! {
   static COST_METER: std::sync::Arc<CostMeter>;
 }
 
