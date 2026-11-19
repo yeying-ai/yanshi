@@ -24,9 +24,10 @@ const env = (globalThis as unknown as { process: { env: Record<string, string | 
   .process.env;
 const baseURL = env.BASE_URL ?? 'http://127.0.0.1:8080';
 const apiToken = env.YANSHI_API_TOKEN ?? '';
+const mockModel = env.E2E_MOCK_MODEL ?? '';
 
-test.describe('Content Studio — /ui/notebooks lifecycle, search & portable bundle round-trip', () => {
-  test('creates, renames, ingests text, searches BM25, exports/imports JSON bundle, and deletes', async ({
+test.describe('Content Studio — /ui/notebooks lifecycle, chunk reader, batch studio & bundle round-trip', () => {
+  test('creates, renames, reads multi-chunk source, batch-generates deliverables, exports/imports, and deletes', async ({
     page,
   }) => {
     await page.goto(`${baseURL}/ui/notebooks`);
@@ -50,28 +51,60 @@ test.describe('Content Studio — /ui/notebooks lifecycle, search & portable bun
     await page.getByTestId('save-rename-notebook-btn').click();
     await expect(page.getByTestId('notebook-selector')).toContainText('Macrotidal Estuaries');
 
-    // 3. Add text source & wait until background ingestion reaches `已就绪`
-    await page
-      .getByTestId('source-text-input')
-      .fill(
-        'Severn Bore macrotidal range reaches fifteen meters during equinoctial spring tides.',
+    // 3. Add a multi-paragraph (>1200 chars) text source so chunking produces >= 2 passages
+    const paraA =
+      'Severn Bore macrotidal range reaches fifteen meters during equinoctial spring tides. ' +
+      'Resonance along the funnel-shaped Bristol Channel amplifies incoming Atlantic tidal waves. '.repeat(
+        8,
       );
+    const paraB =
+      'Bay of Fundy in eastern Canada exhibits a sixteen point three meter peak tidal amplitude. ' +
+      'Natural basin oscillation period matches the twelve point four hour lunar semidiurnal tide. '.repeat(
+        8,
+      );
+    await page.getByTestId('source-text-input').fill(`${paraA}\n\n${paraB}`);
     await page.getByTestId('submit-source-btn').click();
     await expect(page.getByTestId('source-scope-bar')).toContainText('1/1 份就绪资料', {
       timeout: 15_000,
     });
 
-    // 4. Run BM25 search & inspect chunk in native `<dialog>`
+    // 4. Open Full Source Passage Reader (`GET /v1/notebooks/:id/sources/:source_id/chunks`) and step Next/Prev
+    await page.getByRole('button', { name: /阅读分块/ }).first().click();
+    await expect(page.getByTestId('chunk-preview-dialog')).toContainText('第 1 /');
+    await expect(page.getByTestId('chunk-reader-body')).toContainText('Severn Bore');
+    await page.getByTestId('chunk-reader-next-btn').click();
+    await expect(page.getByTestId('chunk-preview-dialog')).toContainText('第 2 /');
+    await expect(page.getByTestId('chunk-reader-body')).toContainText('Bay of Fundy');
+    await page.getByTestId('chunk-reader-close-btn').click();
+
+    // 5. Run BM25 search & inspect chunk in native `<dialog>`
     await page.getByTestId('notebook-search-input').fill('equinoctial');
     await page.getByTestId('notebook-search-submit').click();
     const hitInspectBtn = page.getByRole('button', { name: /查看分块/ }).first();
     await expect(hitInspectBtn).toBeVisible();
     await hitInspectBtn.click();
     await expect(page.getByTestId('chunk-preview-dialog')).toContainText('Severn Bore');
-    await page
-      .getByTestId('chunk-preview-dialog')
-      .getByRole('button', { name: '关闭' })
-      .click();
+    await page.getByTestId('chunk-reader-close-btn').click();
+
+    // 6. When `E2E_MOCK_MODEL` is configured (CI + local E2E harness), verify multi-select
+    //    `generate-batch` (`flashcards` + `quiz`) -> live concurrent tracking -> gallery + `.zip` download!
+    if (mockModel) {
+      await page.getByTestId('notebook-model-input').fill(mockModel);
+      await page.getByTestId('notebook-cost-limit-input').fill('4.00');
+      await page.getByTestId('batch-select-flashcards').check();
+      await page.getByTestId('batch-select-quiz').check();
+      await page.getByTestId('launch-batch-selected-btn').click();
+
+      await expect(page.getByTestId('notebook-live-run')).toBeVisible();
+      await expect(page.locator('.nb-artifact-block')).toHaveCount(2, { timeout: 20_000 });
+
+      const zipDownloadPromise = page.waitForEvent('download');
+      await page.getByTestId('download-notebook-zip-btn').click();
+      const zipDownload = await zipDownloadPromise;
+      expect(zipDownload.suggestedFilename()).toMatch(
+        /^yanshi-notebook-[0-9a-f]{8}-artifacts\.zip$/i,
+      );
+    }
 
     // 5. Export portable `.json` bundle & re-import into a second notebook
     const downloadPromise = page.waitForEvent('download');

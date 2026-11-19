@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, formatApiError, parseSseChunk, resolveApiUrl } from '../lib/api';
-import { formatTime, runFromEnvelope } from '../lib/helpers';
+import { formatTime, isTerminalRun, runFromEnvelope } from '../lib/helpers';
 import { navigateTo } from '../lib/router';
 import {
   readStorage,
@@ -1052,34 +1052,53 @@ export function NotebookWorkspacePage({
             }
           }
 
-          if (!abortCtrl.signal.aborted) {
+          // `workflow.completed` closes the SSE stream slightly before `flow_execute` finishes
+          // registering artifacts in `notebook_artifacts` and flipping `runs.status` to terminal
+          // (`runs.rs` Y1.3 invariant). Poll `GET /v1/runs/:id` briefly until terminal so the
+          // subsequent gallery refresh always observes the newly attached deliverables.
+          for (let attempt = 0; attempt < 80 && !abortCtrl.signal.aborted; attempt += 1) {
             const runRes = await apiFetch(
               `/v1/runs/${encodeURIComponent(runId)}`,
               apiToken,
               { signal: abortCtrl.signal },
               tenantId,
             );
-            if (runRes.ok) {
-              const runEnv = await parseJsonResponse(
-                RunEnvelopeSchema,
-                runRes,
-                'GET generator run',
-              );
-              const rec = runFromEnvelope(runEnv);
-              setTrackedGenRuns((prev) =>
-                prev.map((item) =>
-                  item.runId === runId ? { ...item, status: rec.status } : item,
-                ),
-              );
+            if (!runRes.ok) {
+              break;
+            }
+            const runEnv = await parseJsonResponse(
+              RunEnvelopeSchema,
+              runRes,
+              'GET generator run',
+            );
+            const rec = runFromEnvelope(runEnv);
+            setTrackedGenRuns((prev) =>
+              prev.map((item) =>
+                item.runId === runId ? { ...item, status: rec.status } : item,
+              ),
+            );
+            if (isTerminalRun(rec)) {
               if (rec.status === 'failed' && rec.error) {
                 setErrorBanner(`生成任务 (${kind}) 失败：${rec.error}`);
               } else if (rec.status === 'succeeded') {
                 setNoticeBanner(`「${kind}」成品已生成并自动挂载至右侧画廊。`);
               }
+              break;
             }
-            if (notebookId) {
-              await loadNotebookDetailAndArtifacts(notebookId);
-            }
+            await new Promise<void>((resolve) => {
+              const t = window.setTimeout(resolve, 100);
+              abortCtrl.signal.addEventListener(
+                'abort',
+                () => {
+                  window.clearTimeout(t);
+                  resolve();
+                },
+                { once: true },
+              );
+            });
+          }
+          if (!abortCtrl.signal.aborted && notebookId) {
+            await loadNotebookDetailAndArtifacts(notebookId);
           }
         } catch (err) {
           if (abortCtrl.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {

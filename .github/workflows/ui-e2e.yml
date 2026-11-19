@@ -3,8 +3,9 @@ name: UI E2E (Playwright)
 # Browser-based smoke against a real yanshi-server + Postgres.
 # Exercises the yanshi-ui SPA flows that don't have unit-test
 # coverage (form submission, redirect routing, localStorage
-# persistence). The two existing specs in `yanshi-ui/e2e/` are
-# the canonical surface.
+# persistence, notebook chunk reader, batch deliverables, and zip export).
+# All three specs in `yanshi-ui/e2e/` (`runs-new`, `harness-sessions`,
+# `notebooks`) are the canonical surface.
 #
 # Pattern mirrors `llm-live.yml`: `workflow_dispatch` + nightly
 # `schedule`, and **not** wired into `quality.yml::release-gate`.
@@ -65,6 +66,9 @@ jobs:
       # The gateway rejects every host path unless the operator allows
       # a root; the harness specs submit `workspace_root: /tmp`.
       YANSHI_GATEWAY_PATH_ROOTS: /tmp
+      YANSHI_MODELS_CONFIG: /tmp/yanshi-ui-e2e-models.yml
+      YANSHI_MOCK_RESPONSE: '{"title":"E2E Tidal Study","items":[{"front":"What drives Severn Bore?","back":"Equinoctial spring tides.","question":"What drives Severn Bore?","options":["Wind","Equinoctial spring tides","Glaciers"],"answer":1,"explanation":"Equinoctial spring tides."}]}'
+      E2E_MOCK_MODEL: e2e-mock
       BASE_URL: http://127.0.0.1:8080
 
     steps:
@@ -116,6 +120,16 @@ jobs:
 
       - name: Boot yanshi-server in background
         run: |
+          cat > /tmp/yanshi-ui-e2e-models.yml <<'EOF'
+          models:
+            e2e-mock:
+              vendor: mock
+              type: text
+              model_id: e2e-mock
+          providers:
+            mock:
+              api_key_env: MOCK_API_KEY
+          EOF
           # Run migrations (the server does this on first start
           # via sqlx::migrate!() so this step is just for the
           # benefit of explicit-fail-on-bad-migration diagnostics

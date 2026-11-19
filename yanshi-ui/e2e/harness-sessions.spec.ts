@@ -74,6 +74,7 @@ test.describe('P-H.5 slice 3 — /ui/harness/sessions', () => {
     }
     const tenant = `e2e-list-${Date.now()}`;
     await page.getByTestId('harness-new-tenant').fill(tenant);
+    await page.getByTestId('harness-new-workspace').fill('/tmp');
     await page.getByTestId('harness-new-prompt').fill('list test');
     await page.getByTestId('harness-new-submit').click();
     // The detail-page URL may carry a `?tenant=<name>` query param
