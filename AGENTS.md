@@ -177,11 +177,11 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA / AB
-closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
-creative/deliberative studios, Notebook `source_ids` scoping & grounded
-`POST /v1/notebooks/{id}/ask`, persisted `Deliverable` citations &
-`.docx`/`.csv`/`.tsv`/`.json` source ingestion, 1:1 Tauri desktop local engine
-parity, first-class `yanshi notebook` CLI, gateway-safe inline `multi_agent`,
-`illustration` node, and pure-Rust native OOXML `.pptx` / `16:9` Typst `.pdf`
-slide rendering).
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA / AB /
+AC closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
+creative/deliberative studios, Notebook `PATCH` rename / artifact detach /
+`source_ids` scoping & multi-turn grounded `POST /v1/notebooks/{id}/ask`,
+persisted `Deliverable` citations & `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`
+source ingestion, 1:1 Tauri desktop local engine parity, first-class
+`yanshi notebook` CLI, gateway-safe inline `multi_agent`, `illustration` node,
+and pure-Rust native OOXML `.pptx` / `16:9` Typst `.pdf` slide rendering).

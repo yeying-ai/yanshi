@@ -297,17 +297,19 @@ is no serialised index format and no Qdrant requirement.
 opt-in; its re-evaluate condition is in §8.
 
 Ingestion: `POST /v1/notebooks/{id}/sources` fetches `url` sources through the
-gateway's SSRF filter, decodes uploaded `file` documents (`.txt`, `.md`, `.html`,
-`.pdf`, `.docx`, `.csv`, `.tsv`, `.json`), accepts pasted `text`, or transcribes
-uploaded `recording` audio via `asr`, chunks passages into `source_chunks`, and
+gateway's SSRF filter (including extensionless OOXML ZIP sniffing), decodes
+uploaded `file` documents (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.xlsx`,
+`.pptx`, `.csv`, `.tsv`, `.json`), accepts pasted `text`, or transcribes uploaded
+`recording` audio via `asr`, chunks passages into `source_chunks`, and
 invalidates `NotebookIndexCache`.
 
 Generation & grounded Q&A against a notebook:
-- `POST /v1/notebooks/{id}/ask` `{ question, source_ids?, model?, top_k? }`
-  answers questions strictly from ready chunks (optionally scoped to
-  `source_ids`), enforcing `json_schema` structured citations and verifying every
-  returned `chunk_id` against real `source_chunks` rows (populating `source_id`
-  from server truth and dropping hallucinated IDs).
+- `POST /v1/notebooks/{id}/ask` `{ question, history?, source_ids?, model?, top_k? }`
+  answers single-turn or multi-turn follow-up questions strictly from ready
+  chunks (optionally scoped to `source_ids`), combining recent `history` turns
+  into the BM25 retrieval hint, enforcing `json_schema` structured citations, and
+  verifying every returned `chunk_id` against real `source_chunks` rows
+  (populating `source_id` from server truth and dropping hallucinated IDs).
 - `POST /v1/notebooks/{id}/generate` `{ kind, params, source_ids?, model? }`
   selects one of the 12 source-grounded templates, ranks ready chunks (within
   `source_ids` when supplied) by BM25 relevance against `focus` / `topic` with
@@ -315,13 +317,15 @@ Generation & grounded Q&A against a notebook:
   applies Y2.3's `cost_limit_usd`, registers artifacts (§4.2) and links them
   through `notebook_artifacts` together with their `Deliverable` JSON.
 - `GET /v1/notebooks/{id}/search?q=&top_k=&source_ids=` runs BM25 passage search
-  (scoped to `source_ids` when specified), `GET /v1/notebooks/{id}/artifacts`
-  lists attached deliverables with citations, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
+  (scoped to `source_ids` when specified), `PATCH /v1/notebooks/{id}` `{ title }`
+  renames an owned notebook, `GET /v1/notebooks/{id}/artifacts` lists attached
+  deliverables with citations, `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`
+  detaches an individual deliverable link, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
   resolves cited passages, and `DELETE /v1/notebooks/{id}` /
   `DELETE /v1/notebooks/{id}/sources/{source_id}` remove notebooks or individual
   sources while immediately invalidating `NotebookIndexCache`.
 - The Tauri desktop local engine (`yanshi-ui/src-tauri/src/local_notebooks.rs`)
-  mirrors this entire 11-route contract offline on local JSON bundles, and
+  mirrors this entire 13-route contract offline on local JSON bundles, and
   `yanshi notebook` exposes it as a first-class CLI command suite.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)

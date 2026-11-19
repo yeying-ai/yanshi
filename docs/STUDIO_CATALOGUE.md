@@ -122,10 +122,10 @@ yanshi skill run examples/applications/content-studio \
   --input want=report,mindmap \
   --output-dir out/studio
 
-# 5. Notebook CLI (ingest rich sources -> grounded Q&A -> downloadable deliverable)
+# 5. Notebook CLI (ingest rich Office/tabular sources -> multi-turn Q&A -> downloadable deliverable)
 yanshi notebook create "Oceanography Study"
-yanshi notebook add-source <notebook_id> --file metrics.csv --wait
-yanshi notebook ask <notebook_id> "What is the peak range of Bay of Fundy?"
+yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
+yanshi notebook ask <notebook_id> "What is the peak range of Bay of Fundy?" --history-file chat.json
 yanshi notebook generate <notebook_id> data_table --output-dir out/table
 ```
 

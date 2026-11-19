@@ -608,7 +608,7 @@ Named after the artificer Yanshi (偃师) in *Liezi · Tangwen* (《列子·汤�
 ## Core Documentation
 
 - [5-Minute Trial Guide]({SITE_URL}/docs/TRIAL_GUIDE.html)
-- [Content Studio & 18 Generator Catalogue]({SITE_URL}/docs/STUDIO_CATALOGUE.html)
+- [Content Studio & 19 Generator Catalogue]({SITE_URL}/docs/STUDIO_CATALOGUE.html)
 - [Five-Layer Architecture & Four Execution Paradigms]({SITE_URL}/docs/ARCHITECTURE.html)
 - [Workflow YAML Schema Reference]({SITE_URL}/docs/WORKFLOW_SCHEMA.html)
 - [Agent Runtime & HITL (`ask_user`)]({SITE_URL}/docs/AGENT_RUNTIME.html)
@@ -616,7 +616,7 @@ Named after the artificer Yanshi (偃师) in *Liezi · Tangwen* (《列子·汤�
 - [Web Studio & Tauri Desktop App (`Yanshi Studio`)]({SITE_URL}/docs/WEB_UI.html)
 - [Security Profiles & OS Sandboxing]({SITE_URL}/docs/SECURITY_PROFILES.html)
 
-## 18 Built-in Content Studio YAML Workflows
+## 19 Built-in Content Studio YAML Workflows
 
 {wf_bullets}
 """

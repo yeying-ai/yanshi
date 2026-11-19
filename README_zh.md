@@ -5,13 +5,13 @@
 [![Website](https://img.shields.io/badge/website-yanshi.dev-0f6e66.svg)](https://yanshi.dev/)
 [![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yanshi.dev/docs/)
 
-**[English](README.md)** | **简体中文** · **[产品官网](https://yanshi.dev/)** · **[在线文档手册](https://yanshi.dev/docs/)** · **[18 套 Studio 模板图谱](docs/STUDIO_CATALOGUE.md)** · **[10 分钟试用手册](docs/TRIAL_GUIDE.md)**
+**[English](README.md)** | **简体中文** · **[产品官网](https://yanshi.dev/)** · **[在线文档手册](https://yanshi.dev/docs/)** · **[19 套 Studio 模板图谱](docs/STUDIO_CATALOGUE.md)** · **[10 分钟试用手册](docs/TRIAL_GUIDE.md)**
 
 > **基于 Rust 构建的多模态内容生产与工作流/智能体运行时：原始素材输入（一句话想法、网页 URL、GitHub 代码库、学术 PDF 或音视频录音），成品交付物直接输出（原生可编辑 OOXML `.pptx` 演示文稿、`1080p` 逐页配音讲解视频、`16:9` Typst `.pdf`、Excel 实验对比表、双人深度播客、矢量信息图与自校验工程架构图/电路图）——底层统一承载于确定性 DAG 工作流、原生智能体循环、Skills、MCP 工具、RAG、全链路追踪与断点续跑机制之上。**
 
 **名字由来。** 《列子·汤问》记载能工巧匠**偃师**向周穆王献上能歌善舞的机关人；将其拆解开来，不过是革、木、胶、漆等构件按精密结构拼接而成，重新合拢后又“活动如初”。这是中国古籍中关于自主智能体最早的工程记载，也是本项目的核心理念：**以显式、可拆解、可审计的结构契约（`Flow` 有向无环图、`Tool` 契约、`Skill` 能力包）组装智能体与多模态流水线，让每一次运行都可追踪、可重放、可重组。**
 
-**产品定位（Content Studio Y0–Y10 已全面收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **18 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
+**产品定位（Content Studio Y0–Y10、Z、AA、AB 与 AC 已收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **19 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）、多源研究笔记本工作台（`/v1/notebooks/*` 与 `yanshi notebook` CLI）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
 
 - **一等公民媒体与交付物契约**：`FlowValue::File` 在节点间类型安全地传递多媒体与文档产物，自动生成 SHA-256 校验清单，支持 CLI `--output-dir` 落盘导出与网关 `/v1/runs/{id}/artifacts` 流式下载。
 - **纯 Rust 原生可编辑幻灯片与出版级排版**：内置纯 Rust OOXML `pptx_writer`，直接输出 PowerPoint / Keynote / WPS 原生可编辑形状、`<a:tbl>` 表格、`<p:cxnSp>` 连接线与演讲者备注（绝非整页截图贴图），同时输出 `16:9` 宽屏 Typst `.pdf` 与离线交互 `.html`。
@@ -22,9 +22,9 @@
 
 ---
 
-## 🎬 Content Studio 内置生成器模板（18 套开箱即用）
+## 🎬 Content Studio 内置生成器模板（19 套开箱即用）
 
-[`examples/generators/`](examples/generators/) 下的全部 18 套工作流均通过 `yanshi workflow validate --strict` 严格校验，可在 CLI、HTTP 网关（`/v1/runs`）、Web Studio（`/ui/studio` 与 `/ui/app`）以及 `Yanshi Studio` 桌面端一致运行。也可在 [产品官网 `yanshi.dev`](https://yanshi.dev/#catalogue) 点击任意模板卡片直接在线检视完整 YAML 源码与节点拓扑。
+[`examples/generators/`](examples/generators/) 下的全部 19 套工作流均通过 `yanshi workflow validate --strict` 严格校验，可在 CLI、HTTP 网关（`/v1/runs`）、Web Studio（`/ui/notebooks`、`/ui/studio` 与 `/ui/app`）以及 `Yanshi Studio` 桌面端一致运行。也可在 [产品官网 `yanshi.dev`](https://yanshi.dev/#catalogue) 点击任意模板卡片直接在线检视完整 YAML 源码与节点拓扑。
 
 ### 1. 主题演讲 PPT、配音视频与双人播客
 
@@ -50,6 +50,7 @@
 | 模板文件 | 核心输入 | 交付产物 | 核心亮点 |
 | --- | --- | --- | --- |
 | [`report.yml`](examples/generators/report.yml) | `url` / `text` / `chunks`, `focus`, `sections`, `pdf` | `.pdf`, `.html`, `.md` | 按大纲分节 `map` 并行撰写，每处论据绑定原文分块逐字引文脚注并经 Typst 排版输出 PDF |
+| [`data_table.yml`](examples/generators/data_table.yml) | `url` / `text` / `chunks`, `focus`, `max_rows` | `.xlsx`, `.csv`, `.html` | 从多源文档抽取对比维度与数值指标，附带逐行 `chunk_id` 引用并同时导出 Excel、CSV 与预览表 |
 | [`infographic.yml`](examples/generators/infographic.yml) | `url` / `text` / `chunks`, `focus` | `.svg`, `.png` | 提炼核心指标与对比洞察，经由确定性 Tera SVG 海报引擎渲染高清矢量图与高分 PNG |
 | [`mindmap.yml`](examples/generators/mindmap.yml) | `url` / `text` / `chunks`, `depth` | `.svg`, `.png`, `.html` | 层次化概念树抽取，同时生成高清矢量 SVG/PNG 与可折叠离线交互 markmap HTML |
 | [`circuit_diagram.yml`](examples/generators/circuit_diagram.yml) | `description`, `text` | `.svg`, `.png` | 先抽取类型化元器件清单校验连接拓扑，再调用沙箱内 `circuitikz` + `lualatex` 编译精准电路原理图 |
@@ -98,7 +99,13 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
   --input topic "Rust 零拷贝序列化设计" \
   --output-dir out/video
 
-# 5. 启动 Web Studio (/ui/studio 与 /ui/app) 或一键构建安装 macOS 桌面端 Yanshi Studio.app
+# 5. 多源笔记本 CLI（支持 .pdf/.docx/.xlsx/.pptx/.csv 摄取、多轮源接地追问与成品下载）
+yanshi notebook create "海洋动力学调研"
+yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
+yanshi notebook ask <notebook_id> "对比主要强潮河口的峰值潮差" --history-file chat.json
+yanshi notebook generate <notebook_id> data_table --output-dir out/table
+
+# 6. 启动 Web Studio (/ui/notebooks、/ui/studio 与 /ui/app) 或一键构建安装 macOS 桌面端 Yanshi Studio.app
 cargo run -p yanshi-server
 ./scripts/install_desktop.sh --open
 ```
@@ -113,9 +120,9 @@ Yanshi 包含 25 个 Rust Crate 与嵌入式 Web/Tauri 桌面端，围绕 **L0 �
 | --- | --- | --- |
 | **L0 契约内核** | 窄腰抽象层 —— 仅包含共享数据类型与 Trait，零运行时逻辑 | `yanshi-value`（`FlowValue`）、`yanshi-graph`（`Flow` IR、`AsyncNode`、`expr`、`YanshiError`）、`yanshi-store-spi`（`MemoryStore`、`KnowledgeBackend`）、`yanshi-agent-spi`（`AgentRuntime`、`Capability`、HITL 中断/恢复）、`yanshi-async-util`（重试、超时、`race_with_limits`）、`yanshi-tool`（`Tool`、`ToolRegistry`、`ToolPolicy`、`SecurityProfile`、`SandboxBackend`） |
 | **L1 执行核心** | 驱动 L0 `Flow` IR 的确定性 DAG 执行引擎 | `yanshi-core`（依赖就绪并发调度器、`FlowExt::run()`、Checkpoint 状态快照、恢复计划、`ResourceLimits`、健康检查与事件流） |
-| **L2 能力适配层** | 工具层与 AI 能力节点、6 大模型供应商、RAG、MCP、沙箱实现 | `yanshi-nodes`（确定性 Studio 渲染器与素材摄取节点）、`yanshi-nodes-ai`（`llm`、`figure`、`illustration`、`asr`、`tts`、图像/视频、`mcp`、`rag`）、`yanshi-llm`（OpenAI、Anthropic、Google、Moonshot、StepFun、Mock）、`yanshi-tools`（内置工具 + OS 沙箱后端）、`yanshi-tools-ai`、`yanshi-mcp`、`yanshi-rag`、`yanshi-memory` |
+| **L2 能力适配层** | 工具层与 AI 能力节点、9 大模型厂商 + Mock、RAG、MCP、沙箱实现 | `yanshi-nodes`（确定性 Studio 渲染器与素材摄取节点）、`yanshi-nodes-ai`（`llm`、`figure`、`illustration`、`asr`、`tts`、图像/视频、`mcp`、`rag`）、`yanshi-llm`（OpenAI、Anthropic、Google、Moonshot、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax、Mock）、`yanshi-tools`（内置工具 + OS 沙箱后端）、`yanshi-tools-ai`、`yanshi-mcp`、`yanshi-rag`、`yanshi-memory` |
 | **L3 智能体与编排** | 智能体运行时、Skills 能力包、Harness 治理壳、YAML 装配与 CLI | `yanshi-agents`（ReAct、Plan-Execute、Reflection、Handoff/Blackboard/Debate 多智能体监督器、`dynamic` 动态工作流编译）、`yanshi-skills`、`yanshi-harness`（钩子、审批、审计、后台任务）、`yanshi-config`、`yanshi-cli` |
-| **L4 运维与产品化** | 可观测性、HTTP 网关、分布式 Worker、Web 与原生桌面端 | `yanshi-tracing`（JSONL 追踪、TUI 回放、W3C `traceparent`、OTLP/HTTP 导出）、`yanshi-server`（Axum API + SSE）、`yanshi-db`（Postgres 9 表存储）、`yanshi-worker` + `yanshi-worker-proto`（gRPC 分布式节点）、`yanshi-ui`（React/Vite + Tauri v2）、`crates/gateway`（Cloudflare Pingora TLS/HTTP2 反向代理） |
+| **L4 运维与产品化** | 可观测性、HTTP 网关、分布式 Worker、Web 与原生桌面端 | `yanshi-tracing`（JSONL 追踪、TUI 回放、W3C `traceparent`、OTLP/HTTP 导出）、`yanshi-server`（Axum API + SSE + Notebooks）、`yanshi-db`（Postgres 17 表 / 13 仓储存储）、`yanshi-worker` + `yanshi-worker-proto`（gRPC 分布式节点）、`yanshi-ui`（React/Vite + Tauri v2）、`crates/gateway`（Cloudflare Pingora TLS/HTTP2 反向代理） |
 
 ---
 

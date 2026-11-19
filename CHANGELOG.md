@@ -130,6 +130,14 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Production `ExplicitOrigins` CORS preflight for `PATCH` and `X-Yanshi-Tenant`, plus `rustdoc` & `tokio-retry` cleanup (`5b167f3`).**
+  `cors_layer` under `CorsMode::ExplicitOrigins` (`SecurityProfile::Production`
+  with `YANSHI_CORS_ALLOWED_ORIGINS`) now permits `Method::PATCH` and
+  `x-yanshi-tenant` alongside `Authorization` and `Content-Type` so cross-origin
+  Studio clients setting `X-Yanshi-Tenant` succeed on preflight. Fixed a private
+  intra-doc link in `yanshi_server::skills::run_skill` (`RUSTDOCFLAGS="-D warnings"`)
+  and replaced the deprecated `tokio-retry` crate in `yanshi-rag` with an inline
+  exponential backoff loop.
 - **Tauri desktop local engine 1:1 Notebook/Studio parity and root-cause error extraction (`b35344b`).**
   `yanshi-ui/src-tauri/src/local_notebooks.rs` now matches `yanshi-server` 1:1
   across `DELETE /v1/notebooks/{id}`, `DELETE /v1/notebooks/{id}/sources/{source_id}`,
@@ -398,6 +406,20 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Notebook rename (`PATCH`), artifact detach (`DELETE`), multi-turn grounded `/ask` (`history`), and pure-Rust `.xlsx`/`.pptx` OOXML ingestion (`5b167f3`, `31bbb07`, `b497099`, `dde67e5`).**
+  Added `NotebookRepo::rename` (`PATCH /v1/notebooks/{id}`), `NotebookRepo::detach_artifact`
+  (`DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`), and bounded multi-turn
+  `history` (`<= 8` turns) on `POST /v1/notebooks/{id}/ask` (combining recent
+  turns into BM25 chunk selection so pronoun/coreference follow-ups retrieve the
+  relevant passages while retaining strict server-side `chunk_id` verification).
+  Extended notebook source ingestion with pure-Rust `.xlsx` (SpreadsheetML shared
+  strings, sheet titles, and header-labeled rows) and `.pptx` (PresentationML
+  numerically ordered slides, `<a:tbl>` tables, and `notesSlides` speaker notes)
+  guarded by the 16 MiB XML ceiling, plus extensionless OOXML ZIP sniffing on
+  URLs. Mirrored all routes and formats 1:1 in Tauri `local_notebooks.rs`,
+  `yanshi notebook` CLI (`rename`, `remove-artifact`, `ask --history-file`), and
+  `/ui/notebooks` (multi-turn Q&A thread, inline rename, artifact removal, and
+  Playwright `e2e/notebooks.spec.ts`).
 - **Source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`), `source_ids` scoping, and first-class `yanshi notebook` CLI (`9604519`, `09fb95f`, `53a77f5`).**
   Added `POST /v1/notebooks/{id}/ask` for cited Q&A over a notebook's ready
   sources with server-side `chunk_id` verification (filling `source_id` from DB

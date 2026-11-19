@@ -112,7 +112,7 @@
 
   function highlightBash(code) {
     const bashRe =
-      /(#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--[a-zA-Z0-9_-]+|\b(?:yanshi|cargo)\b|\b(?:workflow|skill|run|resume|validate|install|trace|replay)\b|(?:https?:\/\/|examples\/|\.\/scripts\/)[^\s\\]+)/g;
+      /(#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--[a-zA-Z0-9_-]+|\b(?:yanshi|cargo)\b|\b(?:workflow|notebook|skill|run|resume|validate|install|trace|replay)\b|(?:https?:\/\/|examples\/|\.\/scripts\/)[^\s\\]+)/g;
     let out = "";
     let last = 0;
     let match;

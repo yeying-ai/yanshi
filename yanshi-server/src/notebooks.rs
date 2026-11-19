@@ -787,7 +787,7 @@ fn docx_text(bytes: &[u8]) -> Result<String, String> {
 }
 
 /// Pure-Rust OOXML `.pptx` slide & speaker-notes extraction (`ppt/slides/slide*.xml`
-/// + optional `ppt/notesSlides/notesSlide*.xml`), ordered numerically by slide
+/// and optional `ppt/notesSlides/notesSlide*.xml`), ordered numerically by slide
 /// index and preserving paragraph breaks and `<a:tbl>` rows.
 fn pptx_text(bytes: &[u8]) -> Result<String, String> {
   let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))

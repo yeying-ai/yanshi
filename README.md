@@ -5,13 +5,13 @@
 [![Website](https://img.shields.io/badge/website-yanshi.dev-0f6e66.svg)](https://yanshi.dev/en/)
 [![Documentation](https://img.shields.io/badge/docs-manual-green.svg)](https://yanshi.dev/docs/)
 
-**English** | **[简体中文](README_zh.md)** · **[Product Website](https://yanshi.dev/en/)** · **[Online Manual](https://yanshi.dev/docs/)** · **[18 Studio Workflows](docs/STUDIO_CATALOGUE.md)** · **[Quick Trial Guide](docs/TRIAL_GUIDE.md)**
+**English** | **[简体中文](README_zh.md)** · **[Product Website](https://yanshi.dev/en/)** · **[Online Manual](https://yanshi.dev/docs/)** · **[19 Studio Workflows](docs/STUDIO_CATALOGUE.md)** · **[Quick Trial Guide](docs/TRIAL_GUIDE.md)**
 
 > **A multimodal content-production runtime in Rust: sources in (an idea, a URL, a repository, academic PDFs, or audio/video recordings), finished deliverables out (editable `.pptx` slides, narrated `1080p` videos, `16:9` Typst `.pdf` decks, Excel tables, podcasts, infographics, and validated architecture/circuit diagrams) — built on deterministic DAG workflows, agent-native loops, Skills, MCP tools, RAG, tracing, and checkpointed recovery.**
 
 **About the name.** In the *Liezi* (《列子·汤问》), the artificer Yanshi (偃师) presents King Mu of Zhou with a figure that sings, dances, and acts on its own — and, taken apart, turns out to be nothing but leather, wood, glue, and lacquer assembled by explicit structure, which "works again as before" once put back together. It is the oldest Chinese account of a built autonomous agent, and the principle behind this project: autonomous capabilities assembled from explicit, inspectable contracts (`Flow` graphs, `Tool` traits, `Skill` manifests) that can be traced, replayed, and recomposed.
 
-**Direction (Content Studio Y0–Y10 closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with an 18-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)) and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows and multi-agent supervisors execute deterministically:
+**Direction (Content Studio Y0–Y10, Z, AA, AB & AC closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with a 19-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)), a multi-source Notebook workspace (`/v1/notebooks/*` + `yanshi notebook` CLI), and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows and multi-agent supervisors execute deterministically:
 
 - **First-class media & artifacts**: `FlowValue::File` carries typed files across nodes with SHA-256 manifests, CLI `--output-dir` export, and streaming gateway downloads (`/v1/runs/{id}/artifacts`).
 - **Native editable slides & typesetting**: Pure-Rust OOXML `pptx_writer` emits genuinely editable PowerPoint shapes, `<a:tbl>` tables, `<p:cxnSp>` connectors, and speaker notes (not flat raster screenshots), alongside `16:9` widescreen Typst `.pdf` and interactive `.html` decks.
@@ -22,7 +22,7 @@ For the full design rationale, see [`docs/RFC_CONTENT_STUDIO.md`](docs/RFC_CONTE
 
 ---
 
-## 🎬 Content Studio Catalogue (18 Built-in Generators)
+## 🎬 Content Studio Catalogue (19 Built-in Generators)
 
 Every workflow under [`examples/generators/`](examples/generators/) passes `yanshi workflow validate --strict` and runs identically across the CLI, HTTP gateway (`/v1/runs`), Web Studio (`/ui/studio` & `/ui/app`), and `Yanshi Studio` desktop app.
 
@@ -50,6 +50,7 @@ Every workflow under [`examples/generators/`](examples/generators/) passes `yans
 | Workflow | Inputs | Deliverables | Highlights |
 | --- | --- | --- | --- |
 | [`report.yml`](examples/generators/report.yml) | `url` / `text` / `chunks`, `focus`, `sections`, `pdf` | `.pdf`, `.html`, `.md` | Parallel `map` section drafting where every claim carries verbatim chunk-level footnote citations |
+| [`data_table.yml`](examples/generators/data_table.yml) | `url` / `text` / `chunks`, `focus`, `max_rows` | `.xlsx`, `.csv`, `.html` | Schema-validated entity & metric table extraction with per-row `chunk_id` citations rendered to Excel, CSV & HTML |
 | [`infographic.yml`](examples/generators/infographic.yml) | `url` / `text` / `chunks`, `focus` | `.svg`, `.png` | Deterministic Tera SVG poster engine driven by schema-validated headline metrics and comparisons |
 | [`mindmap.yml`](examples/generators/mindmap.yml) | `url` / `text` / `chunks`, `depth` | `.svg`, `.png`, `.html` | Hierarchical concept tree rendered to crisp vector SVG/PNG and interactive offline markmap HTML |
 | [`circuit_diagram.yml`](examples/generators/circuit_diagram.yml) | `description`, `text` | `.svg`, `.png` | Extracts a typed parts manifest first, verifies component topology in `circuitikz`, then compiles via `lualatex` |
@@ -98,7 +99,13 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
   --input topic "Zero-Copy Serialization in Rust" \
   --output-dir out/video
 
-# 5. Launch Web Studio (/ui/studio & /ui/app) or build & install Yanshi Studio.app (macOS)
+# 5. Multi-Source Notebook CLI (.pdf/.docx/.xlsx/.pptx/.csv + multi-turn cited Q&A + deliverables)
+yanshi notebook create "Oceanography Research"
+yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
+yanshi notebook ask <notebook_id> "Compare peak macrotidal ranges" --history-file chat.json
+yanshi notebook generate <notebook_id> data_table --output-dir out/table
+
+# 6. Launch Web Studio (/ui/notebooks, /ui/studio, /ui/app) or build & install Yanshi Studio.app (macOS)
 cargo run -p yanshi-server
 ./scripts/install_desktop.sh --open
 ```
@@ -113,9 +120,9 @@ Yanshi's 25-crate Rust workspace + Web/Tauri UI is organized into five strict la
 | --- | --- | --- |
 | **L0 Contract Kernel** | Narrow waist — shared types & traits only, zero runtime logic | `yanshi-value` (`FlowValue`), `yanshi-graph` (`Flow` IR, `AsyncNode`, `expr`, `YanshiError`), `yanshi-store-spi` (`MemoryStore`, `KnowledgeBackend`), `yanshi-agent-spi` (`AgentRuntime`, `Capability`, HITL interrupt/resume), `yanshi-async-util` (retry, timeout, `race_with_limits`), `yanshi-tool` (`Tool`, `ToolRegistry`, `ToolPolicy`, `SecurityProfile`, `SandboxBackend`) |
 | **L1 Execution Core** | Deterministic DAG executor for the L0 `Flow` IR | `yanshi-core` (dependency-ready concurrent scheduler, `FlowExt::run()`, checkpoints, resume plans, `ResourceLimits`, health, events) |
-| **L2 Capability Adapters** | Tool-tier & capability-backed nodes, 6 LLM providers, RAG, MCP | `yanshi-nodes` (deterministic Studio renderers & source ingestion), `yanshi-nodes-ai` (`llm`, `figure`, `illustration`, `asr`, `tts`, image/video, `mcp`, `rag`), `yanshi-llm` (OpenAI, Anthropic, Google, Moonshot, StepFun, Mock), `yanshi-tools` (builtin tools + OS sandboxes), `yanshi-tools-ai`, `yanshi-mcp`, `yanshi-rag`, `yanshi-memory` |
+| **L2 Capability Adapters** | Tool-tier & capability-backed nodes, 9 LLM vendors + Mock, RAG, MCP | `yanshi-nodes` (deterministic Studio renderers & source ingestion), `yanshi-nodes-ai` (`llm`, `figure`, `illustration`, `asr`, `tts`, image/video, `mcp`, `rag`), `yanshi-llm` (OpenAI, Anthropic, Google, Moonshot, StepFun, GLM·Zhipu, DashScope·Alibaba, DeepSeek, MiniMax, Mock), `yanshi-tools` (builtin tools + OS sandboxes), `yanshi-tools-ai`, `yanshi-mcp`, `yanshi-rag`, `yanshi-memory` |
 | **L3 Agent & Orchestration** | Agent loops, Skills, Harness governance, YAML config & CLI | `yanshi-agents` (ReAct, Plan-Execute, Reflection, Handoff/Blackboard/Debate supervisors, `dynamic` plan-to-Flow), `yanshi-skills`, `yanshi-harness` (hooks, approval, audit, background tasks), `yanshi-config`, `yanshi-cli` |
-| **L4 Operations & Product** | Observability, HTTP gateway, distributed workers, Web & Desktop UI | `yanshi-tracing` (JSONL, replay TUI, W3C `traceparent`, OTLP/HTTP), `yanshi-server` (Axum API + SSE), `yanshi-db` (Postgres 9-repo store), `yanshi-worker` + `yanshi-worker-proto` (gRPC), `yanshi-ui` (React/Vite + Tauri v2), `crates/gateway` (Cloudflare Pingora TLS/HTTP2 proxy) |
+| **L4 Operations & Product** | Observability, HTTP gateway, distributed workers, Web & Desktop UI | `yanshi-tracing` (JSONL, replay TUI, W3C `traceparent`, OTLP/HTTP), `yanshi-server` (Axum API + SSE + Notebooks), `yanshi-db` (Postgres 17-table / 13-repo store), `yanshi-worker` + `yanshi-worker-proto` (gRPC), `yanshi-ui` (React/Vite + Tauri v2), `crates/gateway` (Cloudflare Pingora TLS/HTTP2 proxy) |
 
 ---
 
