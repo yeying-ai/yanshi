@@ -107,12 +107,14 @@ jobs:
           version: "27.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install UI deps & build embedded SPA bundle
+        working-directory: yanshi-ui
+        run: |
+          npm ci
+          npm run build
+
       - name: Build yanshi-server (release)
         run: cargo build --release -p yanshi-server --bin yanshi-server
-
-      - name: Install UI deps
-        working-directory: yanshi-ui
-        run: npm install
 
       - name: Install Playwright + Chromium
         working-directory: yanshi-ui

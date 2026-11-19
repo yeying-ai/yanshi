@@ -277,7 +277,7 @@ dir. ffmpeg is never linked in.
 
 ## 6. Decision: notebook entity and index persistence
 
-Migration `0013_notebooks.sql` – `0015_notebook_artifact_deliverables.sql`:
+Migration `0013_notebooks.sql` – `0016_notebook_messages.sql`:
 
 | Table | Columns (beyond `id`, `tenant_id`, timestamps) |
 |---|---|
@@ -285,6 +285,7 @@ Migration `0013_notebooks.sql` – `0015_notebook_artifact_deliverables.sql`:
 | `sources` | `notebook_id`, `kind` (`url` / `file` / `text` / `recording`), `status`, `sha256`, `origin` / `uri` (URL or original filename), `error` |
 | `source_chunks` | `source_id`, `notebook_id`, `chunk_id`, `ordinal`, `content`, `metadata JSONB` |
 | `notebook_artifacts` | `notebook_id`, `artifact_id`, `kind`, `deliverable JSONB` |
+| `notebook_messages` | `notebook_id`, `question`, `answer`, `model`, `citations JSONB`, `used_chunk_count` |
 
 **Index persistence: persist the chunks, not the index.** `source_chunks`
 must exist anyway — a citation's `chunk_id` has to resolve to text after the
@@ -297,7 +298,9 @@ is no serialised index format and no Qdrant requirement.
 opt-in; its re-evaluate condition is in §8.
 
 Ingestion: `POST /v1/notebooks/{id}/sources` fetches `url` sources through the
-gateway's SSRF filter (including extensionless OOXML ZIP sniffing), decodes
+gateway's SSRF filter (including extensionless OOXML ZIP sniffing, automatic
+`arxiv.org/(abs|e-print)` PDF full-text resolution, and SSRF-guarded
+`github.com/<owner>/<repo>` repository/file snapshots), decodes
 uploaded `file` documents (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.xlsx`,
 `.pptx`, `.csv`, `.tsv`, `.json`), accepts pasted `text`, or transcribes uploaded
 `recording` audio via `asr`, chunks passages into `source_chunks`, and
@@ -307,9 +310,11 @@ Generation & grounded Q&A against a notebook:
 - `POST /v1/notebooks/{id}/ask` `{ question, history?, source_ids?, model?, top_k? }`
   answers single-turn or multi-turn follow-up questions strictly from ready
   chunks (optionally scoped to `source_ids`), combining recent `history` turns
-  into the BM25 retrieval hint, enforcing `json_schema` structured citations, and
+  into the BM25 retrieval hint, enforcing `json_schema` structured citations,
   verifying every returned `chunk_id` against real `source_chunks` rows
-  (populating `source_id` from server truth and dropping hallucinated IDs).
+  (populating `source_id` from server truth and dropping hallucinated IDs), and
+  persisting the turn in `notebook_messages` (queryable/clearable via
+  `GET/DELETE /v1/notebooks/{id}/messages` and included in portable bundles).
 - `POST /v1/notebooks/{id}/plan` `{ goal, source_ids?, model?, max_items? }`
   invokes the Stage 2 Content Studio planner (`§2`, `§3`) against the notebook's
   ready chunks using an OpenAI-strict-compatible `json_schema` over the closed
@@ -334,7 +339,10 @@ Generation & grounded Q&A against a notebook:
   searchable via BM25 with zero schema migrations or primary-key collisions).
 - `GET /v1/notebooks/{id}/search?q=&top_k=&source_ids=` runs BM25 passage search
   (scoped to `source_ids` when specified), `PATCH /v1/notebooks/{id}` `{ title }`
-  renames an owned notebook, `GET /v1/notebooks/{id}/sources/{source_id}/chunks`
+  renames an owned notebook, `PATCH /v1/notebooks/{id}/sources/{source_id}`
+  `{ title?, text? }` renames any source or re-chunks an inline `text` note in
+  place, `POST /v1/notebooks/{id}/sources/{source_id}:retry` re-runs ingestion on
+  a `failed` URL source, `GET /v1/notebooks/{id}/sources/{source_id}/chunks`
   lists ordered passages extracted from a single source, `GET /v1/notebooks/{id}/artifacts`
   lists attached deliverables with citations, `GET /v1/notebooks/{id}/artifacts.zip`
   streams all attached deliverables together with `BRIEFING.md` and
@@ -342,9 +350,11 @@ Generation & grounded Q&A against a notebook:
   detaches an individual deliverable link, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
   resolves cited passages, and `DELETE /v1/notebooks/{id}` /
   `DELETE /v1/notebooks/{id}/sources/{source_id}` remove notebooks or individual
-  sources while immediately invalidating `NotebookIndexCache`.
+  sources while immediately invalidating `NotebookIndexCache` (with
+  `notebook_artifacts`-linked deliverables exempted from `cleanup.rs` retention
+  sweeps until detached).
 - The Tauri desktop local engine (`yanshi-ui/src-tauri/src/local_notebooks.rs`)
-  mirrors this entire 19-route contract offline on local JSON bundles, and
+  mirrors this entire 23-route contract offline on local JSON bundles, and
   `yanshi notebook` exposes it as a first-class CLI command suite.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)

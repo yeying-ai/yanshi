@@ -11,7 +11,7 @@
 
 **名字由来。** 《列子·汤问》记载能工巧匠**偃师**向周穆王献上能歌善舞的机关人；将其拆解开来，不过是革、木、胶、漆等构件按精密结构拼接而成，重新合拢后又“活动如初”。这是中国古籍中关于自主智能体最早的工程记载，也是本项目的核心理念：**以显式、可拆解、可审计的结构契约（`Flow` 有向无环图、`Tool` 契约、`Skill` 能力包）组装智能体与多模态流水线，让每一次运行都可追踪、可重放、可重组。**
 
-**产品定位（Content Studio Y0–Y10、Z、AA、AB 与 AC 已收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **19 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）、多源研究笔记本工作台（`/v1/notebooks/*` 与 `yanshi notebook` CLI）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
+**产品定位（Content Studio Y0–Y10 及 Z–AF 已收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **19 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）、多源研究笔记本工作台（`/v1/notebooks/*` 与 `yanshi notebook` CLI）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
 
 - **一等公民媒体与交付物契约**：`FlowValue::File` 在节点间类型安全地传递多媒体与文档产物，自动生成 SHA-256 校验清单，支持 CLI `--output-dir` 落盘导出与网关 `/v1/runs/{id}/artifacts` 流式下载。
 - **纯 Rust 原生可编辑幻灯片与出版级排版**：内置纯 Rust OOXML `pptx_writer`，直接输出 PowerPoint / Keynote / WPS 原生可编辑形状、`<a:tbl>` 表格、`<p:cxnSp>` 连接线与演讲者备注（绝非整页截图贴图），同时输出 `16:9` 宽屏 Typst `.pdf` 与离线交互 `.html`。
@@ -123,7 +123,7 @@ Yanshi 包含 25 个 Rust Crate 与嵌入式 Web/Tauri 桌面端，围绕 **L0 �
 | **L1 执行核心** | 驱动 L0 `Flow` IR 的确定性 DAG 执行引擎 | `yanshi-core`（依赖就绪并发调度器、`FlowExt::run()`、Checkpoint 状态快照、恢复计划、`ResourceLimits`、健康检查与事件流） |
 | **L2 能力适配层** | 工具层与 AI 能力节点、9 大模型厂商 + Mock、RAG、MCP、沙箱实现 | `yanshi-nodes`（确定性 Studio 渲染器与素材摄取节点）、`yanshi-nodes-ai`（`llm`、`figure`、`illustration`、`asr`、`tts`、图像/视频、`mcp`、`rag`）、`yanshi-llm`（OpenAI、Anthropic、Google、Moonshot、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax、Mock）、`yanshi-tools`（内置工具 + OS 沙箱后端）、`yanshi-tools-ai`、`yanshi-mcp`、`yanshi-rag`、`yanshi-memory` |
 | **L3 智能体与编排** | 智能体运行时、Skills 能力包、Harness 治理壳、YAML 装配与 CLI | `yanshi-agents`（ReAct、Plan-Execute、Reflection、Handoff/Blackboard/Debate 多智能体监督器、`dynamic` 动态工作流编译）、`yanshi-skills`、`yanshi-harness`（钩子、审批、审计、后台任务）、`yanshi-config`、`yanshi-cli` |
-| **L4 运维与产品化** | 可观测性、HTTP 网关、分布式 Worker、Web 与原生桌面端 | `yanshi-tracing`（JSONL 追踪、TUI 回放、W3C `traceparent`、OTLP/HTTP 导出）、`yanshi-server`（Axum API + SSE + Notebooks）、`yanshi-db`（Postgres 17 表 / 13 仓储存储）、`yanshi-worker` + `yanshi-worker-proto`（gRPC 分布式节点）、`yanshi-ui`（React/Vite + Tauri v2）、`crates/gateway`（Cloudflare Pingora TLS/HTTP2 反向代理） |
+| **L4 运维与产品化** | 可观测性、HTTP 网关、分布式 Worker、Web 与原生桌面端 | `yanshi-tracing`（JSONL 追踪、TUI 回放、W3C `traceparent`、OTLP/HTTP 导出）、`yanshi-server`（Axum API + SSE + Notebooks）、`yanshi-db`（Postgres 18 表 / 14 仓储存储）、`yanshi-worker` + `yanshi-worker-proto`（gRPC 分布式节点）、`yanshi-ui`（React/Vite + Tauri v2）、`crates/gateway`（Cloudflare Pingora TLS/HTTP2 反向代理） |
 
 ---
 
@@ -152,12 +152,14 @@ Yanshi 包含 25 个 Rust Crate 与嵌入式 Web/Tauri 桌面端，围绕 **L0 �
 # workflow_v2.yml
 name: "Source-Grounded Brief"
 cost_limit_usd: 0.50
+inputs:
+  topic:
+    default: "工作窃取（Work-Stealing）异步调度器"
 nodes:
   - id: build_prompt
     type: template
     parameters:
       template: "用 3 条要点总结 {{ topic }} 的核心工程权衡。"
-      topic: "工作窃取（Work-Stealing）异步调度器"
 
   - id: draft_brief
     type: llm
@@ -170,7 +172,9 @@ nodes:
     dependencies: ["draft_brief"]
     run_if: "{{ nodes.draft_brief.outputs.output != '' }}"
     input_mapping:
-      content: "{{ nodes.draft_brief.outputs.output }}"
+      markdown: "{{ nodes.draft_brief.outputs.output }}"
+    parameters:
+      format: md
 ```
 
 ```bash
@@ -331,21 +335,21 @@ cargo test --workspace --all-features
 ### 产品入口与上手指南
 - **[产品官网（中文首页 `yanshi.dev`）](https://yanshi.dev/)** 与 **[英文首页（`yanshi.dev/en/`）](https://yanshi.dev/en/)**：交互式五阶段工作台、在线 YAML 源码检视器与三路视觉路由画廊。
 - **[在线完整手册（`yanshi.dev/docs/`）](https://yanshi.dev/docs/)** 与 **[文档总索引](docs/README.md)**：基于 mdBook 构建的完整技术文档库。
-- **[Content Studio 模板图谱与桌面端指南](docs/STUDIO_CATALOGUE.md)**：15 套内置生成器详解、幻灯片视觉路由预设、Web Studio 与桌面端使用说明。
+- **[Content Studio 模板图谱与桌面端指南](docs/STUDIO_CATALOGUE.md)**：19 套内置生成器详解、幻灯片视觉路由预设、Web Studio 与桌面端使用说明。
 - **[Yanshi 试用手册（中文）](docs/TRIAL_GUIDE.md)** 与 **[可运行中文教程](docs/examples/runnable_tutorials_zh.md)**：从零 API Key Mock 体验到真实多模态产出的分步实操指南。
-- **[当前项目状态（`CURRENT_STATUS.md`）](docs/CURRENT_STATUS.md)** 与 **[路线图（`RoadMap.md`）](RoadMap.md)**：已收官里程碑（`Y0–Y10`）与后续演进评估条件。
+- **[当前项目状态（`CURRENT_STATUS.md`）](docs/CURRENT_STATUS.md)** 与 **[路线图（`RoadMap.md`）](RoadMap.md)**：已收官里程碑（`Y0–Y10`、`Z–AF`）与后续演进评估条件。
 
 ### 架构设计、契约规范与生产运维
 - **[Content Studio RFC](docs/RFC_CONTENT_STUDIO.md)**：五阶段流水线、`FlowValue::File` 产物契约、原文引文溯源模型与渲染器策略。
 - **[系统架构总览](docs/ARCHITECTURE.md)** 与 **[Crate 分层架构 RFC](docs/RFC_CRATE_ARCHITECTURE.md)**：五层工作区布局、四种执行范式与 L0 窄腰契约内核设计。
 - **[配置指南](docs/CONFIGURATION.md)** 与 **[工作流 YAML Schema](docs/WORKFLOW_SCHEMA.md)**：模型配置、`~/.yanshi/.env`、严格模式校验与运行目录结构。
-- **[LLM 供应商能力矩阵](docs/LLM_PROVIDERS_MATRIX.md)**：OpenAI、Anthropic、Google、Moonshot、StepFun 与 Mock 六大供应商能力对照表。
+- **[LLM 供应商能力矩阵](docs/LLM_PROVIDERS_MATRIX.md)**：9 大原生模型厂商（OpenAI、Anthropic、Google、Moonshot、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax）与 Mock 能力对照表。
 - **[智能体运行时](docs/AGENT_RUNTIME.md)** 与 **[Skills 能力包指南](docs/SKILLS.md)**：ReAct / Plan-Execute 循环、HITL 中断恢复、`SKILL.md` 声明式封装、分层知识库与 MCP 集成。
 - **[安全基线配置](docs/SECURITY_PROFILES.md)** 与 **[生产部署指南](docs/DEPLOYMENT.md)**：OS 沙箱、网关准入策略、Docker / Helm 多副本 Postgres 部署与 Pingora TLS 网关。
 - **[稳定性与 API 兼容性承诺](docs/STABILITY.md)**：Stable、Beta、Experimental 与 Internal 接口分级说明。
 
 ### 精选可运行示例（[完整示例矩阵](examples/README.md)）
-- [`examples/generators/`](examples/generators/)：全部 15 套生产级 Content Studio YAML 生成器模板。
+- [`examples/generators/`](examples/generators/)：全部 19 套生产级 Content Studio YAML 生成器模板。
 - [`examples/applications/content-studio/`](examples/applications/content-studio/)：一次调度多个生成器的多交付物 Planner Skill 示例。
 - [`yanshi-core/examples/fixed_dag_workflow.rs`](yanshi-core/examples/fixed_dag_workflow.rs) 与 [`checkpoint_recovery.rs`](yanshi-core/examples/checkpoint_recovery.rs)：确定性 DAG 编排与断点恢复示例。
 - [`yanshi-agents/examples/agent_native_react.rs`](yanshi-agents/examples/agent_native_react.rs) 与 [`hybrid_workflow_agent.rs`](yanshi-agents/examples/hybrid_workflow_agent.rs)：原生 ReAct 循环及 `AgentNode` / `WorkflowTool` 双向组合示例。

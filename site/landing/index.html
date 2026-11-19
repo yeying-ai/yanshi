@@ -215,9 +215,9 @@
 
             <div class="fact-strip">
               <div class="fact-cell">
-                <span class="fact-value">23 + 1</span>
+                <span class="fact-value">25 + UI</span>
                 <span class="fact-label">
-                  <span data-i18n-zh>Rust Crates 与 Studio UI</span>
+                  <span data-i18n-zh>Rust Crates 与 Studio 桌面端</span>
                   <span data-i18n-en>Rust Crates + Studio UI</span>
                 </span>
               </div>
@@ -229,10 +229,10 @@
                 </span>
               </div>
               <div class="fact-cell">
-                <span class="fact-value">6 LLM</span>
+                <span class="fact-value">9 + Mock</span>
                 <span class="fact-label">
-                  <span data-i18n-zh>OpenAI / Anthropic / Gemini 等</span>
-                  <span data-i18n-en>Multi-Provider Native Tools</span>
+                  <span data-i18n-zh>OpenAI / Claude / Gemini / 国产大模型</span>
+                  <span data-i18n-en>Native LLM Vendors + Mock</span>
                 </span>
               </div>
               <div class="fact-cell">
@@ -356,12 +356,13 @@
                 <pre class="inspector-code"><code data-hl="yaml">- id: ingest_repo
   type: repo_snapshot
   parameters:
+    source: "{{ source }}"
     max_files: 180
-    include_imports: true
 - id: ingest_paper
   type: pdf_extract
   parameters:
-    extract_tables: true</code></pre>
+    source: "{{ pdf_source }}"
+    max_pages: 40</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">web_search</span>
                   <span class="chip">repo_snapshot</span>
@@ -390,8 +391,9 @@
   run_if: "{{ interactive }}"
   parameters:
     tools: ["ask_user"]
-    max_iterations: 4
-    system_prompt: "Confirm scale, audience, and constraints before drafting."</code></pre>
+    interactive: true
+    max_questions: 3
+    system: "Confirm scale, audience, and constraints before drafting."</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">ask_user HITL</span>
                   <span class="chip">Content-Studio Skill</span>
@@ -416,8 +418,9 @@
                 <pre class="inspector-code"><code data-hl="yaml">- id: build_visuals
   type: map
   parameters:
-    concurrency: 4
-    body:
+    parallel: true
+    max_concurrent: 4
+    template:
       - id: art_panel
         type: illustration
         run_if: "{{ item.visual_kind == 'illustration' }}"
@@ -447,10 +450,11 @@
                 </p>
                 <pre class="inspector-code"><code data-hl="yaml">- id: deck_bundle
   type: render_slides
+  input_mapping:
+    deck: "{{ nodes.plan_deck.outputs.output }}"
   parameters:
     export_pptx: true   # Pure-Rust native editable OOXML
-    export_pdf: true    # 16:9 Typst vector deck
-    theme: "{{ slide_theme }}"</code></pre>
+    export_pdf: true    # 16:9 Typst vector deck</code></pre>
                 <div class="inspector-tags">
                   <span class="chip">render_slides (.pptx/.pdf)</span>
                   <span class="chip">render_video (.mp4)</span>
@@ -735,24 +739,30 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
                   <pre><code id="code-dag" data-hl="yaml"># Validate statically, cap spend, and export numeric Excel sheets
 name: paper_reader
 cost_limit_usd: 1.50
+inputs:
+  source:
+    default: "https://arxiv.org/abs/1706.03762"
 nodes:
   - id: extract
     type: pdf_extract
     parameters:
-      source: "{{ source }}"
-      extract_tables: true
+      max_pages: 40
 
   - id: bilingual_digest
     type: llm
     dependencies: ["extract"]
+    input_mapping:
+      prompt: "{{ nodes.extract.outputs.text }}"
     parameters:
       model: "gpt-4o"
-      response_format: json_schema
-      prompt: "Synthesize key contributions and benchmarks..."
+      json_schema:
+        type: array
 
   - id: export_excel
     type: render_table
     dependencies: ["bilingual_digest"]
+    input_mapping:
+      rows: "{{ nodes.bilingual_digest.outputs.output }}"
     parameters:
       format: "xlsx"</code></pre>
                 </div>
@@ -854,7 +864,7 @@ yanshi skill run examples/applications/content-studio \
                   <pre><code id="code-dynamic" data-hl="rust">use yanshi_agents::dynamic::{compile_plan_to_flow, DynamicWorkflowAgent};
 use yanshi_core::FlowExt;
 
-let plan = planner_agent.author_plan(&amp;task, &amp;allowed_tools).await?;
+let plan = planner_agent.plan(&amp;goal).await?;
 let flow = compile_plan_to_flow(&amp;plan, &amp;registry)?;
 
 // Executes on the standard concurrent scheduler with full tracing &amp; checkpoints:
@@ -902,15 +912,22 @@ let outputs = flow.run().await?;</code></pre>
                       <span data-i18n-en>Copy</span>
                     </button>
                   </div>
-                  <pre><code id="code-sdk" data-hl="rust">use std::sync::Arc;
+                  <pre><code id="code-sdk" data-hl="rust">use std::{collections::HashMap, sync::Arc};
 use yanshi_core::{flow::{Flow, GraphNode, NodeType}, FlowExt};
 use yanshi_nodes_ai::nodes::llm::LlmNode;
 use yanshi_tool::SecurityProfile;
 
 // Production fail-closed defaults: OS sandbox &amp; Ed25519 signature verification
 let profile = SecurityProfile::Production;
-let mut flow = Flow::new();
-flow.add_node(GraphNode::standard("summarize", Arc::new(LlmNode::default())));
+let mut flow = Flow::default();
+flow.add_node(GraphNode {
+  id: "summarize".into(),
+  node_type: NodeType::Standard(Arc::new(LlmNode::default())),
+  dependencies: vec![],
+  input_mapping: None,
+  run_if: None,
+  initial_inputs: HashMap::new(),
+});
 let result = flow.run().await?;</code></pre>
                 </div>
               </div>

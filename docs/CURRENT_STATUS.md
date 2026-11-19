@@ -1,17 +1,20 @@
 # Current Project Status
 
 Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-**AC**, **AD**, and **AE** closed, plus the daily productivity, keynote & multi-paradigm creative
+**AC**, **AD**, **AE**, and **AF** closed, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
-`worldbuilding_bible`, multi-turn source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`)
-with `source_ids` scoping, Notebook Studio planner (`POST /v1/notebooks/{id}/plan`)
-& atomic multi-deliverable `generate-batch`, per-source passage reader
-(`GET /v1/notebooks/{id}/sources/{source_id}/chunks`), portable Notebook bundle
-export/import & one-click `artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv`
-source ingestion, first-class `yanshi notebook` CLI, 1:1 Tauri desktop Notebook
-engine parity, and Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
+`worldbuilding_bible`, persistent multi-turn source-grounded Notebook Q&A
+(`POST /v1/notebooks/{id}/ask` + `GET/DELETE /v1/notebooks/{id}/messages`) with
+`source_ids` scoping, Notebook Studio planner (`POST /v1/notebooks/{id}/plan`)
+& atomic multi-deliverable `generate-batch`, source rename/note edit (`PATCH`),
+failed source `:retry` & smart `arxiv.org`/`github.com` URL ingestion, per-source
+passage reader (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`), portable
+Notebook bundle export/import & one-click `artifacts.zip` archive, pure-Rust
+`.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion, interactive UI flashcards/quiz/sortable
+table viewers, first-class `yanshi notebook` CLI, 23-route 1:1 Tauri desktop
+Notebook engine parity, and Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
 evaluations, roadmap notes, and TODO queues may explain how the project arrived
@@ -150,10 +153,16 @@ Playwright E2E), **AD** (2026-11-19 portable Notebook bundle export/import,
 one-click `GET /v1/notebooks/{id}/artifacts.zip` with `BRIEFING.md`,
 `generate.cost_limit_usd` enforcement, desktop/CLI/UI parity + live Chromium
 Playwright E2E, and `yanshi-core` / `yanshi-cli` Cargo manifest dependency pruning),
-and **AE** (2026-11-19 `GET /v1/notebooks/{id}/sources/{source_id}/chunks` passage
+**AE** (2026-11-19 `GET /v1/notebooks/{id}/sources/{source_id}/chunks` passage
 reader, `POST /v1/notebooks/{id}/plan` Studio planner, `POST /v1/notebooks/{id}/generate-batch`
 multi-deliverable batch generation across gateway/Tauri/CLI/UI, concurrent UI run
-tracking + terminal-status gallery sync, and 7/7 live Chromium Playwright E2E closure)
+tracking + terminal-status gallery sync, and 7/7 live Chromium Playwright E2E closure),
+and **AF** (2026-11-19 19-generator contract & `export_pdf=false` fixes, inline SVG
+CSP & `?inline=1` artifact parity, `cleanup.rs` Notebook deliverable retention
+protection, persistent `notebook_messages` (`0016`), source `PATCH` rename/text
+re-chunking & `:retry`, smart `arxiv.org`/`github.com` URL ingestion, interactive
+UI flashcards/quiz/sortable-table viewers & custom-tenant preview auth, and CI
+`docs.yml`/`quality.yml`/`ui-e2e.yml` hardening)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts
@@ -175,10 +184,10 @@ has closed:
   `audio_overview`, `flashcards`, `quiz`, `repo_architecture`,
   `backend_project_planner`, `paper_reader`, `video_summarizer`),
   `examples/applications/content-studio/`,
-  persistent `notebooks` / `sources` / `source_chunks` / `notebook_artifacts`
-  (with persisted `deliverable JSONB`, interactive citation lookup, and `.pdf` /
-  `.docx` / `.csv` / `.tsv` / `.json` / `.html` / `.md` / ASR `recording`
-  ingestion) and `POST /v1/notebooks/{id}/generate`, plus inline
+  persistent `notebooks` / `sources` / `source_chunks` / `notebook_artifacts` /
+  `notebook_messages` (with persisted `deliverable JSONB`, interactive citation
+  lookup, and `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.csv` / `.tsv` / `.json` /
+  `.html` / `.md` / ASR `recording` ingestion) and `POST /v1/notebooks/{id}/generate`, plus inline
   workflow `agent` HITL `ask_user` interrupt/resume and gateway-safe inline
   `multi_agent` (`blackboard` / `debate` / `handoff`) in gateway and Studio UI.
 - **Y7–Y10 & Z** — cost-budget approvals, `ToolEffect::Publish`, gateway reach

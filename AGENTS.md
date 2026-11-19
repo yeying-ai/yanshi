@@ -11,8 +11,10 @@ summary.
 
 Yanshi is a Rust workspace that supports both deterministic DAG
 workflows and agent-native autonomous loops, with full LLM, MCP, RAG,
-Skill, and tracing support. The workspace has 23 Rust crates plus 1 Web
-UI crate (`yanshi-ui`, a Vite-built React SPA embedded by the server).
+Skill, and tracing support. The workspace has 25 Rust crates plus the
+`xtask` build helper, a Web UI (`yanshi-ui`, a Vite-built React SPA
+embedded by the server), a Tauri v2 desktop shell (`yanshi-ui/src-tauri`),
+and a standalone Pingora TLS/HTTP2 proxy (`crates/gateway`).
 
 A narrow-waist **contract kernel** (L0) was extracted so the runtimes
 never depend on each other, only on shared contracts, enforced by
@@ -90,9 +92,10 @@ so the tool tier carries no capability dependencies.
   propagation, first-party OTLP/HTTP+JSON exporter (`otlp-http` feature,
   `OtlpHttpSpanSink`) — gRPC transport still deferred, bring your own
   `OtelSpanSink` for that.
-- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, `/v1/notebooks`
-  incl. `/ask` & `source_ids`, SSE, skills, Harness sessions/approvals),
-  Postgres-backed `yanshi-db` (17 tables / 13 repos), per-tenant run admission
+- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, 23-route `/v1/notebooks`
+  incl. persistent `/ask` `messages`, `plan`, `generate-batch`, source `PATCH`/`:retry`,
+  and `source_ids`, SSE, skills, Harness sessions/approvals),
+  Postgres-backed `yanshi-db` (18 tables / 14 repos), per-tenant run admission
   control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
   (gRPC `WorkerProtocol`, 7 node payload types), and a React/Vite Web UI
   embedded at `/ui` (`/ui/notebooks`, `/ui/studio`, `/ui/app`, `/ui/console`)
@@ -177,13 +180,14 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA / AB /
-AC / AD / AE closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
-creative/deliberative studios, Notebook `PATCH` rename / artifact detach /
-`sources/{id}/chunks` passage reader / `plan` + `generate-batch` / portable
-`export`+`import` / `artifacts.zip` / `generate.cost_limit_usd` / `source_ids`
-scoping & multi-turn grounded `POST /v1/notebooks/{id}/ask`, persisted `Deliverable`
-citations & `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json` source ingestion,
-1:1 Tauri desktop local engine parity, first-class `yanshi notebook` CLI,
-gateway-safe inline `multi_agent`, `illustration` node, and pure-Rust native
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AF closure,
+19-template Studio catalogue incl. `data_table` & multi-paradigm creative/deliberative
+studios, 23-route Notebook contract incl. persistent `messages`, source `PATCH`
+rename/note re-chunking & `:retry`, smart `arxiv.org`/`github.com` ingestion,
+`sources/{id}/chunks` passage reader, `plan` + `generate-batch`, portable
+`export`+`import`, `artifacts.zip`, `generate.cost_limit_usd`, `source_ids`
+scoping & multi-turn grounded `POST /v1/notebooks/{id}/ask`, interactive UI
+flashcards/quiz/sortable-table viewers, `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`
+source ingestion, 1:1 Tauri desktop local engine parity, first-class `yanshi notebook`
+CLI, gateway-safe inline `multi_agent`, `illustration` node, and pure-Rust native
 OOXML `.pptx` / `16:9` Typst `.pdf` slide rendering).

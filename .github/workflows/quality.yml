@@ -148,6 +148,41 @@ jobs:
       - name: Unit tests
         working-directory: yanshi-ui
         run: npm test
+      - name: Build production UI bundle & verify Tauri mirror
+        working-directory: yanshi-ui
+        run: |
+          npm run build
+          test -s dist/assets/app.js
+          test -s dist/assets/styles.css
+          cmp -s dist/assets/app.js dist/ui/assets/app.js
+          cmp -s dist/assets/styles.css dist/ui/assets/styles.css
+
+  tauri-desktop-check:
+    # AF5: `yanshi-ui/src-tauri` is excluded from the root workspace so
+    # plain `cargo test` on headless Linux machines doesn't require GTK /
+    # WebKit2GTK headers. Gate its clippy + unit/loopback-engine tests
+    # explicitly here so workspace API changes never silently break the
+    # desktop shell.
+    name: yanshi-studio-desktop (src-tauri clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Tauri v2 Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf
+      - name: Clippy desktop crate
+        run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Run desktop local-engine & notebook tests
+        run: cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --test-threads=1
 
   clippy-lib-deny:
     # Q5.1: enforce no `unwrap()` / `expect()` in production library
@@ -604,23 +639,24 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Compile workspace examples
         run: cargo test --workspace --examples
-      - name: Validate every example workflow
-        # `mcp` is opt-in on the CLI; without it the mcp_* examples fail
-        # on node type alone and hide real schema errors underneath.
+      - name: Validate every example & Content Studio workflow
+        # Build with `mcp,rag` so both MCP and RAG workflow nodes are
+        # registered, and enforce `--strict` across all 19 Studio
+        # generators, application workflows, and `examples/workflows/*.yml`.
         run: |
-          cargo build -p yanshi-cli --features mcp
+          cargo build -p yanshi-cli --features "mcp,rag"
           status=0
-          for f in yanshi-cli/examples/*.yml yanshi-cli/examples/workflows/*.yml; do
+          for f in yanshi-cli/examples/*.yml; do
             target/debug/yanshi workflow validate "$f" || { echo "::error file=$f::workflow validate failed"; status=1; }
+          done
+          for f in yanshi-cli/examples/workflows/*.yml examples/generators/*.yml examples/applications/*/workflow*.yml; do
+            target/debug/yanshi workflow validate --strict "$f" || { echo "::error file=$f::workflow validate --strict failed"; status=1; }
           done
           exit $status
       - name: Run examples-smoke (xtask)
         run: cargo xtask examples-smoke
-      - name: Run no-API example smoke tests
+      - name: Run no-API CLI & plugin smoke tests
         run: |
-          cargo run -p yanshi-core --example fixed_dag_workflow
-          cargo run -p yanshi-agents --example agent_native_react
-          cargo run -p yanshi-agents --example plan_execute_agent
           cargo run -p yanshi-cli -- workflow run yanshi-cli/examples/workflows/fixed_dag_basic.yml --dry-run
           cargo run -p yanshi-cli -- workflow run yanshi-cli/examples/workflows/skill_agent_hybrid.yml --dry-run
           cargo run -p yanshi-cli --features rag -- workflow run yanshi-cli/examples/workflows/rag_skill_assistant.yml --dry-run
@@ -629,8 +665,6 @@ jobs:
           cargo run -p yanshi-cli -- skill index resolve yanshi-skills/examples/skills.index.toml mcp-demo
           cargo run -p yanshi-cli -- skill validate yanshi-skills/examples/skills/mcp-basic
           cargo run -p yanshi-cli -- skill list-tools yanshi-skills/examples/skills/mcp-basic
-          cargo run -p yanshi-skills --example skill_calls_mcp_tool
-          cargo run -p yanshi-agents --example hybrid_workflow_agent
           cargo build -p yanshi-core --features plugin --bin yanshi-echo-plugin
           cargo run -p yanshi-core --features plugin --example plugin_host_demo
           cargo test -p yanshi-cli --features plugin --test workflow_tests plugin_node_tests
@@ -687,6 +721,7 @@ jobs:
       - println-lint
       - check-changelog
       - ui-tests
+      - tauri-desktop-check
       - cargo-audit
       - linux-sandbox-check
       - proto-validate
@@ -712,6 +747,7 @@ jobs:
           echo "println-lint: ${{ needs.println-lint.result }}"
           echo "check-changelog: ${{ needs.check-changelog.result }}"
           echo "ui-tests: ${{ needs.ui-tests.result }}"
+          echo "tauri-desktop-check: ${{ needs.tauri-desktop-check.result }}"
           echo "cargo-audit: ${{ needs.cargo-audit.result }}"
           echo "linux-sandbox-check: ${{ needs.linux-sandbox-check.result }}"
           echo "proto-validate: ${{ needs.proto-validate.result }}"
@@ -733,6 +769,7 @@ jobs:
           test "${{ needs.println-lint.result }}" = "success"
           test "${{ needs.check-changelog.result }}" = "success"
           test "${{ needs.ui-tests.result }}" = "success"
+          test "${{ needs.tauri-desktop-check.result }}" = "success"
           test "${{ needs.cargo-audit.result }}" = "success"
           test "${{ needs.linux-sandbox-check.result }}" = "success"
           test "${{ needs.proto-validate.result }}" = "success"

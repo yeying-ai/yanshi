@@ -5,27 +5,30 @@ the Yanshi repository, what each job gates, and which planned jobs do
 not yet exist. It is intentionally short: read the workflow YAML for the
 ground truth, read this doc for the *map*.
 
-Last audited: 2026-05-14.
+Last audited: 2026-11-19.
 
 ## Existing workflows
 
 | File | Trigger | Required for release gate | Purpose |
 |------|---------|---------------------------|---------|
-| `.github/workflows/quality.yml` | `push` to `main`/`master`, `pull_request`, `workflow_dispatch`, tag `v*` | Yes (`release-gate` job) | Format / clippy / per-crate tests / doc tests / curated feature checks / example smoke. |
-| `.github/workflows/llm-live.yml` | Daily cron (09:30 UTC) + `workflow_dispatch` | No — non-deterministic, costs money | Cross-provider live LLM smoke against the real OpenAI / Anthropic / Google / Moonshot / StepFun endpoints. |
-| `.github/workflows/docs.yml` | `push` to `main`, `pull_request`, `workflow_dispatch` | No | Builds the mdBook manual (`mdbook build site`) and, on `main`, deploys it to GitHub Pages. The build fails on any relative link in a chapter that points at a missing file (`site/repo_links.py`), which is why it runs on every PR rather than only on `docs/**` changes. |
+| `.github/workflows/quality.yml` | `push` to `main`/`master`, `pull_request`, `workflow_dispatch`, tag `v*` | Yes (`release-gate` job) | All 22 PR/release gates: `fmt`, `verify-edition`, `check-agent-sdk-doc`, `check-arch`, `clippy`, `clippy-lib-deny`, `redaction-lint`, `println-lint`, `check-changelog`, `ui-tests` (typecheck + Vitest + Vite bundle), `tauri-desktop-check` (`src-tauri` clippy + loopback tests), `cargo-audit`, `linux-sandbox-check`, `proto-validate`, `test` (incl. live Postgres), `doctest`, `rustdoc`, `features`, `examples` (incl. `--strict` across all 19 Studio generators), `rag-eval-smoke`, `agent-eval-smoke`, and `media-tools`. |
+| `.github/workflows/release.yml` | `workflow_run` on `Quality` completion + `workflow_dispatch` | Triggered only when `Quality` passes on `v*` | Builds multi-arch `yanshi` CLI tarballs, pushes multi-arch `yanshi-server` GHCR image, and publishes GitHub Release artifacts. |
+| `.github/workflows/docs.yml` | `push` to `main`, `pull_request`, `workflow_dispatch` | No (runs on every PR) | Builds the bilingual product landing page (`site/landing/`) + mdBook manual (`docs/`) via `python3 site/build.py` (failing on broken repo links via `site/repo_links.py`) and deploys `site/book` to GitHub Pages on `main`. |
+| `.github/workflows/ui-e2e.yml` | Daily cron (10:30 UTC) + `workflow_dispatch` | No (nightly + manual) | Builds fresh `yanshi-ui/dist`, boots `yanshi-server` against PostgreSQL 18 + mock LLM, and runs all 3 Chromium Playwright specs (`runs-new`, `harness-sessions`, `notebooks`). |
+| `.github/workflows/bench.yml` | Weekly cron + `workflow_dispatch` | No | Runs Criterion benchmarks and checks against checked-in baselines via `cargo xtask bench-gate`. |
+| `.github/workflows/llm-live.yml` | Daily cron (09:30 UTC) + `workflow_dispatch` | No — non-deterministic, costs money | Cross-provider live LLM & multimodal smoke against real vendor endpoints. |
 
 ### `quality.yml` jobs
 
 | Job | What it gates |
 |-----|---------------|
-| `fmt` | `cargo fmt --all --check`. |
-| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings`. |
-| `test` | `cargo test -p <pkg> --all-targets` per matrixed crate (`yanshi-core`, `yanshi-tools`, `yanshi-mcp`, `yanshi-memory`, `yanshi-skills`, `yanshi-agents`, `yanshi-cli`). Crates not in the matrix (e.g. `yanshi-db`, `yanshi-server`, `yanshi-worker`, `yanshi-ui`, `yanshi-rag`, `yanshi-tracing`, `yanshi-llm`) currently rely on `cargo build --workspace` plus their dependents' tests. Expanding this matrix is part of M.3. |
-| `doctest` | `cargo test --workspace --doc`. |
-| `features` | Hand-picked feature combinations (`yanshi-core --features observability`, `yanshi-mcp --features client,server,stdio`, `yanshi-cli --no-default-features --features mcp\|rag\|plugin`, `yanshi-core --features plugin --all-targets`). The exhaustive matrix is tracked under P3.9 (`feature-matrix.yml`, not yet created). |
-| `examples` | Compiles all workspace examples and runs the no-API smoke set (fixed DAG, ReAct, Plan-Execute, skill index / validate / list-tools, hybrid agent, plugin host, plugin marketplace install). |
-| `release-gate` | Aggregate `success` check across all six jobs above. PR-blocking. |
+| `fmt` / `verify-edition` / `check-agent-sdk-doc` / `check-arch` | `cargo fmt --all --check`, Rust 2024 edition across workspace members, `docs/AGENT_SDK.md` symbol accuracy, and the eight L0–L4 crate dependency laws. |
+| `clippy` / `clippy-lib-deny` / `redaction-lint` / `println-lint` | Workspace `-D warnings`, zero `unwrap()`/`expect()` in library crates, structured log redaction, and zero stray `println!`/`eprintln!` in library crates. |
+| `check-changelog` / `cargo-audit` / `proto-validate` / `linux-sandbox-check` | Non-trivial PR `CHANGELOG.md` entry check, RustSec advisory scan, gRPC proto check, and Linux Landlock/seccomp/cgroup v2 compilation. |
+| `ui-tests` / `tauri-desktop-check` | `yanshi-ui` `tsc --noEmit` + Vitest suite + production `vite build` + `/ui/assets/*` mirror check, and `yanshi-ui/src-tauri` `clippy -D warnings` + local engine tests. |
+| `test` / `doctest` / `rustdoc` / `features` | Full workspace test suite (including PostgreSQL `yanshi-db` & `yanshi-server` tests), doc tests, `RUSTDOCFLAGS="-D warnings" cargo doc`, and curated feature matrix. |
+| `examples` / `rag-eval-smoke` / `agent-eval-smoke` / `media-tools` | `cargo xtask examples-smoke`, `--strict` validation across all 19 `examples/generators/*.yml` and `examples/applications/*/workflow*.yml`, offline RAG & Agent eval baseline gates, and `ffmpeg`/`d2` media-tools tests. |
+| `release-gate` | Aggregate `success` check across all 22 jobs above. PR- and release-blocking. |
 
 ### `llm-live.yml` notes
 

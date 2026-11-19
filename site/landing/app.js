@@ -343,7 +343,7 @@
 
   document.querySelectorAll("[data-tab-group]").forEach(initTabGroup);
 
-  // Studio 15-Template Catalogue Filter
+  // Studio 19-Template Catalogue Filter
   const filterBtns = Array.from(document.querySelectorAll("[data-filter]"));
   const tplItems = Array.from(document.querySelectorAll(".tpl-item[data-cat]"));
 

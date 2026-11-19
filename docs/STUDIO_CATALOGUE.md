@@ -150,11 +150,14 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
 
 Start `yanshi-server` and open:
 
-- **`http://127.0.0.1:8080/ui/notebooks`** — **Notebook Workspace**: ingest URLs,
-  `.pdf`/`.docx`/`.csv`/`.tsv`/`.json`/`.md`/`.html` files, notes, and audio
-  recordings into per-notebook BM25 indexes, scope active sources via checkboxes,
-  ask grounded questions with verified chunk citations, and launch 12
-  source-grounded deliverables with interactive citation chips.
+- **`http://127.0.0.1:8080/ui/notebooks`** — **Notebook Workspace**: ingest URLs
+  (incl. automatic `arxiv.org` PDF & `github.com` repo snapshots),
+  `.pdf`/`.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`/`.md`/`.html` files,
+  editable text notes, and audio recordings into per-notebook BM25 indexes,
+  scope active sources via checkboxes, run persistent multi-turn grounded Q&A
+  with verified chunk citations, and launch/interact with 12 source-grounded
+  deliverables (interactive flashcards, self-grading quizzes, sortable data
+  tables, inline PDFs, and `.zip` archive export).
 - **`http://127.0.0.1:8080/ui/app`** — **App Runner**: pick any of the 19
   templates, fill in the generated input form, answer inline `ask_user`
   clarification cards if prompted, and preview/download finished `.pptx`,

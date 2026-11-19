@@ -17,10 +17,8 @@
 //!   5. Else: exit 1 with a single-line diagnostic listing the source
 //!      files that triggered the requirement.
 //!
-//! The gate is intentionally **not** wired into `quality.yml` today —
-//! landing it as a separate xtask first lets contributors run it
-//! locally (`cargo xtask check-changelog`) and gives the workspace
-//! experience time to confirm the heuristic before it gates PRs.
+//! Wired into `.github/workflows/quality.yml` (`check-changelog` →
+//! `release-gate`), and runnable locally via `cargo xtask check-changelog`.
 //!
 //! Determinism notes:
 //!   - The `git` calls run from the workspace root; stdout / stderr
@@ -56,13 +54,15 @@ fn is_trivial_changelog_path(path: &str) -> bool {
   if TRIVIAL_PATH_SUFFIXES.iter().any(|s| path.ends_with(s)) {
     return true;
   }
-  // Test-only files (tests/*.rs, *.test.ts, fixtures/) — internal
-  // coverage; not a user-facing change.
+  // Test-only files (tests/*.rs, *.test.ts(x), e2e/*.spec.ts, fixtures/) —
+  // internal coverage; not a user-facing change.
   if path.starts_with("tests/")
     || path.contains("/tests/")
     || path.contains("/fixtures/")
     || path.ends_with(".test.ts")
+    || path.ends_with(".test.tsx")
     || path.ends_with(".test.rs")
+    || (path.contains("/e2e/") && path.ends_with(".spec.ts"))
   {
     return true;
   }
@@ -334,5 +334,16 @@ mod check_changelog_tests {
       stderr.contains("chore(skip-changelog)"),
       "diagnostic must name the escape hatch: {stderr}"
     );
+  }
+
+  #[test]
+  fn trivial_path_classifier_covers_ui_tsx_and_e2e_specs() {
+    assert!(is_trivial_changelog_path(
+      "yanshi-ui/src/pages/NotebookWorkspacePage.test.tsx"
+    ));
+    assert!(is_trivial_changelog_path("yanshi-ui/e2e/notebooks.spec.ts"));
+    assert!(!is_trivial_changelog_path(
+      "yanshi-ui/src/pages/NotebookWorkspacePage.tsx"
+    ));
   }
 }

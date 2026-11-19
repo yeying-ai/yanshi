@@ -1,6 +1,6 @@
 # Yanshi Manual
 
-> Looking for the interactive overview, visual routing gallery, and 15-template matrix? Visit the [Yanshi Product Home](https://yanshi.dev/).
+> Looking for the interactive overview, visual routing gallery, and 19-template matrix? Visit the [Yanshi Product Home](https://yanshi.dev/).
 
 Yanshi is a multimodal content-production runtime written in Rust. Sources go
 in — an idea, a URL, uploaded files, a recording — and finished deliverables
@@ -32,7 +32,7 @@ gateway with a Web UI.
 
 | Part | Read it when you want to… |
 | --- | --- |
-| [Content Studio Catalogue & Desktop](STUDIO_CATALOGUE.md) | run the 15 built-in slide, video, paper, repo, and report generators or install `Yanshi Studio` desktop |
+| [Content Studio Catalogue & Desktop](STUDIO_CATALOGUE.md) | run the 19 built-in slide, video, paper, repo, creative, and report generators or install `Yanshi Studio` desktop |
 | [Getting Started](CONFIGURATION.md) | configure providers and run a first workflow without API keys |
 | [Workflows](WORKFLOW_SCHEMA.md) | write, debug, and make DAG workflows resilient |
 | [Agents](AGENT_RUNTIME.md) | run agent loops, multi-agent setups, and Harness sessions |

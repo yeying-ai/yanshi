@@ -93,7 +93,7 @@ LOCALE_META: dict[str, dict[str, Any]] = {
       ),
       (
         "没有图像生成或语音 TTS API Key 可以运行么？支持哪些大模型服务商？",
-        "完全可以。只需配置任一文本大模型 Key 即可开箱运行 slides.yml、report.yml、repo_architecture.yml、backend_project_planner.yml、paper_reader.yml、mindmap.yml 等绝大多数生成器。运行时原生支持 OpenAI、Anthropic Claude、Google Gemini、Moonshot（Kimi）、StepFun，以及任意兼容 OpenAI 接口的服务（如 DeepSeek、Qwen、本地 Ollama）。",
+        "完全可以。只需配置任一文本大模型 Key 即可开箱运行 slides.yml、report.yml、repo_architecture.yml、backend_project_planner.yml、paper_reader.yml、mindmap.yml 等绝大多数生成器。运行时原生内置 9 大模型服务商（OpenAI、Anthropic Claude、Google Gemini、Moonshot Kimi、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax）及 Mock 测试后端，也支持任意兼容 OpenAI 接口的服务（如本地 Ollama）。",
       ),
       (
         "Yanshi 与 LangGraph、Dify 或单一 AI PPT 工具有何核心区别？",
@@ -133,7 +133,7 @@ LOCALE_META: dict[str, dict[str, Any]] = {
       ),
       (
         "Can I run workflows without image or TTS API keys, and which LLM providers are supported?",
-        "Yes. A single text LLM key runs most Studio generators out of the box — including slides.yml, report.yml, repo_architecture.yml, backend_project_planner.yml, paper_reader.yml, and mindmap.yml. Yanshi natively supports OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, and any OpenAI-compatible endpoint (DeepSeek, Qwen, or local Ollama).",
+        "Yes. A single text LLM key runs most Studio generators out of the box — including slides.yml, report.yml, repo_architecture.yml, backend_project_planner.yml, paper_reader.yml, and mindmap.yml. Yanshi natively supports 9 LLM vendors (OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, GLM·Zhipu, DashScope·Alibaba, DeepSeek, MiniMax) plus Mock and any OpenAI-compatible endpoint (such as local Ollama).",
       ),
       (
         "How does Yanshi differ from LangGraph, Dify, or single-purpose AI slide tools?",

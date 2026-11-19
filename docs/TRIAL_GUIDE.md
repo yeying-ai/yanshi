@@ -1,8 +1,8 @@
 # Yanshi 试用手册（Trial Guide）
 
-**版本基线**：2026-11-17（Content Studio **Y0–Y10** 全闭环 + 15 个内置生成器 + Tauri 桌面端 `Yanshi Studio`）  
+**版本基线**：2026-11-19（Content Studio **Y0–Y10** 及 **Z–AF** 全闭环 + 19 个内置生成器 + 多源笔记本工作台 + Tauri 桌面端 `Yanshi Studio`）  
 **适用读者**：想在日常研发、论文研读、技术分享与多模态内容生产中直接使用 Yanshi 的开发者与创作者  
-**配套文档**：当前全景状态见 [`CURRENT_STATUS.md`](CURRENT_STATUS.md)；15 个内置工作流清单见 [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)
+**配套文档**：当前全景状态见 [`CURRENT_STATUS.md`](CURRENT_STATUS.md)；19 个内置工作流清单见 [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)
 
 ---
 
@@ -12,7 +12,7 @@
 
 | 状态 | 入口 / 路径 | 说明 |
 |:---:|---|---|
-| 🟢 | **Studio 生成器（15 套模板）** | `yanshi workflow run examples/generators/<name>.yml --output-dir out`，直出 `.pptx`、`.pdf`、`.mp4`、`.xlsx`、`.mp3`、`.svg`、`.html` |
+| 🟢 | **Studio 生成器（19 套模板）** | `yanshi workflow run examples/generators/<name>.yml --output-dir out`，直出 `.pptx`、`.pdf`、`.mp4`、`.xlsx`、`.mp3`、`.svg`、`.html` |
 | 🟢 | **桌面端 `Yanshi Studio.app`（macOS / Windows / Linux）** | 免 PostgreSQL 零配置本地引擎，支持可视化单步调试、一键运行、内置价格表与交互式问答卡片 |
 | 🟢 | **Web Studio（`/ui/app` · `/ui/studio` · `/ui/console`）** | `yanshi-server` 内嵌前端，支持模板运行、DAG 拓扑画布编辑、断点观测与 SSE 实时事件追踪 |
 | 🟢 | **本地 DAG 工作流（`workflow run / resume / validate / debug`）** | 支持并发调度、`FlowValue::File` 零 base64 流转、`cost_limit_usd` 成本上限与不重复计费断点续跑 |
@@ -64,7 +64,7 @@ yanshi doctor --profile local
 
 ## 2. 场景一：一句话生成日常成品（Content Studio，10 分钟）
 
-[`examples/generators/`](../examples/generators/) 提供了 15 套生产级模板（完整说明见 [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)）。推荐先试以下四条日常高频工作流：
+[`examples/generators/`](../examples/generators/) 提供了 19 套生产级模板（完整说明见 [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)）。推荐先试以下四条日常高频工作流：
 
 ### 2.1 精美插图技术演讲 PPT（`.pptx` + `16:9 .pdf` + 交互 `.html`）
 

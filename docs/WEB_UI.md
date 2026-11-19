@@ -18,7 +18,7 @@ TypeScript codebase runs in two deployment modes:
 
 | Route | Mode | Purpose |
 | --- | --- | --- |
-| **`/ui/notebooks`** | **Notebook Workspace** | Multi-source research & deliverable workspace: ingest URLs, `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.csv` / `.tsv` / `.json` / `.md` / `.html` documents, text notes, and ASR audio recordings into per-notebook BM25 indexes; browse ordered source passages (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`); rename notebooks inline (`PATCH`); scope active sources via checkboxes (`source_ids`); run multi-turn grounded Q&A (`POST /v1/notebooks/{id}/ask` with `history`) with verified chunk citations; run AI Studio content planning (`POST /v1/notebooks/{id}/plan`) or multi-select batch generation (`POST /v1/notebooks/{id}/generate-batch`) across 12 Studio generators with concurrent live tracking; and inspect, detach, or `.zip`-export deliverables with interactive citation chips. |
+| **`/ui/notebooks`** | **Notebook Workspace** | Multi-source research & deliverable workspace: ingest URLs (incl. automatic `arxiv.org` PDF & `github.com` repo snapshots), `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.csv` / `.tsv` / `.json` / `.md` / `.html` documents, editable text notes (`PATCH` re-chunking + `:retry`), and ASR audio recordings into per-notebook BM25 indexes; browse ordered source passages (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`); rename notebooks inline (`PATCH`); scope active sources via checkboxes (`source_ids`); run persistent multi-turn grounded Q&A (`POST /v1/notebooks/{id}/ask` + `GET/DELETE /v1/notebooks/{id}/messages`) with verified chunk citations; run AI Studio content planning (`POST /v1/notebooks/{id}/plan`) or multi-select batch generation (`POST /v1/notebooks/{id}/generate-batch`) across 12 Studio generators with concurrent live tracking; and interact inline with flashcards, self-grading quizzes, sortable/filterable CSV/data tables, PDFs, or `.zip`-export deliverables. |
 | **`/ui/studio`** | **Visual DAG Studio & Step Debugger** | Interactive `@xyflow/react` graph editor with topological auto-layout, node palette (including `illustration`, `figure`, `render_slides`, `render_video`, `agent`, `map`/`while`), per-node breakpoints, step-by-step Input/Output inspection, inline slide/video/audio/HTML preview, and live HITL `ask_user` prompt cards. |
 | **`/ui/app`** | **App Runner (Publish Mode)** | Schema-driven typed input forms generated automatically from a workflow's `inputs:` block over the 19-template [Content Studio catalogue](STUDIO_CATALOGUE.md). Runs independent stages concurrently, tracks live stage progress, surfaces `ask_user` clarification cards, and showcases downloadable `.pptx`, `.pdf`, `.mp4`, `.xlsx`, `.mp3`, and `.html` artifacts. |
 | **`/ui/console`** | **Classic Run & Session Console** | Low-level run/session inspector: live SSE event timeline with `?after_seq=` reconnect, server-side `?filter=` history pre-filtering, Harness session approval cards, trace diffing, and tenant preference sync. |
@@ -61,29 +61,31 @@ Then open:
 
 ### Key Gateway Endpoints Consumed by Studio & Console
 
-- `POST /v1/workflows:inspect` — parse YAML, validate schema, and return the
+- `POST /v1/workflows/inspect` — parse YAML, validate schema, and return the
   topological graph structure + declared `inputs`.
 - `POST /v1/runs` / `POST /v1/runs/{id}:cancel` / `POST /v1/runs/{id}:resume` —
   submit, cancel, or checkpoint-resume workflow runs (including debug
   breakpoint controls).
 - `GET /v1/runs/{id}/events` & `GET /v1/runs/{id}/events/history?filter=<expr>` —
   live SSE stream with `?after_seq=` resume and server-side event filtering.
-- `GET /v1/runs/{id}/artifacts` & `GET /v1/runs/{id}/artifacts/{artifact_id}` —
-  list and stream generated `FlowValue::File` deliverables.
+- `GET /v1/runs/{id}/artifacts` & `GET /v1/runs/{id}/artifacts/{artifact_id}?inline=1` —
+  list and stream generated `FlowValue::File` deliverables (`?inline=1` serves
+  inline previews with `nosniff` and strict SVG CSP).
 - `GET /v1/runs/{id}/questions` & `POST /v1/runs/{id}/questions/{question_id}` —
   list and answer inline workflow `type: agent` HITL `ask_user` prompts.
 - `/v1/notebooks` (`POST`/`GET`/`PATCH`/`DELETE`), `/v1/notebooks/import` (`POST`),
-  `/v1/notebooks/{id}/export` (`GET`), `/v1/notebooks/{id}/sources` (`POST`/`DELETE`),
-  `/v1/notebooks/{id}/sources/{source_id}/chunks`, `/v1/notebooks/{id}/chunks/{chunk_id}`,
-  `/v1/notebooks/{id}/search?q=&source_ids=`, `/v1/notebooks/{id}/ask` (with
-  multi-turn `history`), `/v1/notebooks/{id}/plan`, `/v1/notebooks/{id}/generate` &
+  `/v1/notebooks/{id}/export` (`GET`), `/v1/notebooks/{id}/sources` (`POST`/`PATCH`/`DELETE` +
+  `POST .../{source_id}:retry`), `/v1/notebooks/{id}/sources/{source_id}/chunks`,
+  `/v1/notebooks/{id}/chunks/{chunk_id}`, `/v1/notebooks/{id}/search?q=&source_ids=`,
+  `/v1/notebooks/{id}/ask` & `/v1/notebooks/{id}/messages` (`GET`/`DELETE`),
+  `/v1/notebooks/{id}/plan`, `/v1/notebooks/{id}/generate` &
   `/v1/notebooks/{id}/generate-batch` (with optional `cost_limit_usd`),
   `/v1/notebooks/{id}/artifacts` (`GET`/`DELETE`), & `/v1/notebooks/{id}/artifacts.zip` —
-  multi-source notebook ingestion, full source passage reading, portable bundle
-  export/import, `source_ids` scoping, multi-turn cited Q&A, AI Studio planning &
-  multi-deliverable batch generation, and one-click `.zip` archive download (served
-  identically by both `yanshi-server` and the Tauri desktop `local_notebooks.rs`
-  engine).
+  23-route multi-source notebook contract (ingestion, source rename/note edit/retry,
+  full passage reading, portable bundle export/import, `source_ids` scoping,
+  persistent multi-turn cited Q&A, AI Studio planning & batch generation, and
+  `.zip` archive download) served identically by `yanshi-server` and the Tauri
+  desktop `local_notebooks.rs` engine.
 - `GET /v1/preferences` & `PUT /v1/preferences` — durable tenant-scoped UI
   preferences.
 
@@ -142,7 +144,7 @@ Selected non-sensitive UI preferences sync to `/v1/preferences` while keeping
 ## 4. Verification & Testing
 
 ```bash
-# TypeScript typecheck + Vitest unit suite (126 tests)
+# TypeScript typecheck + Vitest unit suite (129 tests)
 npm --prefix yanshi-ui run typecheck
 npm --prefix yanshi-ui test
 

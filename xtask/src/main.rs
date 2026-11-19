@@ -39,6 +39,9 @@
 //!   params into a log macro without going through
 //!   `yanshi_tracing::redaction` or `prompt_fingerprint`. Backs
 //!   the Q5.2 workspace redaction audit.
+//! - `println-lint` — reject stray `println!` / `eprintln!` calls in
+//!   production library crates (CLI binaries, examples, tests, and
+//!   xtask are exempt).
 //! - `check-arch` — assert the subset of the eight crate-dependency laws
 //!   (`docs/RFC_CRATE_ARCHITECTURE.md` §7) checkable today: runtime-isolation,
 //!   surface-isolation, and kernel-isolation (R1.2 — an L0 contract crate must

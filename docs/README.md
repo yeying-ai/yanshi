@@ -1,6 +1,6 @@
 # Yanshi Docs
 
-Last updated: 2026-11-17
+Last updated: 2026-11-19
 
 This directory contains current user and maintainer documentation. Historical
 phase reports, old TODO trackers, implementation summaries, and stale backups
@@ -17,7 +17,7 @@ or just the manual with `mdbook build site`).
 
 - [CURRENT_STATUS.md](CURRENT_STATUS.md): current authoritative project status,
   implemented surfaces, stability links, and active work.
-- [STUDIO_CATALOGUE.md](STUDIO_CATALOGUE.md): the 15 built-in Content Studio
+- [STUDIO_CATALOGUE.md](STUDIO_CATALOGUE.md): the 19 built-in Content Studio
   generators (`.pptx`, `.pdf`, `.mp4`, `.xlsx`, `.mp3`, diagrams), Web Studio,
   and `Yanshi Studio` desktop app.
 - [RFC_CONTENT_STUDIO.md](RFC_CONTENT_STUDIO.md): the product direction —

@@ -6,12 +6,13 @@ Content Studio generators, deterministic DAG workflows, and agent-native loops.
 ## Start Here
 
 - **[Content Studio Catalogue (`STUDIO_CATALOGUE.md`)](../STUDIO_CATALOGUE.md)** —
-  Complete guide to the 15 built-in deliverables under
+  Complete guide to the 19 built-in deliverables under
   [`examples/generators/`](../../examples/generators/) (`illustrated_slides`,
   `tech_slides_video`, `slides`, `video_overview`, `audio_overview`, `report`,
-  `infographic`, `mindmap`, `circuit_diagram`, `flashcards`, `quiz`,
-  `repo_architecture`, `backend_project_planner`, `paper_reader`,
-  `video_summarizer`) plus Web Studio and the `Yanshi Studio` desktop app.
+  `data_table`, `infographic`, `mindmap`, `circuit_diagram`, `flashcards`,
+  `quiz`, `repo_architecture`, `backend_project_planner`, `paper_reader`,
+  `video_summarizer`, `episodic_drama_studio`, `debate_podcast_show`,
+  `worldbuilding_bible`) plus Web Studio and the `Yanshi Studio` desktop app.
 - **[SDK Example Matrix (`examples/README.md`)](../../examples/README.md)** —
   Canonical capability-to-example table across all workspace crates.
 - **[End-to-End Applications (`examples/applications/README.md`)](../../examples/applications/README.md)** —

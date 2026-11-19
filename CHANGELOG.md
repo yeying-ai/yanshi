@@ -81,6 +81,15 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Security
 
+- **Inline SVG preview CSP, `X-Content-Type-Options: nosniff`, and Tauri `/v1/runs/{id}*` tenant isolation (`80d4b91`).**
+  `GET /v1/runs/{id}/artifacts/{artifact_id}/preview` and
+  `GET /v1/runs/{id}/artifacts/{artifact_id}?inline=1` on both `yanshi-server`
+  and the Tauri desktop loopback engine now attach `X-Content-Type-Options: nosniff`
+  and, on `image/svg+xml` responses, `Content-Security-Policy: sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'`
+  to neutralize embedded `<script>` / `onload` payloads when an SVG is opened as
+  a top-level document. In addition, Tauri's `local_engine.rs` now enforces
+  `tenant_id` ownership across all 6 `/v1/runs/{id}*` routes (`get_run`, `cancel`,
+  `resume`, `events`, `events/history`, `artifacts`).
 - **Skill-run per-tenant admission parity, `run_dir` retention scoping, and `.docx` zip-bomb ceiling (`e186390`, `53a21bc`).**
   `POST /v1/skills/{name}:run` now routes through `runs::admit_and_dispatch`
   (enforcing `RunAdmissionRegistry` + `RunRepo::create_if_admitted` per-tenant
@@ -130,6 +139,22 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Studio 19-generator `Deliverable.kind` & `export_pdf=false` contracts, Notebook deliverable retention protection, custom-tenant UI media auth, and CI workflow gates (`80d4b91`, `9489ebc`).**
+  Fixed 4 Studio generators (`backend_project_planner`, `paper_reader`,
+  `repo_architecture`, `video_summarizer`) to emit schema-registered
+  `Deliverable.kind = "report"` and decoupled `run_if`-gated `*_pdf` nodes from
+  `deliverable.dependencies` so `export_pdf=false` runs never fail with
+  `DependencyNotMet`; added `format: md` (`text/markdown`) to `episodic_drama_studio`,
+  `worldbuilding_bible`, and `debate_podcast_show`, and taught `RenderStudyNode`
+  to read `FlowValue::File` inputs and display live quiz score counters.
+  `cleanup.rs` now exempts `notebook_artifacts`-linked runs, artifact rows, and
+  on-disk `<run_dir>` folders until detached (and honors `artifacts_retention_days`
+  on disk sweeps); notebook artifacts attach only on `succeeded` runs; SSE
+  honors `?filter=` and `x-accel-buffering: no`; `AuthorizedMedia.tsx` uses
+  authenticated `fetch` whenever `tenantId !== 'default'` so custom-tenant
+  previews never 404; and `docs.yml`, `quality.yml` (`tauri-desktop-check` +
+  `vite build` + `--strict` 19-generator validation), and `ui-e2e.yml` were
+  hardened.
 - **Nightly Playwright E2E `workspace_root` 400 and Notebook gallery terminal-run polling race (`39f80f6`).**
   `e2e/harness-sessions.spec.ts`'s second test omitted `workspace_root: /tmp`,
   hitting a gateway `400 Bad Request` against `YANSHI_GATEWAY_PATH_ROOTS=/tmp` in
@@ -424,6 +449,23 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Persistent Notebook `/ask` message history (`0016`), source rename/note edit (`PATCH`) & `:retry`, smart `arxiv.org`/`github.com` URL ingestion, and interactive UI deliverable viewers (`d5111db`, `a21120b`, `9489ebc`).**
+  Added migration `0016_notebook_messages.sql` and `NotebookMessageRepo` so
+  `POST /v1/notebooks/{id}/ask` automatically persists Q&A turns with verified
+  citations, exposed via `GET/DELETE /v1/notebooks/{id}/messages` and included in
+  portable `export`/`import` bundles (remapping `<old_src>:<ord>` →
+  `<new_src>:<ord>` `chunk_id`s) and `BRIEFING.md`. Added
+  `PATCH /v1/notebooks/{id}/sources/{source_id}` (source rename + inline `text`
+  note re-chunking with immediate BM25 cache invalidation),
+  `POST /v1/notebooks/{id}/sources/{source_id}:retry`, and smart `ingest_url`
+  adapters resolving `arxiv.org/(abs|e-print)` links to full-text PDFs and
+  `github.com/<owner>/<repo>` links to SSRF-guarded repository snapshots —
+  mirrored across all 23 routes in Tauri `local_notebooks.rs` and `yanshi notebook`
+  CLI (`messages`, `clear-messages`, `update-source`, `retry-source`,
+  `ask --save-as-source`, `add-source --text -`). Added `NotebookDeliverableViewer.tsx`
+  in `/ui/notebooks` for interactive flashcard flipping/shuffling, self-grading
+  quizzes, sortable/filterable CSV & `data_table` views with `[chunk_id]` jump,
+  and inline PDF/Markdown previews.
 - **Notebook Studio planner (`POST /v1/notebooks/{id}/plan`), atomic multi-deliverable batch generation (`POST /v1/notebooks/{id}/generate-batch`), and source passage reader (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`) (`1bc0971`, `b4e9655`, `cf205eb`).**
   `SourceChunkRepo::list_for_source` and `GET /v1/notebooks/{id}/sources/{source_id}/chunks`
   expose ordered passages per source; `POST /v1/notebooks/{id}/plan` selects and
