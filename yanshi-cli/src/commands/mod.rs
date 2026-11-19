@@ -13,6 +13,7 @@ pub mod llm;
 pub mod marketplace;
 pub mod mcp;
 pub mod memory;
+pub mod notebook;
 #[cfg(feature = "plugin")]
 pub mod plugin;
 pub mod rag;

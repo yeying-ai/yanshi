@@ -332,6 +332,237 @@ impl ServerClient {
     }
     Ok(())
   }
+
+  /// `POST /v1/notebooks` — create a notebook.
+  pub async fn create_notebook(&self, title: &str) -> Result<Value> {
+    let body = serde_json::json!({ "title": title });
+    let response = self
+      .http
+      .post(self.url("/v1/notebooks"))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/notebooks` — list notebooks for the active tenant.
+  pub async fn list_notebooks(&self) -> Result<Value> {
+    let response = self
+      .http
+      .get(self.url("/v1/notebooks"))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/notebooks/{id}` — fetch notebook detail and its sources.
+  pub async fn get_notebook(&self, notebook_id: &str) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}")?;
+    expect_success(response).await
+  }
+
+  /// `DELETE /v1/notebooks/{id}` — delete a notebook (`204 No Content`).
+  pub async fn delete_notebook(&self, notebook_id: &str) -> Result<()> {
+    let path = format!("/v1/notebooks/{}", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .delete(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to DELETE /v1/notebooks/{id}")?;
+    expect_empty_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/sources` — submit a URL, text, file, or recording source.
+  pub async fn add_notebook_source(&self, notebook_id: &str, payload: &Value) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/sources", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(payload.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/sources")?;
+    expect_success(response).await
+  }
+
+  /// `DELETE /v1/notebooks/{id}/sources/{source_id}` — remove a source (`204 No Content`).
+  pub async fn delete_notebook_source(&self, notebook_id: &str, source_id: &str) -> Result<()> {
+    let path = format!(
+      "/v1/notebooks/{}/sources/{}",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(source_id)
+    );
+    let response = self
+      .http
+      .delete(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to DELETE /v1/notebooks/{id}/sources/{source_id}")?;
+    expect_empty_success(response).await
+  }
+
+  /// `GET /v1/notebooks/{id}/chunks/{chunk_id}` — inspect a cited source chunk.
+  pub async fn get_notebook_chunk(&self, notebook_id: &str, chunk_id: &str) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/chunks/{}",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(chunk_id)
+    );
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/chunks/{chunk_id}")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/notebooks/{id}/search` — run BM25 search, optionally scoped to `source_ids`.
+  pub async fn search_notebook(
+    &self,
+    notebook_id: &str,
+    query: &str,
+    top_k: Option<usize>,
+    source_ids: &[String],
+  ) -> Result<Value> {
+    let base = self.url(&format!(
+      "/v1/notebooks/{}/search",
+      encode_uri_segment(notebook_id)
+    ));
+    let mut url = reqwest::Url::parse(&base).context("invalid server search URL")?;
+    {
+      let mut pairs = url.query_pairs_mut();
+      pairs.append_pair("q", query);
+      if let Some(k) = top_k {
+        pairs.append_pair("top_k", &k.to_string());
+      }
+      if !source_ids.is_empty() {
+        pairs.append_pair("source_ids", &source_ids.join(","));
+      }
+    }
+    let response = self
+      .http
+      .get(url)
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/search")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/ask` — ask a source-grounded question with cited chunks.
+  pub async fn ask_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/ask", encode_uri_segment(notebook_id));
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .timeout(std::time::Duration::from_secs(180))
+      .build()
+      .context("failed to build HTTP client for notebook ask")?;
+    let response = client
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/ask")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/generate` — launch a Studio generator against notebook sources.
+  pub async fn generate_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/generate", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/generate")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/notebooks/{id}/artifacts` — list artifacts linked to a notebook.
+  pub async fn list_notebook_artifacts(&self, notebook_id: &str) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/artifacts",
+      encode_uri_segment(notebook_id)
+    );
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/artifacts")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/runs/{id}/artifacts` — list artifacts produced by a run.
+  pub async fn list_run_artifacts(&self, run_id: &str) -> Result<Value> {
+    let path = format!("/v1/runs/{}/artifacts", encode_uri_segment(run_id));
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/runs/{id}/artifacts")?;
+    expect_success(response).await
+  }
+
+  /// `GET /v1/runs/{id}/artifacts/{artifact_id}` — download raw artifact bytes.
+  pub async fn download_run_artifact(&self, run_id: &str, artifact_id: &str) -> Result<Vec<u8>> {
+    let path = format!(
+      "/v1/runs/{}/artifacts/{}",
+      encode_uri_segment(run_id),
+      encode_uri_segment(artifact_id)
+    );
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .timeout(std::time::Duration::from_secs(300))
+      .build()
+      .context("failed to build artifact download HTTP client")?;
+    let response = client
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/runs/{id}/artifacts/{artifact_id}")?;
+    expect_bytes_success(response).await
+  }
+}
+
+fn encode_uri_segment(raw: &str) -> String {
+  let mut out = String::with_capacity(raw.len());
+  for b in raw.bytes() {
+    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+      out.push(b as char);
+    } else {
+      out.push_str(&format!("%{b:02X}"));
+    }
+  }
+  out
 }
 
 /// Extract the `data:` payload from a single raw SSE event block.
@@ -387,6 +618,49 @@ async fn expect_success(response: reqwest::Response) -> Result<Value> {
   }
   serde_json::from_str(&text)
     .map_err(|e| anyhow!("server response was not valid JSON: {e} (body: {text})"))
+}
+
+async fn expect_empty_success(response: reqwest::Response) -> Result<()> {
+  let status = response.status();
+  if status.is_success() {
+    return Ok(());
+  }
+  let text = response.text().await.unwrap_or_default();
+  bail_server_error(status, &text)
+}
+
+async fn expect_bytes_success(response: reqwest::Response) -> Result<Vec<u8>> {
+  let status = response.status();
+  if !status.is_success() {
+    let text = response.text().await.unwrap_or_default();
+    return bail_server_error(status, &text);
+  }
+  let bytes = response
+    .bytes()
+    .await
+    .context("failed to read artifact bytes")?;
+  Ok(bytes.to_vec())
+}
+
+fn bail_server_error<T>(status: reqwest::StatusCode, text: &str) -> Result<T> {
+  if let Ok(value) = serde_json::from_str::<Value>(text) {
+    if let Some(message) = value.get("error").and_then(|e| {
+      e.get("message")
+        .and_then(Value::as_str)
+        .or_else(|| e.as_str())
+    }) {
+      bail!(
+        "server returned {} {}: {message}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+      );
+    }
+  }
+  bail!(
+    "server returned {} {}: {text}",
+    status.as_u16(),
+    status.canonical_reason().unwrap_or("")
+  )
 }
 
 #[cfg(test)]

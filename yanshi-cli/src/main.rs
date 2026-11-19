@@ -13,6 +13,8 @@ struct Cli {
 enum Commands {
   /// Workflow orchestration commands
   Workflow(commands::workflow::cli::WorkflowArgs),
+  /// Content Studio notebooks, source ingestion, grounded Q&A, and deliverable generation
+  Notebook(commands::notebook::cli::NotebookArgs),
   /// Audio generation and transcription commands
   Audio(commands::audio::cli::AudioArgs),
   /// Configuration management commands
@@ -85,6 +87,7 @@ async fn main() {
 
   let result = match cli.command {
     Commands::Workflow(args) => commands::workflow::cli::dispatch(args).await,
+    Commands::Notebook(args) => commands::notebook::cli::dispatch(args).await,
     Commands::Audio(args) => commands::audio::cli::dispatch(args).await,
     Commands::Config(args) => commands::config::cli::dispatch(args).await,
     Commands::Image(args) => commands::image::cli::dispatch(args).await,
