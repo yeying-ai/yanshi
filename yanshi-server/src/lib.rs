@@ -699,6 +699,7 @@ pub fn create_router(state: AppState) -> Router {
       get(notebooks::get_notebook_chunk),
     )
     .route("/v1/notebooks/:id/search", get(notebooks::search_notebook))
+    .route("/v1/notebooks/:id/ask", post(notebooks::ask_notebook))
     .route("/v1/notebooks/:id/generate", post(notebooks::generate))
     .route(
       "/v1/notebooks/:id/artifacts",

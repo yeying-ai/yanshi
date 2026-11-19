@@ -250,7 +250,7 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   let models_yml = dir.join("models.yml");
   std::fs::write(
     &models_yml,
-    "models:\n  mock-asr:\n    vendor: mock\n    type: asr\n    model_id: mock-asr\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
+    "models:\n  mock-asr:\n    vendor: mock\n    type: asr\n    model_id: mock-asr\n  mock-ask:\n    vendor: mock\n    type: text\n    model_id: mock-ask\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
   )
   .expect("models.yml");
   yanshi_llm::Yanshi::init_with_config(models_yml.to_str().expect("utf8"))
@@ -359,6 +359,112 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     rec_hits["chunks"][0]["source_id"], rec_src["id"],
     "Recording transcript is searchable: {rec_hits}"
   );
+
+  // `source_ids` scoping restricts search and `/ask` strictly to the chosen sources.
+  let csv_source_id = csv_src["id"].as_str().expect("csv id").to_string();
+  let docx_source_id = docx_src["id"].as_str().expect("docx id").to_string();
+  let (code, scoped_miss) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/search?q=gravitational&source_ids={csv_source_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{scoped_miss}");
+  assert_eq!(
+    scoped_miss["chunks"].as_array().map(Vec::len),
+    Some(0),
+    "text-source match must be excluded when search is scoped to csv_src: {scoped_miss}"
+  );
+  let (code, scoped_hit) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/search?q=SevernBore&source_ids={csv_source_id},{docx_source_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{scoped_hit}");
+  assert_eq!(scoped_hit["chunks"][0]["source_id"], csv_src["id"]);
+
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!(
+      "/v1/notebooks/{id}/search?q=SevernBore&source_ids={}",
+      Uuid::new_v4()
+    ),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST, "unknown source_id rejected");
+
+  // Grounded Q&A (`POST /v1/notebooks/{id}/ask`) verifies real chunk_ids and drops hallucinated ones.
+  let csv_chunk_id = csv_hits["chunks"][0]["chunk_id"]
+    .as_str()
+    .expect("csv chunk_id")
+    .to_string();
+  let docx_chunk_id = docx_hits["chunks"][0]["chunk_id"]
+    .as_str()
+    .expect("docx chunk_id")
+    .to_string();
+  let mock_ask_reply = json!([json!({
+    "answer": "Severn Bore reaches 15.0 m while amphidromic nodes exhibit zero amplitude.",
+    "citations": [
+      { "chunk_id": csv_chunk_id, "quote": "SevernBore | macrotidal_range_m: 15.0" },
+      { "chunk_id": docx_chunk_id, "quote": "zero-amplitude rotary tidal systems" },
+      { "chunk_id": "nonexistent:999", "quote": "Hallucinated evidence" }
+    ]
+  })
+  .to_string()]);
+  // SAFETY: single test function in this integration test binary.
+  unsafe {
+    std::env::set_var("YANSHI_MOCK_RESPONSES", mock_ask_reply.to_string());
+  }
+  yanshi_llm::Yanshi::init_with_config(models_yml.to_str().expect("utf8"))
+    .await
+    .expect("reinit mock-ask");
+  let (code, ask_res) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/ask"),
+    &tenant,
+    Some(json!({
+      "question": "Compare Severn Bore macrotidal range with amphidromic nodes.",
+      "model": "mock-ask",
+      "source_ids": [csv_source_id]
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{ask_res}");
+  assert!(
+    ask_res["answer"]
+      .as_str()
+      .is_some_and(|a| a.contains("15.0 m")),
+    "{ask_res}"
+  );
+  // Because `source_ids` only included `csv_source_id`, both `nonexistent:999` AND
+  // `docx_chunk_id` (outside the selected scope!) must be stripped by server verification!
+  let ask_cites = ask_res["citations"].as_array().expect("ask citations");
+  assert_eq!(
+    ask_cites.len(),
+    1,
+    "only citations belonging to the scoped ready chunks may survive: {ask_res}"
+  );
+  assert_eq!(ask_cites[0]["chunk_id"], csv_chunk_id);
+  assert_eq!(ask_cites[0]["source_id"], csv_src["id"]);
+
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/ask"),
+    &other,
+    Some(json!({ "question": "probe", "model": "mock-ask" })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant /ask must 404");
 
   // "Restart": a new AppState (empty index cache) on the same database.
   let restarted = AppState::new(state.db.clone());

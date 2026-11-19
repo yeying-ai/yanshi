@@ -8,7 +8,8 @@
 //! POST   /v1/notebooks/{id}/sources                 {kind, ...}          → source (pending; ingests in the background)
 //! DELETE /v1/notebooks/{id}/sources/{source_id}                          → 204 No Content
 //! GET    /v1/notebooks/{id}/chunks/{chunk_id}                            → chunk
-//! GET    /v1/notebooks/{id}/search?q=&top_k=                             → {chunks}
+//! GET    /v1/notebooks/{id}/search?q=&top_k=&source_ids=                 → {chunks}
+//! POST   /v1/notebooks/{id}/ask                     {question, ...}      → {answer, citations, ...}
 //! POST   /v1/notebooks/{id}/generate                {kind, params, model} → {run_id, kind}
 //! GET    /v1/notebooks/{id}/artifacts                                    → {artifacts}
 //! ```
@@ -27,7 +28,7 @@
 //! dropped whenever one of its sources finishes ingesting. A restart
 //! therefore costs one rebuild per notebook, nothing more.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
 use std::sync::{Arc, Mutex};
 
@@ -981,6 +982,10 @@ pub struct SearchQuery {
   pub q: String,
   #[serde(default)]
   pub top_k: Option<usize>,
+  /// Optional comma-separated source UUIDs scoping search to a subset of the
+  /// notebook's sources (`?source_ids=uuid1,uuid2`).
+  #[serde(default)]
+  pub source_ids: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -989,6 +994,68 @@ pub struct SearchHit {
   pub chunk_id: String,
   pub content: String,
   pub score: f32,
+}
+
+fn parse_source_ids_csv(raw: Option<&str>) -> Result<Option<Vec<Uuid>>, ApiError> {
+  let Some(raw) = raw else {
+    return Ok(None);
+  };
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return Err(ApiError::BadRequest(
+      "source_ids must select at least one source".into(),
+    ));
+  }
+  let mut ids = Vec::new();
+  for token in trimmed.split(',') {
+    let token = token.trim();
+    if token.is_empty() {
+      continue;
+    }
+    let id = Uuid::parse_str(token)
+      .map_err(|_| ApiError::BadRequest(format!("invalid source_id UUID '{token}'")))?;
+    if !ids.contains(&id) {
+      ids.push(id);
+    }
+  }
+  if ids.is_empty() {
+    return Err(ApiError::BadRequest(
+      "source_ids must select at least one source".into(),
+    ));
+  }
+  Ok(Some(ids))
+}
+
+async fn validate_source_scope(
+  state: &AppState,
+  tenant: &TenantId,
+  notebook_id: Uuid,
+  source_ids: Option<&[Uuid]>,
+) -> Result<Option<HashSet<Uuid>>, ApiError> {
+  let Some(ids) = source_ids else {
+    return Ok(None);
+  };
+  if ids.is_empty() {
+    return Err(ApiError::BadRequest(
+      "source_ids must select at least one source".into(),
+    ));
+  }
+  let sources = state
+    .repos
+    .sources
+    .list_for_notebook(tenant.as_str(), notebook_id)
+    .await?;
+  let known: HashSet<Uuid> = sources.into_iter().map(|s| s.id).collect();
+  let mut allowed = HashSet::with_capacity(ids.len());
+  for &sid in ids {
+    if !known.contains(&sid) {
+      return Err(ApiError::BadRequest(format!(
+        "source {sid} is not in notebook {notebook_id}"
+      )));
+    }
+    allowed.insert(sid);
+  }
+  Ok(Some(allowed))
 }
 
 pub async fn search_notebook(
@@ -1001,6 +1068,9 @@ pub async fn search_notebook(
   if query.q.trim().is_empty() {
     return Err(ApiError::BadRequest("q must not be empty".into()));
   }
+  let parsed_ids = parse_source_ids_csv(query.source_ids.as_deref())?;
+  let scope = validate_source_scope(&state, &tenant, id, parsed_ids.as_deref()).await?;
+
   let index = match state.notebook_indexes.get(id) {
     Some(index) => index,
     None => {
@@ -1030,11 +1100,29 @@ pub async fn search_notebook(
     return Ok(Json(json!({ "chunks": [] })));
   }
   let top_k = query.top_k.unwrap_or(5).clamp(1, 50);
-  let hits: Vec<SearchHit> = index
-    .backend
-    .search(&query.q, top_k)
-    .await
-    .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
+  let raw_hits = match &scope {
+    None => index
+      .backend
+      .search(&query.q, top_k)
+      .await
+      .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?,
+    Some(allowed) => {
+      let scoped_docs: Vec<(String, String)> = index
+        .chunks
+        .values()
+        .filter(|c| allowed.contains(&c.source_id))
+        .map(|c| (c.chunk_id.clone(), c.content.clone()))
+        .collect();
+      if scoped_docs.is_empty() {
+        return Ok(Json(json!({ "chunks": [] })));
+      }
+      Bm25KnowledgeBackend::from_documents(scoped_docs)
+        .search(&query.q, top_k)
+        .await
+        .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
+    }
+  };
+  let hits: Vec<SearchHit> = raw_hits
     .into_iter()
     .filter_map(|hit| {
       let chunk = index.chunks.get(&hit.id)?;
@@ -1047,6 +1135,253 @@ pub async fn search_notebook(
     })
     .collect();
   Ok(Json(json!({ "chunks": hits })))
+}
+
+// ── grounded Q&A (`/ask`) ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AskNotebookRequest {
+  pub question: String,
+  /// Optional subset of notebook source IDs to ground the answer against.
+  #[serde(default)]
+  pub source_ids: Option<Vec<Uuid>>,
+  /// Chat model for grounded synthesis; falls back to `YANSHI_GENERATE_MODEL`.
+  #[serde(default)]
+  pub model: Option<String>,
+  /// Optional cap on how many relevant passages are passed to the model.
+  #[serde(default)]
+  pub top_k: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroundedAnswerCitation {
+  pub source_id: Uuid,
+  pub chunk_id: String,
+  pub quote: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskNotebookResponse {
+  pub notebook_id: Uuid,
+  pub question: String,
+  pub answer: String,
+  pub model: String,
+  pub citations: Vec<GroundedAnswerCitation>,
+  pub used_chunk_count: usize,
+}
+
+fn grounded_answer_schema() -> Value {
+  json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["answer", "citations"],
+    "properties": {
+      "answer": { "type": "string" },
+      "citations": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["chunk_id", "quote"],
+          "properties": {
+            "chunk_id": { "type": "string" },
+            "quote": { "type": "string" }
+          }
+        }
+      }
+    }
+  })
+}
+
+fn resolve_notebook_model(explicit: Option<&str>) -> Result<String, ApiError> {
+  explicit
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+    .map(str::to_string)
+    .or_else(|| {
+      std::env::var("YANSHI_GENERATE_MODEL")
+        .ok()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+    })
+    .ok_or_else(|| {
+      ApiError::BadRequest("set `model`, or YANSHI_GENERATE_MODEL on the gateway".into())
+    })
+}
+
+fn parse_grounded_answer_reply(
+  raw_reply: &str,
+  chunk_sources: &HashMap<String, Uuid>,
+) -> Result<(String, Vec<GroundedAnswerCitation>), String> {
+  #[derive(Deserialize)]
+  struct RawCitation {
+    #[serde(default)]
+    chunk_id: String,
+    #[serde(default)]
+    quote: String,
+  }
+  #[derive(Deserialize)]
+  struct RawAnswer {
+    answer: String,
+    #[serde(default)]
+    citations: Vec<RawCitation>,
+  }
+
+  let value = extract_json_object(raw_reply)?;
+  let parsed: RawAnswer =
+    serde_json::from_value(value).map_err(|e| format!("invalid grounded answer JSON: {e}"))?;
+  let answer = parsed.answer.trim().to_string();
+  if answer.is_empty() {
+    return Err("grounded answer was empty".to_string());
+  }
+
+  let mut seen: HashSet<(String, String)> = HashSet::new();
+  let mut citations = Vec::new();
+  for raw in parsed.citations {
+    let cid = raw.chunk_id.trim();
+    let quote = raw.quote.trim();
+    if cid.is_empty() || quote.is_empty() {
+      continue;
+    }
+    let Some(&source_id) = chunk_sources.get(cid) else {
+      continue;
+    };
+    let key = (cid.to_string(), quote.to_string());
+    if seen.insert(key) {
+      citations.push(GroundedAnswerCitation {
+        source_id,
+        chunk_id: cid.to_string(),
+        quote: quote.to_string(),
+      });
+    }
+  }
+  Ok((answer, citations))
+}
+
+fn extract_json_object(reply: &str) -> Result<Value, String> {
+  let trimmed = reply.trim();
+  if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+    return Ok(v);
+  }
+  let without_think = if let Some(start) = trimmed.find("<think>")
+    && let Some(end) = trimmed[start..].find("</think>")
+  {
+    format!(
+      "{}{}",
+      &trimmed[..start],
+      &trimmed[start + end + "</think>".len()..]
+    )
+  } else {
+    trimmed.to_string()
+  };
+  let s = without_think.trim();
+  if let Ok(v) = serde_json::from_str::<Value>(s) {
+    return Ok(v);
+  }
+  if let Some(fence_start) = s.find("```") {
+    let after_ticks = &s[fence_start + 3..];
+    let body_start = after_ticks.find('\n').map_or(0, |nl| nl + 1);
+    let body = &after_ticks[body_start..];
+    if let Some(fence_end) = body.find("```")
+      && let Ok(v) = serde_json::from_str::<Value>(body[..fence_end].trim())
+    {
+      return Ok(v);
+    }
+  }
+  if let Some(open) = s.find('{')
+    && let Some(close) = s.rfind('}')
+    && close > open
+    && let Ok(v) = serde_json::from_str::<Value>(&s[open..=close])
+  {
+    return Ok(v);
+  }
+  Err("model reply did not contain valid JSON".to_string())
+}
+
+pub async fn ask_notebook(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+  Json(req): Json<AskNotebookRequest>,
+) -> Result<Json<AskNotebookResponse>, ApiError> {
+  own_notebook(&state, &tenant, id).await?;
+  let question = req.question.trim().to_string();
+  if question.is_empty() {
+    return Err(ApiError::BadRequest("question must not be empty".into()));
+  }
+  let model = resolve_notebook_model(req.model.as_deref())?;
+  let scope = validate_source_scope(&state, &tenant, id, req.source_ids.as_deref()).await?;
+
+  let mut ready_chunks = state
+    .repos
+    .chunks
+    .list_ready_for_notebook(tenant.as_str(), id)
+    .await?;
+  if let Some(allowed) = &scope {
+    ready_chunks.retain(|c| allowed.contains(&c.source_id));
+  }
+  if ready_chunks.is_empty() {
+    let msg = if scope.is_some() {
+      "selected sources have no ready chunks to answer from".to_string()
+    } else {
+      format!("notebook {id} has no ready sources to answer from")
+    };
+    return Err(ApiError::BadRequest(msg));
+  }
+
+  let mut selected =
+    select_chunks_for_generate(ready_chunks, Some(&question), GENERATE_CHUNK_BUDGET).await;
+  if let Some(limit) = req.top_k.map(|k| k.clamp(1, 50))
+    && selected.len() > limit
+  {
+    selected.truncate(limit);
+  }
+  let used_chunk_count = selected.len();
+  let chunk_sources: HashMap<String, Uuid> = selected
+    .iter()
+    .map(|c| (c.chunk_id.clone(), c.source_id))
+    .collect();
+  let formatted_passages = selected
+    .iter()
+    .map(|c| format!("[chunk_id: {}]\n{}", c.chunk_id, c.content))
+    .collect::<Vec<_>>()
+    .join("\n\n---\n\n");
+
+  let schema = grounded_answer_schema();
+  let schema_str = serde_json::to_string(&schema).unwrap_or_default();
+  let prompt = format!(
+    "Answer the user's question strictly using ONLY the notebook source passages below. \
+     If the passages do not contain enough evidence, state clearly what is missing rather than guessing. \
+     Cite every supporting passage by its exact `chunk_id` and a verbatim `quote` copied from that passage.\n\n\
+     Question: {question}\n\n\
+     Source passages:\n{formatted_passages}\n\n\
+     Output ONLY valid JSON strictly conforming to this JSON Schema (no markdown fences, no extra prose):\n{schema_str}"
+  );
+
+  yanshi_llm::Yanshi::ensure_init()
+    .await
+    .map_err(|e| ApiError::Internal(format!("initializing model registry: {e}")))?;
+  let response = yanshi_llm::Yanshi::model(&model)
+    .system(
+      "You are a source-grounded research assistant. Answer concisely in the language of the user's question and cite exact source chunk_ids.",
+    )
+    .prompt(&prompt)
+    .json_schema("grounded_answer", schema)
+    .execute_full()
+    .await
+    .map_err(|e| ApiError::Internal(format!("LLM execution failed: {e}")))?;
+
+  let (answer, citations) = parse_grounded_answer_reply(&response.content, &chunk_sources)
+    .map_err(|e| ApiError::Internal(format!("parsing grounded answer: {e}")))?;
+
+  Ok(Json(AskNotebookResponse {
+    notebook_id: id,
+    question,
+    answer,
+    model,
+    citations,
+    used_chunk_count,
+  }))
 }
 
 // ── generate (Y5.4) ─────────────────────────────────────────────────────
@@ -1113,6 +1448,9 @@ pub struct GenerateRequest {
   /// `pdf`, ...). `chunks`, `url` and `text` are set from the notebook.
   #[serde(default)]
   pub params: serde_json::Map<String, Value>,
+  /// Optional subset of notebook source IDs to include in this generation run.
+  #[serde(default)]
+  pub source_ids: Option<Vec<Uuid>>,
   /// Model for the generator's llm steps; falls back to
   /// `YANSHI_GENERATE_MODEL`.
   #[serde(default)]
@@ -1140,17 +1478,8 @@ pub async fn generate(
           .join(", ")
       ))
     })?;
-  let model = req
-    .model
-    .clone()
-    .or_else(|| {
-      std::env::var("YANSHI_GENERATE_MODEL")
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-    })
-    .ok_or_else(|| {
-      ApiError::BadRequest("set `model`, or YANSHI_GENERATE_MODEL on the gateway".into())
-    })?;
+  let model = resolve_notebook_model(req.model.as_deref())?;
+  let scope = validate_source_scope(&state, &tenant, id, req.source_ids.as_deref()).await?;
   let definition = yanshi_config::executor::parse_workflow_definition(template)
     .map_err(|e| ApiError::Internal(format!("generator template: {e:#}")))?;
   for key in req.params.keys() {
@@ -1167,15 +1496,21 @@ pub async fn generate(
     }
   }
 
-  let ready_chunks = state
+  let mut ready_chunks = state
     .repos
     .chunks
     .list_ready_for_notebook(tenant.as_str(), id)
     .await?;
+  if let Some(allowed) = &scope {
+    ready_chunks.retain(|c| allowed.contains(&c.source_id));
+  }
   if ready_chunks.is_empty() {
-    return Err(ApiError::BadRequest(format!(
-      "notebook {id} has no ready sources to generate from"
-    )));
+    let msg = if scope.is_some() {
+      "selected sources have no ready chunks to generate from".to_string()
+    } else {
+      format!("notebook {id} has no ready sources to generate from")
+    };
+    return Err(ApiError::BadRequest(msg));
   }
   let query_hint = req
     .params
@@ -1610,6 +1945,63 @@ mod tests {
         && json_out.contains("service: worker")
         && json_out.contains("qps: 4200"),
       "{json_out}"
+    );
+  }
+
+  #[test]
+  fn source_ids_csv_parses_dedupes_and_rejects_empty_or_invalid() {
+    assert!(parse_source_ids_csv(None).expect("none").is_none());
+    assert!(parse_source_ids_csv(Some("  ")).is_err());
+    assert!(parse_source_ids_csv(Some(", ,")).is_err());
+    assert!(parse_source_ids_csv(Some("not-a-uuid")).is_err());
+
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let parsed = parse_source_ids_csv(Some(&format!(" {a}, {b} , {a} ")))
+      .expect("valid")
+      .expect("some");
+    assert_eq!(parsed, vec![a, b]);
+  }
+
+  #[test]
+  fn grounded_answer_reply_verifies_real_chunks_and_strips_hallucinated_ids() {
+    let src_a = Uuid::new_v4();
+    let src_b = Uuid::new_v4();
+    let chunk_a = format!("{src_a}:0");
+    let chunk_b = format!("{src_b}:1");
+    let lookup = HashMap::from([(chunk_a.clone(), src_a), (chunk_b.clone(), src_b)]);
+
+    let fenced_reply = format!(
+      "<think>checking citations</think>\n```json\n{}\n```",
+      json!({
+        "answer": "Severn Bore reaches 15.0 m while amphidromic nodes have zero amplitude.",
+        "citations": [
+          { "chunk_id": chunk_a, "quote": "SevernBore, 15.0" },
+          { "chunk_id": chunk_a, "quote": "SevernBore, 15.0" },
+          { "chunk_id": "hallucinated-chunk:99", "quote": "Made up quote" },
+          { "chunk_id": chunk_b, "quote": "   " },
+          { "chunk_id": chunk_b, "quote": "zero-amplitude rotary tidal systems" }
+        ]
+      })
+    );
+
+    let (answer, citations) =
+      parse_grounded_answer_reply(&fenced_reply, &lookup).expect("parsed grounded answer");
+    assert!(answer.contains("15.0 m"));
+    assert_eq!(
+      citations,
+      vec![
+        GroundedAnswerCitation {
+          source_id: src_a,
+          chunk_id: chunk_a,
+          quote: "SevernBore, 15.0".to_string(),
+        },
+        GroundedAnswerCitation {
+          source_id: src_b,
+          chunk_id: chunk_b,
+          quote: "zero-amplitude rotary tidal systems".to_string(),
+        },
+      ]
     );
   }
 }

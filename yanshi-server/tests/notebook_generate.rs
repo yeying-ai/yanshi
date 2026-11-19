@@ -105,13 +105,31 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   }
   let chunk = format!("{source}:0");
 
-  // Nothing ingested yet → 400; unknown kind → 400.
+  // Nothing ingested yet → 400; unknown kind → 400; empty or unknown source_ids → 400.
   let (code, _) = call(
     &state,
     "POST",
     &format!("/v1/notebooks/{notebook}/generate"),
     &tenant,
     Some(json!({"kind": "essay", "model": "mock-model"})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST);
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate"),
+    &tenant,
+    Some(json!({"kind": "report", "model": "mock-model", "source_ids": []})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST);
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate"),
+    &tenant,
+    Some(json!({"kind": "report", "model": "mock-model", "source_ids": [Uuid::new_v4()]})),
   )
   .await;
   assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -135,7 +153,10 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     &format!("/v1/notebooks/{notebook}/generate"),
     &tenant,
     Some(json!({
-      "kind": "report", "model": "mock-model", "params": {"sections": 2, "pdf": want_pdf}
+      "kind": "report",
+      "model": "mock-model",
+      "source_ids": [source],
+      "params": {"sections": 2, "pdf": want_pdf}
     })),
   )
   .await;
