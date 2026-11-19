@@ -262,6 +262,9 @@ pub fn infer_preview_mime(path: &Path) -> &'static str {
     "pdf" => "application/pdf",
     "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "csv" => "text/csv; charset=utf-8",
+    "tsv" => "text/tab-separated-values; charset=utf-8",
     _ => "application/octet-stream",
   }
 }
@@ -395,7 +398,7 @@ pub struct ZipSourceEntry {
   pub path: PathBuf,
 }
 
-fn sanitize_zip_segment(raw: &str, fallback: &str) -> String {
+pub(crate) fn sanitize_zip_segment(raw: &str, fallback: &str) -> String {
   let cleaned: String = raw
     .chars()
     .map(|c| {
@@ -415,7 +418,7 @@ fn sanitize_zip_segment(raw: &str, fallback: &str) -> String {
   }
 }
 
-fn deduplicate_entry_path(
+pub(crate) fn deduplicate_entry_path(
   seen: &mut std::collections::HashSet<String>,
   dir: &str,
   filename: &str,
@@ -702,6 +705,18 @@ mod tests {
     assert_eq!(
       infer_preview_mime(Path::new("deck.pptx")),
       "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    );
+    assert_eq!(
+      infer_preview_mime(Path::new("table.xlsx")),
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    assert_eq!(
+      infer_preview_mime(Path::new("table.csv")),
+      "text/csv; charset=utf-8"
+    );
+    assert_eq!(
+      infer_preview_mime(Path::new("table.tsv")),
+      "text/tab-separated-values; charset=utf-8"
     );
   }
 

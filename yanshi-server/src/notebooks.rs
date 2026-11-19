@@ -2,8 +2,10 @@
 //!
 //! ```text
 //! POST   /v1/notebooks                              {title}              → notebook
+//! POST   /v1/notebooks/import                       bundle | {bundle}    → {notebook, imported_sources, imported_chunks}
 //! GET    /v1/notebooks                                                   → {notebooks}
 //! GET    /v1/notebooks/{id}                                              → {notebook, sources}
+//! GET    /v1/notebooks/{id}/export                                       → NotebookExportBundle
 //! PATCH  /v1/notebooks/{id}                         {title}              → notebook
 //! DELETE /v1/notebooks/{id}                                              → 204 No Content
 //! POST   /v1/notebooks/{id}/sources                 {kind, ...}          → source (pending; ingests in the background)
@@ -11,8 +13,9 @@
 //! GET    /v1/notebooks/{id}/chunks/{chunk_id}                            → chunk
 //! GET    /v1/notebooks/{id}/search?q=&top_k=&source_ids=                 → {chunks}
 //! POST   /v1/notebooks/{id}/ask                     {question, ...}      → {answer, citations, ...}
-//! POST   /v1/notebooks/{id}/generate                {kind, params, model} → {run_id, kind}
+//! POST   /v1/notebooks/{id}/generate                {kind, params, ...}  → {run_id, kind}
 //! GET    /v1/notebooks/{id}/artifacts                                    → {artifacts}
+//! GET    /v1/notebooks/{id}/artifacts.zip                                → zip bundle (+ BRIEFING.md)
 //! DELETE /v1/notebooks/{id}/artifacts/{artifact_id}                      → 204 No Content
 //! ```
 //!
@@ -32,21 +35,24 @@
 //! therefore costs one rebuild per notebook, nothing more.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path as FsPath;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::{
   Extension, Json,
+  body::Body,
   extract::{Path, Query, State},
-  http::StatusCode,
+  http::{HeaderValue, StatusCode, header},
+  response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use yanshi_db::{
-  NewSource, Notebook, NotebookRepo, Source, SourceChunk, SourceChunkRepo, SourceKind, SourceRepo,
-  SourceStatus,
+  NewSource, Notebook, NotebookArtifact, NotebookRepo, Source, SourceChunk, SourceChunkRepo,
+  SourceKind, SourceRepo, SourceStatus,
 };
 use yanshi_rag::{Bm25KnowledgeBackend, KnowledgeBackend};
 
@@ -2049,6 +2055,9 @@ pub struct GenerateRequest {
   /// `YANSHI_GENERATE_MODEL`.
   #[serde(default)]
   pub model: Option<String>,
+  /// Optional USD spend cap for this generation run (`RFC_CONTENT_STUDIO` §6 / §7).
+  #[serde(default)]
+  pub cost_limit_usd: Option<f64>,
 }
 
 pub async fn generate(
@@ -2073,6 +2082,9 @@ pub async fn generate(
       ))
     })?;
   let model = resolve_notebook_model(req.model.as_deref())?;
+  if let Some(limit) = req.cost_limit_usd {
+    yanshi_config::config::v2::validate_cost_limit(limit).map_err(ApiError::BadRequest)?;
+  }
   let scope = validate_source_scope(&state, &tenant, id, req.source_ids.as_deref()).await?;
   let definition = yanshi_config::executor::parse_workflow_definition(template)
     .map_err(|e| ApiError::Internal(format!("generator template: {e:#}")))?;
@@ -2138,6 +2150,7 @@ pub async fn generate(
     crate::runs::RunOptions {
       inputs,
       model: Some(model),
+      cost_limit_usd: req.cost_limit_usd,
       notebook: Some(crate::runs::NotebookLink {
         notebook_id: id,
         kind: req.kind.clone(),
@@ -2292,6 +2305,717 @@ pub async fn delete_notebook_artifact(
     )));
   }
   Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Portable bundle export / import & deliverables `.zip` (AD1) ─────────
+
+/// Schema version for portable `NotebookExportBundle` JSON documents.
+pub const NOTEBOOK_BUNDLE_VERSION: u32 = 1;
+const MAX_IMPORT_SOURCES: usize = 200;
+const MAX_IMPORT_CHUNKS_PER_SOURCE: usize = 2_000;
+
+fn default_json_object() -> Value {
+  json!({})
+}
+
+fn default_ready_status() -> String {
+  "ready".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedNotebookMeta {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub id: Option<Uuid>,
+  pub title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedSourceChunk {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub chunk_id: Option<String>,
+  #[serde(default)]
+  pub ordinal: i32,
+  pub content: String,
+  #[serde(default = "default_json_object")]
+  pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedNotebookSource {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub id: Option<Uuid>,
+  pub kind: String,
+  pub title: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uri: Option<String>,
+  #[serde(default = "default_ready_status")]
+  pub status: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sha256: Option<String>,
+  #[serde(default)]
+  pub chunks: Vec<ExportedSourceChunk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedNotebookDeliverable {
+  pub artifact_id: Uuid,
+  pub run_id: Uuid,
+  pub kind: String,
+  pub name: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mime_type: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub size_bytes: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sha256: Option<String>,
+  pub created_at: DateTime<Utc>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub deliverable: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotebookExportBundle {
+  pub version: u32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exported_at: Option<DateTime<Utc>>,
+  pub notebook: ExportedNotebookMeta,
+  #[serde(default)]
+  pub sources: Vec<ExportedNotebookSource>,
+  #[serde(default)]
+  pub deliverables: Vec<ExportedNotebookDeliverable>,
+  #[serde(default)]
+  pub markdown_brief: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ImportNotebookRequest {
+  Wrapped {
+    bundle: NotebookExportBundle,
+    #[serde(default)]
+    title: Option<String>,
+  },
+  Direct(NotebookExportBundle),
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportNotebookResponse {
+  pub notebook: Notebook,
+  pub imported_sources: usize,
+  pub imported_chunks: usize,
+}
+
+#[derive(Debug)]
+enum ImportValidationError {
+  BadRequest(String),
+  PayloadTooLarge(String),
+}
+
+impl From<ImportValidationError> for ApiError {
+  fn from(err: ImportValidationError) -> Self {
+    match err {
+      ImportValidationError::BadRequest(msg) => Self::BadRequest(msg),
+      ImportValidationError::PayloadTooLarge(msg) => Self::PayloadTooLarge(msg),
+    }
+  }
+}
+
+#[derive(Debug)]
+struct ValidatedImportSource {
+  kind: SourceKind,
+  title: String,
+  uri: Option<String>,
+  status: String,
+  error: Option<String>,
+  sha256: Option<String>,
+  chunks: Vec<(String, Value)>,
+}
+
+#[derive(Debug)]
+struct ValidatedImportBundle {
+  title: String,
+  sources: Vec<ValidatedImportSource>,
+}
+
+fn parse_source_kind(raw: &str) -> Option<SourceKind> {
+  match raw.trim() {
+    "url" => Some(SourceKind::Url),
+    "file" => Some(SourceKind::File),
+    "text" => Some(SourceKind::Text),
+    "recording" => Some(SourceKind::Recording),
+    _ => None,
+  }
+}
+
+fn validate_notebook_import_bundle(
+  bundle: &NotebookExportBundle,
+  title_override: Option<&str>,
+) -> Result<ValidatedImportBundle, ImportValidationError> {
+  if bundle.version != NOTEBOOK_BUNDLE_VERSION {
+    return Err(ImportValidationError::BadRequest(format!(
+      "unsupported notebook bundle version {} (expected {})",
+      bundle.version, NOTEBOOK_BUNDLE_VERSION
+    )));
+  }
+  let resolved_title = title_override
+    .map(str::trim)
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| bundle.notebook.title.trim());
+  if resolved_title.is_empty() {
+    return Err(ImportValidationError::BadRequest(
+      "notebook title must not be empty".to_string(),
+    ));
+  }
+  if bundle.sources.len() > MAX_IMPORT_SOURCES {
+    return Err(ImportValidationError::BadRequest(format!(
+      "bundle contains {} sources, exceeding limit of {MAX_IMPORT_SOURCES}",
+      bundle.sources.len()
+    )));
+  }
+
+  let mut total_bytes: usize = 0;
+  let mut validated_sources = Vec::with_capacity(bundle.sources.len());
+
+  for (idx, src) in bundle.sources.iter().enumerate() {
+    let Some(kind) = parse_source_kind(&src.kind) else {
+      return Err(ImportValidationError::BadRequest(format!(
+        "source #{idx} has unsupported kind '{}': expected url, file, text, or recording",
+        src.kind
+      )));
+    };
+    if src.chunks.len() > MAX_IMPORT_CHUNKS_PER_SOURCE {
+      return Err(ImportValidationError::BadRequest(format!(
+        "source #{idx} contains {} chunks, exceeding limit of {MAX_IMPORT_CHUNKS_PER_SOURCE}",
+        src.chunks.len()
+      )));
+    }
+    let source_title = {
+      let t = src.title.trim();
+      if !t.is_empty() {
+        t.to_string()
+      } else if let Some(uri) = src.uri.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        uri.to_string()
+      } else {
+        format!("source-{}", idx + 1)
+      }
+    };
+
+    let mut ordered_chunks: Vec<(i32, String, Value)> = Vec::with_capacity(src.chunks.len());
+    for chunk in &src.chunks {
+      let content = chunk.content.trim().to_string();
+      if content.is_empty() {
+        continue;
+      }
+      total_bytes = total_bytes.saturating_add(content.len());
+      if total_bytes > MAX_SOURCE_BYTES {
+        return Err(ImportValidationError::PayloadTooLarge(format!(
+          "imported chunk text exceeds {MAX_SOURCE_BYTES} bytes"
+        )));
+      }
+      let meta = if chunk.metadata.is_object() {
+        chunk.metadata.clone()
+      } else {
+        json!({})
+      };
+      ordered_chunks.push((chunk.ordinal, content, meta));
+    }
+    ordered_chunks.sort_by_key(|(ordinal, _, _)| *ordinal);
+    let chunks: Vec<(String, Value)> = ordered_chunks
+      .into_iter()
+      .map(|(_, content, meta)| (content, meta))
+      .collect();
+
+    validated_sources.push(ValidatedImportSource {
+      kind,
+      title: source_title,
+      uri: src
+        .uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string),
+      status: src.status.trim().to_ascii_lowercase(),
+      error: src
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string),
+      sha256: src
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string),
+      chunks,
+    });
+  }
+
+  Ok(ValidatedImportBundle {
+    title: resolved_title.to_string(),
+    sources: validated_sources,
+  })
+}
+
+/// Render a human-readable Markdown research dossier summarizing a notebook's
+/// ingested sources, generated deliverables, and verbatim cited quotes.
+pub fn render_notebook_markdown_brief(
+  title: &str,
+  sources: &[Source],
+  chunks: &[SourceChunk],
+  artifacts: &[NotebookArtifact],
+) -> String {
+  let mut chunk_counts: HashMap<Uuid, usize> = HashMap::new();
+  let mut chunk_lookup: HashMap<&str, (Uuid, i32)> = HashMap::with_capacity(chunks.len());
+  for c in chunks {
+    *chunk_counts.entry(c.source_id).or_insert(0) += 1;
+    chunk_lookup.insert(c.chunk_id.as_str(), (c.source_id, c.ordinal));
+  }
+  let source_titles: HashMap<Uuid, &str> =
+    sources.iter().map(|s| (s.id, s.title.as_str())).collect();
+
+  let mut lines = vec![
+    format!("# {title}"),
+    String::new(),
+    format!("## Sources ({})", sources.len()),
+  ];
+  if sources.is_empty() {
+    lines.push("- *(no sources ingested)*".to_string());
+  } else {
+    for src in sources {
+      let count = chunk_counts.get(&src.id).copied().unwrap_or(0);
+      let uri_suffix = src
+        .uri
+        .as_deref()
+        .filter(|u| !u.is_empty() && *u != src.title)
+        .map(|u| format!(" — `{u}`"))
+        .unwrap_or_default();
+      lines.push(format!(
+        "- **{}** (`{}`, status: `{}`, {} chunks){}",
+        src.title, src.kind, src.status, count, uri_suffix
+      ));
+    }
+  }
+  lines.push(String::new());
+
+  // Group artifacts by `(run_id, kind)` so multi-file generators (`report.md`,
+  // `report.html`, `report.pdf`) present their shared `Deliverable` citations once.
+  let mut group_order: Vec<(Uuid, String)> = Vec::new();
+  let mut groups: HashMap<(Uuid, String), Vec<&NotebookArtifact>> = HashMap::new();
+  for item in artifacts {
+    let key = (item.artifact.run_id, item.kind.clone());
+    let entry = groups.entry(key.clone()).or_insert_with(|| {
+      group_order.push(key);
+      Vec::new()
+    });
+    entry.push(item);
+  }
+
+  lines.push(format!("## Deliverables ({})", group_order.len()));
+  if group_order.is_empty() {
+    lines.push("- *(no deliverables generated)*".to_string());
+  } else {
+    for key in group_order {
+      let Some(items) = groups.get(&key) else {
+        continue;
+      };
+      let first = items[0];
+      let deliverable = items.iter().find_map(|a| a.deliverable.as_ref());
+      let heading = deliverable
+        .and_then(|d| d.get("title"))
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(first.kind.as_str());
+      lines.push(String::new());
+      lines.push(format!("### {heading} (`{}`)", first.kind));
+      let files_list: Vec<String> = items
+        .iter()
+        .map(|a| format!("`{}`", a.artifact.name))
+        .collect();
+      lines.push(format!("- Files: {}", files_list.join(", ")));
+
+      if let Some(citations) = deliverable
+        .and_then(|d| d.get("citations"))
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+      {
+        lines.push("- Citations:".to_string());
+        let mut seen_quotes: HashSet<(String, String)> = HashSet::new();
+        for cit in citations {
+          let cid = cit
+            .get("chunk_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+          let quote = cit
+            .get("quote")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+          if cid.is_empty() && quote.is_empty() {
+            continue;
+          }
+          if !seen_quotes.insert((cid.to_string(), quote.to_string())) {
+            continue;
+          }
+          let provenance = if let Some(&(src_id, ordinal)) = chunk_lookup.get(cid) {
+            let src_title = source_titles.get(&src_id).copied().unwrap_or("source");
+            format!("{src_title} #{ordinal} (`{cid}`)")
+          } else {
+            format!("`{cid}`")
+          };
+          if quote.is_empty() {
+            lines.push(format!("  - {provenance}"));
+          } else {
+            lines.push(format!("  - \"{quote}\" — *{provenance}*"));
+          }
+        }
+      }
+    }
+  }
+  lines.push(String::new());
+  lines.join("\n")
+}
+
+fn build_notebook_export_bundle(
+  notebook: &Notebook,
+  sources: &[Source],
+  ready_chunks: &[SourceChunk],
+  artifacts: &[NotebookArtifact],
+) -> NotebookExportBundle {
+  let mut chunks_by_source: HashMap<Uuid, Vec<ExportedSourceChunk>> = HashMap::new();
+  for chunk in ready_chunks {
+    chunks_by_source
+      .entry(chunk.source_id)
+      .or_default()
+      .push(ExportedSourceChunk {
+        chunk_id: Some(chunk.chunk_id.clone()),
+        ordinal: chunk.ordinal,
+        content: chunk.content.clone(),
+        metadata: chunk.metadata.clone(),
+      });
+  }
+  for list in chunks_by_source.values_mut() {
+    list.sort_by_key(|c| c.ordinal);
+  }
+
+  let exported_sources: Vec<ExportedNotebookSource> = sources
+    .iter()
+    .map(|src| ExportedNotebookSource {
+      id: Some(src.id),
+      kind: src.kind.clone(),
+      title: src.title.clone(),
+      uri: src.uri.clone(),
+      status: src.status.clone(),
+      error: src.error.clone(),
+      sha256: src.sha256.clone(),
+      chunks: chunks_by_source.remove(&src.id).unwrap_or_default(),
+    })
+    .collect();
+
+  let exported_deliverables: Vec<ExportedNotebookDeliverable> = artifacts
+    .iter()
+    .map(|item| ExportedNotebookDeliverable {
+      artifact_id: item.artifact.id,
+      run_id: item.artifact.run_id,
+      kind: item.kind.clone(),
+      name: item.artifact.name.clone(),
+      mime_type: item.artifact.mime_type.clone(),
+      size_bytes: item.artifact.size_bytes,
+      sha256: item.artifact.sha256.clone(),
+      created_at: item.artifact.created_at,
+      deliverable: item.deliverable.clone(),
+    })
+    .collect();
+
+  let markdown_brief =
+    render_notebook_markdown_brief(&notebook.title, sources, ready_chunks, artifacts);
+
+  NotebookExportBundle {
+    version: NOTEBOOK_BUNDLE_VERSION,
+    exported_at: Some(Utc::now()),
+    notebook: ExportedNotebookMeta {
+      id: Some(notebook.id),
+      title: notebook.title.clone(),
+      created_at: Some(notebook.created_at),
+      updated_at: Some(notebook.updated_at),
+    },
+    sources: exported_sources,
+    deliverables: exported_deliverables,
+    markdown_brief,
+  }
+}
+
+/// `GET /v1/notebooks/{id}/export` — export a portable `NotebookExportBundle`
+/// containing notebook metadata, sources + ready chunks, deliverable metadata
+/// with citations, and a human-readable `markdown_brief` research dossier.
+pub async fn export_notebook(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+) -> Result<Json<NotebookExportBundle>, ApiError> {
+  let notebook = own_notebook(&state, &tenant, id).await?;
+  let sources = state
+    .repos
+    .sources
+    .list_for_notebook(tenant.as_str(), id)
+    .await?;
+  let ready_chunks = state
+    .repos
+    .chunks
+    .list_ready_for_notebook(tenant.as_str(), id)
+    .await?;
+  let artifacts = state
+    .repos
+    .notebooks
+    .list_artifacts(tenant.as_str(), id)
+    .await?;
+  Ok(Json(build_notebook_export_bundle(
+    &notebook,
+    &sources,
+    &ready_chunks,
+    &artifacts,
+  )))
+}
+
+/// `POST /v1/notebooks/import` — import a portable `NotebookExportBundle` into
+/// a fresh notebook owned by the caller's tenant, remapping source UUIDs and
+/// `<new_source_id>:<ordinal>` chunk IDs so repeated or cross-tenant imports
+/// never collide on `source_chunks` primary keys.
+pub async fn import_notebook(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Json(req): Json<ImportNotebookRequest>,
+) -> Result<Json<ImportNotebookResponse>, ApiError> {
+  let (bundle, title_override) = match req {
+    ImportNotebookRequest::Wrapped { bundle, title } => (bundle, title),
+    ImportNotebookRequest::Direct(bundle) => (bundle, None),
+  };
+  let validated = validate_notebook_import_bundle(&bundle, title_override.as_deref())?;
+
+  let notebook = state
+    .repos
+    .notebooks
+    .create(tenant.as_str(), &validated.title)
+    .await?;
+
+  let mut imported_sources = 0usize;
+  let mut imported_chunks = 0usize;
+
+  for src in validated.sources {
+    let Some(created_source) = state
+      .repos
+      .sources
+      .create(NewSource {
+        notebook_id: notebook.id,
+        tenant_id: tenant.as_str().to_string(),
+        kind: src.kind,
+        title: src.title,
+        uri: src.uri,
+      })
+      .await?
+    else {
+      continue;
+    };
+    imported_sources += 1;
+
+    if !src.chunks.is_empty() {
+      let digest = src.sha256.unwrap_or_else(|| {
+        let mut hasher = Sha256::new();
+        for (content, _) in &src.chunks {
+          hasher.update(content.as_bytes());
+          hasher.update(b"\n");
+        }
+        format!("{:x}", hasher.finalize())
+      });
+      let stored = state
+        .repos
+        .chunks
+        .replace_for_source(&created_source, src.chunks)
+        .await?;
+      imported_chunks += stored;
+      state
+        .repos
+        .sources
+        .update_status(created_source.id, SourceStatus::Ready, None, Some(&digest))
+        .await?;
+    } else {
+      let reason = src.error.unwrap_or_else(|| {
+        if src.status == "failed" {
+          "imported failed source".to_string()
+        } else {
+          "imported source had no text chunks".to_string()
+        }
+      });
+      state
+        .repos
+        .sources
+        .update_status(created_source.id, SourceStatus::Failed, Some(&reason), None)
+        .await?;
+    }
+  }
+
+  state.notebook_indexes.invalidate(notebook.id);
+  Ok(Json(ImportNotebookResponse {
+    notebook,
+    imported_sources,
+    imported_chunks,
+  }))
+}
+
+fn pack_notebook_artifacts_zip_blocking(
+  notebook_id: Uuid,
+  notebook_title: String,
+  brief_markdown: String,
+  artifacts: Vec<NotebookArtifact>,
+) -> std::io::Result<Option<(std::fs::File, u64)>> {
+  use std::io::{Read, Seek, SeekFrom, Write};
+
+  let tmp = tempfile::tempfile()?;
+  let mut writer = zip::ZipWriter::new(tmp);
+  let options =
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+  let mut seen_paths = HashSet::new();
+  seen_paths.insert("BRIEFING.md".to_string());
+  seen_paths.insert("notebook_artifacts.json".to_string());
+
+  let mut manifest_items = Vec::new();
+  let mut buf = vec![0u8; 64 * 1024];
+
+  for item in artifacts {
+    let disk_path = PathBuf::from(&item.artifact.path_or_url);
+    let mut file = match std::fs::File::open(&disk_path) {
+      Ok(f) => f,
+      Err(_) => continue,
+    };
+    let safe_kind = crate::artifacts::sanitize_zip_segment(&item.kind, "deliverable");
+    let safe_name = crate::artifacts::sanitize_zip_segment(&item.artifact.name, "output.bin");
+    let entry_path =
+      crate::artifacts::deduplicate_entry_path(&mut seen_paths, &safe_kind, &safe_name);
+
+    writer
+      .start_file(&entry_path, options)
+      .map_err(std::io::Error::other)?;
+    let mut hasher = Sha256::new();
+    let mut size_bytes: u64 = 0;
+    loop {
+      let n = file.read(&mut buf)?;
+      if n == 0 {
+        break;
+      }
+      writer.write_all(&buf[..n])?;
+      hasher.update(&buf[..n]);
+      size_bytes += n as u64;
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    manifest_items.push(json!({
+      "artifact_id": item.artifact.id,
+      "run_id": item.artifact.run_id,
+      "kind": item.kind,
+      "name": safe_name,
+      "entry_path": entry_path,
+      "mime_type": item.artifact.mime_type,
+      "size_bytes": size_bytes,
+      "sha256": sha256,
+      "deliverable": item.deliverable,
+    }));
+  }
+
+  if manifest_items.is_empty() {
+    return Ok(None);
+  }
+
+  writer
+    .start_file("BRIEFING.md", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(brief_markdown.as_bytes())?;
+
+  let manifest = json!({
+    "notebook_id": notebook_id,
+    "title": notebook_title,
+    "artifacts": manifest_items,
+  });
+  let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+  writer
+    .start_file("notebook_artifacts.json", options)
+    .map_err(std::io::Error::other)?;
+  writer.write_all(&manifest_bytes)?;
+
+  let mut finished = writer.finish().map_err(std::io::Error::other)?;
+  let total_len = finished.seek(SeekFrom::End(0))?;
+  finished.seek(SeekFrom::Start(0))?;
+  Ok(Some((finished, total_len)))
+}
+
+/// `GET /v1/notebooks/{id}/artifacts.zip` — stream all deliverables attached to
+/// a notebook as a single `.zip` bundle (`<kind>/<file>` + `BRIEFING.md` +
+/// `notebook_artifacts.json`).
+pub async fn download_notebook_artifacts_zip(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+  let notebook = own_notebook(&state, &tenant, id).await?;
+  let artifacts = state
+    .repos
+    .notebooks
+    .list_artifacts(tenant.as_str(), id)
+    .await?;
+  if artifacts.is_empty() {
+    return Err(ApiError::NotFound(format!(
+      "notebook {id} has no downloadable artifacts"
+    )));
+  }
+  let sources = state
+    .repos
+    .sources
+    .list_for_notebook(tenant.as_str(), id)
+    .await?;
+  let ready_chunks = state
+    .repos
+    .chunks
+    .list_ready_for_notebook(tenant.as_str(), id)
+    .await?;
+  let brief_md =
+    render_notebook_markdown_brief(&notebook.title, &sources, &ready_chunks, &artifacts);
+  let title = notebook.title.clone();
+
+  let packed = tokio::task::spawn_blocking(move || {
+    pack_notebook_artifacts_zip_blocking(id, title, brief_md, artifacts)
+  })
+  .await
+  .map_err(|e| ApiError::Internal(format!("notebook zip task failed: {e}")))?
+  .map_err(|e| ApiError::Internal(format!("failed to build notebook zip: {e}")))?;
+
+  let Some((std_file, total_len)) = packed else {
+    return Err(ApiError::NotFound(format!(
+      "notebook {id} has no readable artifact files on disk"
+    )));
+  };
+
+  let async_file = tokio::fs::File::from_std(std_file);
+  let short_id = &id.to_string()[..8];
+  let disposition = format!("attachment; filename=\"yanshi-notebook-{short_id}-artifacts.zip\"");
+
+  let mut response =
+    Body::from_stream(tokio_util::io::ReaderStream::new(async_file)).into_response();
+  let headers = response.headers_mut();
+  headers.insert(
+    header::CONTENT_TYPE,
+    HeaderValue::from_static("application/zip"),
+  );
+  headers.insert(header::CONTENT_LENGTH, HeaderValue::from(total_len));
+  if let Ok(val) = HeaderValue::from_str(&disposition) {
+    headers.insert(header::CONTENT_DISPOSITION, val);
+  }
+  Ok(response)
 }
 
 #[cfg(test)]
@@ -2817,5 +3541,160 @@ mod tests {
       pg_with_history, 3,
       "multi-turn retrieval hint must recall all 3 PostgreSQL appendix chunks on pronoun follow-up"
     );
+  }
+
+  #[test]
+  fn notebook_bundle_brief_validation_and_zip_archive_round_trip() {
+    use std::io::Read as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let md_path = dir.path().join("1.md");
+    let html_path = dir.path().join("1.html");
+    std::fs::write(&md_path, b"# Tides Report\n").expect("write md");
+    std::fs::write(&html_path, b"<h1>Tides Report</h1>\n").expect("write html");
+
+    let now = Utc::now();
+    let notebook_id = Uuid::new_v4();
+    let source_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let chunk_id = format!("{source_id}:0");
+
+    let notebook = Notebook {
+      id: notebook_id,
+      tenant_id: "t1".to_string(),
+      title: "Estuarine Dynamics".to_string(),
+      created_at: now,
+      updated_at: now,
+    };
+    let sources = vec![Source {
+      id: source_id,
+      notebook_id,
+      tenant_id: "t1".to_string(),
+      kind: "file".to_string(),
+      title: "severn_bore.docx".to_string(),
+      uri: Some("severn_bore.docx".to_string()),
+      status: "ready".to_string(),
+      error: None,
+      sha256: Some("abc123".to_string()),
+      created_at: now,
+      updated_at: now,
+    }];
+    let chunks = vec![SourceChunk {
+      chunk_id: chunk_id.clone(),
+      source_id,
+      notebook_id,
+      tenant_id: "t1".to_string(),
+      ordinal: 0,
+      content: "Severn Bore reaches 15 meters during equinoctial spring tides.".to_string(),
+      metadata: json!({"start_line": 1, "end_line": 2}),
+    }];
+    let deliverable = json!({
+      "kind": "report",
+      "title": "Severn Bore Brief",
+      "citations": [
+        {"source_id": source_id, "chunk_id": chunk_id, "quote": "Severn Bore reaches 15 meters"}
+      ]
+    });
+    let artifacts = vec![
+      NotebookArtifact {
+        kind: "report".to_string(),
+        deliverable: Some(deliverable.clone()),
+        artifact: yanshi_db::Artifact {
+          id: Uuid::new_v4(),
+          run_id,
+          node_id: "report_md".to_string(),
+          name: "1.md".to_string(),
+          path_or_url: md_path.to_string_lossy().to_string(),
+          mime_type: Some("text/markdown".to_string()),
+          tenant_id: "t1".to_string(),
+          size_bytes: Some(15),
+          sha256: None,
+          created_at: now,
+        },
+      },
+      NotebookArtifact {
+        kind: "report".to_string(),
+        deliverable: Some(deliverable),
+        artifact: yanshi_db::Artifact {
+          id: Uuid::new_v4(),
+          run_id,
+          node_id: "report_html".to_string(),
+          name: "1.html".to_string(),
+          path_or_url: html_path.to_string_lossy().to_string(),
+          mime_type: Some("text/html".to_string()),
+          tenant_id: "t1".to_string(),
+          size_bytes: Some(22),
+          sha256: None,
+          created_at: now,
+        },
+      },
+    ];
+
+    let bundle = build_notebook_export_bundle(&notebook, &sources, &chunks, &artifacts);
+    assert_eq!(bundle.version, NOTEBOOK_BUNDLE_VERSION);
+    assert!(
+      bundle.markdown_brief.contains("# Estuarine Dynamics")
+        && bundle
+          .markdown_brief
+          .contains("### Severn Bore Brief (`report`)")
+        && bundle
+          .markdown_brief
+          .contains("Severn Bore reaches 15 meters")
+        && bundle.markdown_brief.contains("severn_bore.docx #0"),
+      "unexpected markdown brief:\n{}",
+      bundle.markdown_brief
+    );
+    assert_eq!(
+      bundle
+        .markdown_brief
+        .matches("### Severn Bore Brief (`report`)")
+        .count(),
+      1,
+      "multi-file deliverables from the same run must be grouped once"
+    );
+
+    // Validation accepts direct + overridden titles and rejects bad versions / kinds.
+    let validated =
+      validate_notebook_import_bundle(&bundle, Some("  Cloned Estuaries  ")).expect("valid bundle");
+    assert_eq!(validated.title, "Cloned Estuaries");
+    assert_eq!(validated.sources.len(), 1);
+    assert_eq!(validated.sources[0].chunks.len(), 1);
+
+    let mut bad_ver = bundle.clone();
+    bad_ver.version = 99;
+    assert!(matches!(
+      validate_notebook_import_bundle(&bad_ver, None),
+      Err(ImportValidationError::BadRequest(_))
+    ));
+
+    let mut bad_kind = bundle.clone();
+    bad_kind.sources[0].kind = "s3_bucket".to_string();
+    assert!(matches!(
+      validate_notebook_import_bundle(&bad_kind, None),
+      Err(ImportValidationError::BadRequest(_))
+    ));
+
+    // `.zip` packaging bundles `<kind>/<name>` + `BRIEFING.md` + `notebook_artifacts.json`.
+    let (zip_file, total_len) = pack_notebook_artifacts_zip_blocking(
+      notebook_id,
+      notebook.title.clone(),
+      bundle.markdown_brief.clone(),
+      artifacts,
+    )
+    .expect("zip io")
+    .expect("non-empty zip");
+    assert!(total_len > 0);
+    let mut archive = zip::ZipArchive::new(zip_file).expect("open zip");
+    assert_eq!(archive.len(), 4);
+    let mut brief_out = String::new();
+    archive
+      .by_name("BRIEFING.md")
+      .expect("BRIEFING.md")
+      .read_to_string(&mut brief_out)
+      .expect("read brief");
+    assert!(brief_out.contains("Severn Bore Brief"));
+    assert!(archive.by_name("report/1.md").is_ok());
+    assert!(archive.by_name("report/1.html").is_ok());
+    assert!(archive.by_name("notebook_artifacts.json").is_ok());
   }
 }

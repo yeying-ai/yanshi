@@ -677,10 +677,14 @@ pub fn create_router(state: AppState) -> Router {
       "/v1/runs/:id/questions/:question_id",
       post(answer_run_question),
     )
-    // Y5.2 / Z2: notebooks, their sources, chunk lookup and search.
+    // Y5.2 / Z2 / AD1: notebooks, portable import/export, sources, chunk lookup, search, Q&A, generate, and deliverables.
     .route(
       "/v1/notebooks",
       get(notebooks::list_notebooks).post(notebooks::create_notebook),
+    )
+    .route(
+      "/v1/notebooks/import",
+      post(notebooks::import_notebook).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
     )
     .route(
       "/v1/notebooks/:id",
@@ -688,6 +692,7 @@ pub fn create_router(state: AppState) -> Router {
         .patch(notebooks::update_notebook)
         .delete(notebooks::delete_notebook),
     )
+    .route("/v1/notebooks/:id/export", get(notebooks::export_notebook))
     .route(
       "/v1/notebooks/:id/sources",
       post(notebooks::add_source).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
@@ -706,6 +711,10 @@ pub fn create_router(state: AppState) -> Router {
     .route(
       "/v1/notebooks/:id/artifacts",
       get(notebooks::list_notebook_artifacts),
+    )
+    .route(
+      "/v1/notebooks/:id/artifacts.zip",
+      get(notebooks::download_notebook_artifacts_zip),
     )
     .route(
       "/v1/notebooks/:id/artifacts/:artifact_id",

@@ -133,6 +133,32 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   )
   .await;
   assert_eq!(code, StatusCode::BAD_REQUEST);
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate"),
+    &tenant,
+    Some(json!({"kind": "report", "model": "mock-model", "cost_limit_usd": 0.0})),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::BAD_REQUEST,
+    "zero cost_limit_usd must 400"
+  );
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate"),
+    &tenant,
+    Some(json!({"kind": "report", "model": "mock-model", "cost_limit_usd": -2.0})),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::BAD_REQUEST,
+    "negative cost_limit_usd must 400"
+  );
 
   // The model's replies (outline, two sections) cite the real chunk id.
   let section = |text: &str, quote: &str| {
@@ -155,6 +181,7 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     Some(json!({
       "kind": "report",
       "model": "mock-model",
+      "cost_limit_usd": 5.0,
       "source_ids": [source],
       "params": {"sections": 2, "pdf": want_pdf}
     })),
@@ -190,6 +217,22 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     .expect("get")
     .expect("row");
   assert_eq!(status, "succeeded", "run error: {:?}", row.error);
+  let ckpt_mgr = yanshi_core::checkpoint::CheckpointManager::new(
+    yanshi_core::checkpoint::CheckpointConfig::default().with_checkpoint_dir(
+      std::path::Path::new(row.run_dir.as_deref().expect("run_dir")).join("checkpoint"),
+    ),
+  )
+  .expect("checkpoint manager");
+  let ckpt = ckpt_mgr
+    .load_latest_checkpoint(&run_id.to_string())
+    .await
+    .expect("load checkpoint")
+    .expect("latest checkpoint");
+  assert_eq!(
+    ckpt.recorded_execution_config().cost_limit_usd,
+    Some(5.0),
+    "notebook generate must thread cost_limit_usd into FlowExecutionConfig"
+  );
 
   // Files: linked to the notebook, each downloadable.
   let (code, body) = call(
@@ -300,6 +343,55 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   )
   .await;
   assert_eq!(code, StatusCode::NOT_FOUND);
+
+  // AD1: GET /v1/notebooks/{id}/artifacts.zip streams `<kind>/<file>` + `BRIEFING.md` + manifest,
+  // and enforces tenant isolation.
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{notebook}/artifacts.zip"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant zip must 404");
+
+  let (code, zip_bytes) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{notebook}/artifacts.zip"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK);
+  {
+    use std::io::Read as _;
+    let mut archive =
+      zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid notebook artifacts zip");
+    let mut brief = String::new();
+    archive
+      .by_name("BRIEFING.md")
+      .expect("BRIEFING.md in zip")
+      .read_to_string(&mut brief)
+      .expect("read brief");
+    assert!(
+      brief.contains("# Tides")
+        && brief.contains("### Tides (`report`)")
+        && brief.contains("Tides are caused by the gravitational pull of the moon."),
+      "unexpected BRIEFING.md: {brief}"
+    );
+    assert!(archive.by_name("report/1.md").is_ok());
+    assert!(archive.by_name("report/1.html").is_ok());
+    let mut manifest_str = String::new();
+    archive
+      .by_name("notebook_artifacts.json")
+      .expect("notebook_artifacts.json")
+      .read_to_string(&mut manifest_str)
+      .expect("read manifest");
+    let manifest: Value = serde_json::from_str(&manifest_str).expect("manifest json");
+    assert_eq!(manifest["notebook_id"], notebook);
+  }
 
   // DELETE /v1/notebooks/{id}/artifacts/{artifact_id} enforces tenant scope and detaches the artifact.
   let md_artifact_id = md["id"].as_str().expect("md artifact id").to_string();

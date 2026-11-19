@@ -725,6 +725,129 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   .await;
   assert_eq!(code, StatusCode::NOT_FOUND, "source_chunks cascaded");
 
+  // AD1: Export portable NotebookExportBundle and re-import twice in the same tenant
+  // + once in another tenant without `source_chunks` PK collision, immediately searchable.
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/export"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant export must 404");
+
+  let (code, exported_bundle) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/export"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{exported_bundle}");
+  assert_eq!(exported_bundle["version"], 1);
+  assert_eq!(exported_bundle["sources"].as_array().map(Vec::len), Some(8));
+  assert!(
+    exported_bundle["markdown_brief"]
+      .as_str()
+      .is_some_and(|md| md.contains("## Sources (8)")),
+    "export must include markdown_brief: {exported_bundle}"
+  );
+
+  // Invalid bundle version is rejected before creating a notebook.
+  let (code, _) = call(
+    &state,
+    "POST",
+    "/v1/notebooks/import",
+    &tenant,
+    Some(json!({ "version": 99, "notebook": { "title": "Bad" }, "sources": [] })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST);
+
+  // Direct raw bundle import (#1 in `tenant`).
+  let (code, imported_1) = call(
+    &state,
+    "POST",
+    "/v1/notebooks/import",
+    &tenant,
+    Some(exported_bundle.clone()),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_1}");
+  assert_eq!(imported_1["imported_sources"], 8);
+  assert!(
+    imported_1["imported_chunks"]
+      .as_u64()
+      .is_some_and(|n| n >= 7)
+  );
+  let imported_id_1 = imported_1["notebook"]["id"]
+    .as_str()
+    .expect("imported id 1")
+    .to_string();
+
+  // Wrapped bundle import (#2 in same `tenant` with title override) — proves zero PK collision.
+  let (code, imported_2) = call(
+    &state,
+    "POST",
+    "/v1/notebooks/import",
+    &tenant,
+    Some(json!({
+      "bundle": exported_bundle.clone(),
+      "title": "Cloned Tidal Archive"
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_2}");
+  assert_eq!(imported_2["notebook"]["title"], "Cloned Tidal Archive");
+
+  // Cross-tenant import into `other` also succeeds and is immediately searchable via BM25.
+  let (code, imported_other) = call(
+    &state,
+    "POST",
+    "/v1/notebooks/import",
+    &other,
+    Some(exported_bundle),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_other}");
+  let imported_other_id = imported_other["notebook"]["id"]
+    .as_str()
+    .expect("imported other id")
+    .to_string();
+
+  let (code, imported_hits) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_id_1}/search?q=UngavaBay"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_hits}");
+  assert!(
+    imported_hits["chunks"]
+      .as_array()
+      .is_some_and(|arr| !arr.is_empty()),
+    "imported notebook must be immediately searchable via BM25: {imported_hits}"
+  );
+  let (code, other_hits) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_other_id}/search?q=Lunisolar"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{other_hits}");
+  assert!(
+    other_hits["chunks"]
+      .as_array()
+      .is_some_and(|arr| !arr.is_empty()),
+    "cross-tenant imported notebook must be immediately searchable: {other_hits}"
+  );
+
   // Deleting the notebook cascades remaining sources and returns 404 thereafter.
   let (code, _) = call(
     &state,
