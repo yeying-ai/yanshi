@@ -1,6 +1,7 @@
 import audioOverviewYaml from '../../../examples/generators/audio_overview.yml?raw';
 import backendProjectPlannerYaml from '../../../examples/generators/backend_project_planner.yml?raw';
 import circuitDiagramYaml from '../../../examples/generators/circuit_diagram.yml?raw';
+import dataTableYaml from '../../../examples/generators/data_table.yml?raw';
 import debatePodcastShowYaml from '../../../examples/generators/debate_podcast_show.yml?raw';
 import episodicDramaStudioYaml from '../../../examples/generators/episodic_drama_studio.yml?raw';
 import flashcardsYaml from '../../../examples/generators/flashcards.yml?raw';
@@ -163,6 +164,14 @@ export const OFFICIAL_GENERATOR_PRESETS: CatalogPreset[] = [
     badge: '官方生成器',
     category: '研究报告与信息图',
     yaml: infographicYaml,
+  },
+  {
+    id: 'data_table',
+    title: '结构化数据提取表 (Data Table)',
+    subtitle: '从网页或文档精准抽取对比维度与指标表格，附带逐行原文引用并导出 XLSX / CSV / HTML',
+    badge: '官方生成器',
+    category: '研究报告与信息图',
+    yaml: dataTableYaml,
   },
   {
     id: 'mindmap',

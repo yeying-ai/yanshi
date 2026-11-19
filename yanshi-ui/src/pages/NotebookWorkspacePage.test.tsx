@@ -70,9 +70,10 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(audioItem.kind).toBe('audio');
   });
 
-  it('keeps all 11 Studio generator field keys aligned with compiled-in YAML inputs', () => {
+  it('keeps all 12 Studio generator field keys aligned with compiled-in YAML inputs', () => {
     expect(STUDIO_GENERATORS.map((g) => g.kind).sort()).toEqual([
       'audio_overview',
+      'data_table',
       'debate_podcast_show',
       'flashcards',
       'illustrated_slides',

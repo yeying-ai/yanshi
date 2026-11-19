@@ -1,0 +1,175 @@
+# AA2 — `data_table` generator (docs/RFC_CONTENT_STUDIO.md §3, §4.3; RoadMap Y6).
+#
+# Source (a URL fetched with the http node's SSRF filter, pasted text, or
+# notebook chunks) → structured table extraction (llm, json_schema: columns +
+# rows with source quotes) → .xlsx + .csv (render_table) + self-contained .html
+# preview table (render_markdown) → one `Deliverable { kind: "data_table" }`.
+#
+#   yanshi workflow run examples/generators/data_table.yml \
+#     --input url=https://example.org/report --output-dir out
+#   yanshi workflow run examples/generators/data_table.yml \
+#     --input text="$(cat metrics.md)" --input max_rows=15 --model <model>
+name: data_table
+description: "Structured comparison & fact table from a source: .xlsx, .csv, HTML preview and sourced row citations"
+
+inputs:
+  url:
+    description: "Page to extract a table from (fetched with SSRF protection); leave empty to use `text`"
+    default: ""
+  text:
+    description: "Source text, used when `url` is empty"
+    default: ""
+  focus:
+    description: "Which entities, metrics, or comparisons to tabulate"
+    default: "the key entities, metrics, comparisons, and structured facts"
+  max_rows:
+    description: "Maximum number of rows to extract (5-50)"
+    default: 20
+  chunks:
+    description: "Notebook passages to work from instead of url / text: [{chunk_id, source_id, content}]. Citations then point at these ids."
+    default: []
+
+nodes:
+  - id: options
+    type: template
+    parameters:
+      output_format: json
+      template: '{"has_url": {{ url != "" }}}'
+
+  - id: fetch
+    type: http
+    dependencies: ["options"]
+    run_if: "{{ nodes.options.outputs.has_url }}"
+
+  - id: source
+    type: template
+    input_mapping:
+      page: "{{ nodes.fetch.outputs.body }}"
+    parameters:
+      template: "{% if chunks | length > 0 %}{% for c in chunks %}[{{ c.chunk_id }}] {{ c.content }}\n\n{% endfor %}{% elif page %}{{ page | striptags | truncate(length=24000) }}{% else %}{{ text | truncate(length=24000) }}{% endif %}"
+
+  - id: extract_prompt
+    type: template
+    dependencies: ["source"]
+    input_mapping:
+      source_text: "{{ nodes.source.outputs.output }}"
+    parameters:
+      template: |
+        Extract a structured data table from the source below, concentrating on: {{ focus }}.
+        Choose 2 to 8 clear `columns` headers and extract at most {{ max_rows }} `rows`.
+        Every row's `cells` array MUST contain one value per column in exact `columns` order.
+        Base every row strictly on the source: include the exact supporting sentence in `quote`,
+        and when the source passages carry `[chunk_id]` markers, set `chunk_id` to that passage's id
+        (use `""` when passages have no ids). Include a concise one-paragraph `summary` of what the table shows.
+
+        SOURCE:
+        {{ source_text }}
+
+  - id: extract
+    type: llm
+    dependencies: ["extract_prompt"]
+    input_mapping:
+      prompt: "{{ nodes.extract_prompt.outputs.output }}"
+    parameters:
+      system: "You extract accurate, source-grounded structured tables. Answer with JSON only."
+      json_schema:
+        type: object
+        required: [title, summary, columns, rows]
+        properties:
+          title: { type: string }
+          summary: { type: string }
+          columns:
+            type: array
+            minItems: 1
+            items: { type: string }
+          rows:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required: [cells, chunk_id, quote]
+              properties:
+                cells:
+                  type: array
+                  items: { type: string }
+                chunk_id: { type: string }
+                quote: { type: string }
+
+  - id: table_data
+    type: template
+    dependencies: ["extract"]
+    input_mapping:
+      extracted: "{{ nodes.extract.outputs.output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"columns": {{ extracted.columns | json_encode() }}, "rows": [{% for row in extracted.rows %}{% set cell_count = row.cells | length %}[{% for col in extracted.columns %}{% set idx = loop.index0 %}{% if idx < cell_count %}{{ row.cells[idx] | json_encode() }}{% else %}""{% endif %}{% if not loop.last %},{% endif %}{% endfor %}]{% if not loop.last %},{% endif %}{% endfor %}]}
+
+  - id: table_xlsx
+    type: render_table
+    dependencies: ["table_data"]
+    input_mapping:
+      columns: "{{ nodes.table_data.outputs.columns }}"
+      rows: "{{ nodes.table_data.outputs.rows }}"
+    parameters:
+      format: xlsx
+
+  - id: table_csv
+    type: render_table
+    dependencies: ["table_data"]
+    input_mapping:
+      columns: "{{ nodes.table_data.outputs.columns }}"
+      rows: "{{ nodes.table_data.outputs.rows }}"
+    parameters:
+      format: csv
+
+  - id: preview_md
+    type: template
+    dependencies: ["extract"]
+    input_mapping:
+      extracted: "{{ nodes.extract.outputs.output }}"
+    parameters:
+      template: |
+        # {{ extracted.title }}
+
+        {{ extracted.summary }}
+
+        | {% for col in extracted.columns %}{{ col | replace(from="|", to="\\|") | replace(from="\n", to=" ") }} | {% endfor %}
+        | {% for col in extracted.columns %}--- | {% endfor %}
+        {% set_global n = 0 %}{% for row in extracted.rows %}{% set cell_count = row.cells | length %}{% set trimmed_quote = row.quote | trim %}| {% for col in extracted.columns %}{% set idx = loop.index0 %}{% if idx < cell_count %}{{ row.cells[idx] | replace(from="|", to="\\|") | replace(from="\n", to=" ") }}{% endif %}{% if loop.last and trimmed_quote != "" %}{% set_global n = n + 1 %} [^{{ n }}]{% endif %} | {% endfor %}
+        {% endfor %}
+        {% set_global n = 0 %}{% for row in extracted.rows %}{% set trimmed_quote = row.quote | trim %}{% if trimmed_quote != "" %}{% set_global n = n + 1 %}
+        [^{{ n }}]: "{{ row.quote }}"{% if row.chunk_id %} [{{ row.chunk_id }}]{% endif %}{% if url %} — <{{ url }}>{% endif %}{% endif %}{% endfor %}
+
+  - id: table_html
+    type: render_markdown
+    dependencies: ["preview_md"]
+    input_mapping:
+      markdown: "{{ nodes.preview_md.outputs.output }}"
+
+  - id: deliverable
+    type: template
+    dependencies: ["table_xlsx", "table_csv", "table_html"]
+    input_mapping:
+      extracted: "{{ nodes.extract.outputs.output }}"
+      xlsx: "{{ nodes.table_xlsx.outputs.table_xlsx_output }}"
+      csv: "{{ nodes.table_csv.outputs.table_csv_output }}"
+      html: "{{ nodes.table_html.outputs.table_html_output }}"
+    parameters:
+      output_format: json
+      template: |
+        {"deliverable": {
+          "kind": "data_table",
+          "title": {{ extracted.title | json_encode() }},
+          "content": {
+            "summary": {{ extracted.summary | json_encode() }},
+            "columns": {{ extracted.columns | json_encode() }},
+            "rows": {{ extracted.rows | json_encode() }}
+          },
+          "citations": [{% set_global first = true %}{% set chunk_count = chunks | length %}{% for row in extracted.rows %}{% set trimmed_quote = row.quote | trim %}{% if trimmed_quote != "" %}{% set_global sid = "" %}{% for c in chunks %}{% if c.chunk_id == row.chunk_id %}{% set_global sid = c.source_id %}{% endif %}{% endfor %}{% if chunk_count == 0 or sid != "" %}{% if not first %},{% endif %}{% set_global first = false %}{"source_id": {% if sid != "" %}{{ sid | json_encode() }}{% elif url != "" %}{{ url | json_encode() }}{% else %}"text"{% endif %}, "chunk_id": {% if sid != "" %}{{ row.chunk_id | json_encode() }}{% else %}""{% endif %}, "quote": {{ row.quote | json_encode() }}}{% endif %}{% endif %}{% endfor %}],
+          "files": [
+            {"node_id": "table_xlsx", "name": {{ xlsx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "role": "primary"},
+            {"node_id": "table_csv", "name": {{ csv | split(pat="/") | last | json_encode() }}, "mime_type": "text/csv", "role": "primary"},
+            {"node_id": "table_html", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"}
+          ]
+        }}

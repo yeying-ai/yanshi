@@ -46,6 +46,7 @@ export type GeneratorKind =
   | 'flashcards'
   | 'quiz'
   | 'infographic'
+  | 'data_table'
   | 'video_overview'
   | 'illustrated_slides'
   | 'tech_slides_video'
@@ -175,6 +176,28 @@ export const STUDIO_GENERATORS: ReadonlyArray<StudioGeneratorSpec> = [
         label: '信息图突出重点',
         type: 'text',
         defaultValue: 'the key numbers and ideas',
+      },
+    ],
+  },
+  {
+    kind: 'data_table',
+    title: '结构化数据提取表',
+    deliverableBadge: 'XLSX · CSV · 预览 HTML',
+    summary: '从资料原文中抽取对比维度、数值指标与结构化事实，附带逐行出处引用并导出电子表格。',
+    fields: [
+      {
+        key: 'focus',
+        label: '提取维度与对比重点',
+        type: 'text',
+        defaultValue: 'the key entities, metrics, comparisons, and structured facts',
+      },
+      {
+        key: 'max_rows',
+        label: '最大提取行数 (5–50)',
+        type: 'number',
+        defaultValue: 20,
+        min: 5,
+        max: 50,
       },
     ],
   },

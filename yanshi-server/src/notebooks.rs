@@ -767,6 +767,10 @@ const GENERATORS: &[(&str, &str)] = &[
     include_str!("../../examples/generators/infographic.yml"),
   ),
   (
+    "data_table",
+    include_str!("../../examples/generators/data_table.yml"),
+  ),
+  (
     "video_overview",
     include_str!("../../examples/generators/video_overview.yml"),
   ),

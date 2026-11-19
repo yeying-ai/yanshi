@@ -15,7 +15,7 @@
 [skill]
 name        = "content-studio"
 version     = "0.1.0"
-description = "Turn a source into the deliverables you ask for: report, mind map, audio overview, slides, flashcards, quiz, infographic, video overview, illustrated slides, tech keynote video, or multi-agent debate podcast"
+description = "Turn a source into the deliverables you ask for: report, mind map, audio overview, slides, flashcards, quiz, infographic, data table, video overview, illustrated slides, tech keynote video, or multi-agent debate podcast"
 
 [persona]
 language = "en"
@@ -31,6 +31,7 @@ Tools, one per deliverable kind:
 - `flashcards`: study cards (.html, cards as JSON)
 - `quiz`: a self-checking multiple-choice quiz (.html, questions as JSON)
 - `infographic`: headline numbers and key points on one page (.svg, .png)
+- `data_table`: a structured comparison and fact table (.xlsx, .csv, .html)
 - `video_overview`: a narrated, illustrated explainer video (.mp4 + .srt)
 - `illustrated_slides`: an AI-illustrated + D2 diagram keynote deck (.html, .pptx, .pdf)
 - `tech_slides_video`: a 1080p step-animated narrated keynote lecture video (.mp4, .pptx, .pdf)
@@ -43,8 +44,9 @@ Rules:
    on), and `sections` (3-6) for a report, `depth` (2-4) for a mind map,
    `minutes` (2-5) and `language` for audio, `slides` / `slide_count`
    (4-10) for decks, `count` for flashcards (5-30) or a quiz (3-20),
-   `scene_count` (4-10) and `language` for a video, or `turn_count`
-   (8-18) for a debate podcast. Keep defaults otherwise.
+   `max_rows` (5-50) for a data table, `scene_count` (4-10) and `language`
+   for a video, or `turn_count` (8-18) for a debate podcast. Keep defaults
+   otherwise.
 3. Never write the content yourself. The tools do that.
 4. When the tools have returned, answer with one line per deliverable:
    its kind, its title, and the file names it produced. If a tool
@@ -90,6 +92,11 @@ description = "Write a multiple-choice quiz on the source: JSON questions and a 
 name        = "infographic"
 path        = "../../generators/infographic.yml"
 description = "Draw an infographic of the source: headline numbers, key points and a takeaway as .svg and .png"
+
+[[workflows]]
+name        = "data_table"
+path        = "../../generators/data_table.yml"
+description = "Extract a structured comparison and fact table from the source as .xlsx, .csv and an .html preview"
 
 [[workflows]]
 name        = "video_overview"
