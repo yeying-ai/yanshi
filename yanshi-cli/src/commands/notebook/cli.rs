@@ -54,6 +54,7 @@ pub enum NotebookCommands {
   /// List notebooks in the active tenant
   List,
   /// Show notebook metadata and its ingested sources
+  #[command(visible_alias = "get")]
   Show {
     /// Notebook UUID
     notebook_id: String,
@@ -134,6 +135,32 @@ pub enum NotebookCommands {
     /// Source UUID
     source_id: String,
   },
+  /// Rename a source or update inline text note content (`PATCH /v1/notebooks/{id}/sources/{source_id}`)
+  UpdateSource {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Source UUID
+    source_id: String,
+    /// New display title
+    #[arg(long)]
+    title: Option<String>,
+    /// Updated text body for `text` note sources (pass `-` to read from stdin)
+    #[arg(long)]
+    text: Option<String>,
+  },
+  /// Retry background ingestion for a failed URL source (`POST /v1/notebooks/{id}/sources/{source_id}:retry`)
+  RetrySource {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Source UUID
+    source_id: String,
+    /// Poll until background ingestion reaches `ready` (or fails)
+    #[arg(long)]
+    wait: bool,
+    /// Max seconds to wait when `--wait` is enabled
+    #[arg(long, default_value_t = 120)]
+    timeout_secs: u64,
+  },
   /// Inspect a single cited chunk by `chunk_id` (e.g. `<source_uuid>:0`)
   Chunk {
     /// Notebook UUID
@@ -179,6 +206,25 @@ pub enum NotebookCommands {
     /// Optional JSON file persisting multi-turn `{question, answer}` history across CLI calls
     #[arg(long, value_name = "PATH")]
     history_file: Option<PathBuf>,
+    /// Save the grounded Q&A answer (with verified citations) back into the notebook as a text source
+    #[arg(long)]
+    save_as_source: bool,
+    /// Optional title override when `--save-as-source` is enabled
+    #[arg(long)]
+    save_title: Option<String>,
+  },
+  /// List persisted grounded `/ask` Q&A messages in a notebook (`GET /v1/notebooks/{id}/messages`)
+  Messages {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Maximum messages to list (`1..=500`)
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+  },
+  /// Clear persisted grounded `/ask` Q&A messages in a notebook (`DELETE /v1/notebooks/{id}/messages`)
+  ClearMessages {
+    /// Notebook UUID
+    notebook_id: String,
   },
   /// Launch one of the 12 Studio deliverable generators against notebook sources
   Generate {
@@ -580,6 +626,87 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         println!("Removed source {source_id} from notebook {notebook_id}");
       }
     }
+    NotebookCommands::UpdateSource {
+      notebook_id,
+      source_id,
+      title,
+      text,
+    } => {
+      let mut patch = serde_json::Map::new();
+      if let Some(raw_title) = title {
+        let trimmed = raw_title.trim().to_string();
+        if trimmed.is_empty() {
+          bail!("--title must not be empty");
+        }
+        patch.insert("title".to_string(), Value::String(trimmed));
+      }
+      if let Some(raw_text) = text {
+        let resolved = resolve_text_or_stdin(&raw_text)?;
+        patch.insert("text".to_string(), Value::String(resolved));
+      }
+      if patch.is_empty() {
+        bail!("specify at least one of `--title` or `--text`");
+      }
+      let updated = client
+        .update_notebook_source(&notebook_id, &source_id, &Value::Object(patch))
+        .await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&updated)?);
+      } else {
+        println!(
+          "Source {}  [{}]  {}",
+          updated["id"].as_str().unwrap_or(&source_id),
+          updated["status"].as_str().unwrap_or("ready"),
+          updated["title"].as_str().unwrap_or("")
+        );
+      }
+    }
+    NotebookCommands::RetrySource {
+      notebook_id,
+      source_id,
+      wait,
+      timeout_secs,
+    } => {
+      let mut source = client
+        .retry_notebook_source(&notebook_id, &source_id)
+        .await?;
+      if wait {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+        loop {
+          let detail = client.get_notebook(&notebook_id).await?;
+          if let Some(found) = detail["sources"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some(&source_id)))
+          {
+            source = found.clone();
+            match source["status"].as_str() {
+              Some("ready") => break,
+              Some("failed") => {
+                let reason = source["error"]
+                  .as_str()
+                  .unwrap_or("unknown ingestion error");
+                bail!("source {source_id} failed on retry: {reason}");
+              }
+              _ => {}
+            }
+          }
+          if Instant::now() >= deadline {
+            bail!("timed out after {timeout_secs}s waiting for source {source_id} retry");
+          }
+          tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+      }
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&source)?);
+      } else {
+        println!(
+          "Source {}  [{}]  {}",
+          source["id"].as_str().unwrap_or(&source_id),
+          source["status"].as_str().unwrap_or("pending"),
+          source["title"].as_str().unwrap_or("")
+        );
+      }
+    }
     NotebookCommands::Chunk {
       notebook_id,
       chunk_id,
@@ -657,6 +784,8 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
       top_k,
       source_ids,
       history_file,
+      save_as_source,
+      save_title,
     } => {
       let mut prior_turns: Vec<Value> = if let Some(path) = &history_file
         && path.exists()
@@ -686,7 +815,7 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
           Value::Array(source_ids.into_iter().map(Value::String).collect()),
         );
       }
-      let ans = client
+      let mut ans = client
         .ask_notebook(&notebook_id, &Value::Object(body))
         .await?;
 
@@ -703,6 +832,25 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         }
         std::fs::write(path, serde_json::to_vec_pretty(&bounded)?)
           .with_context(|| format!("failed to write history file {}", path.display()))?;
+      }
+
+      let mut saved_source: Option<Value> = None;
+      if save_as_source {
+        let (note_title, note_body) = format_saved_ask_note(&question, &ans, save_title.as_deref());
+        let created_src = client
+          .add_notebook_source(
+            &notebook_id,
+            &json!({
+              "kind": "text",
+              "title": note_title,
+              "text": note_body,
+            }),
+          )
+          .await?;
+        saved_source = Some(created_src.clone());
+        if let Some(obj) = ans.as_object_mut() {
+          obj.insert("saved_source".to_string(), created_src);
+        }
       }
 
       if json_mode {
@@ -722,6 +870,46 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
             );
           }
         }
+        if let Some(saved) = saved_source {
+          println!(
+            "Saved answer as note source {} ({})",
+            saved["id"].as_str().unwrap_or("?"),
+            saved["title"].as_str().unwrap_or("")
+          );
+        }
+      }
+    }
+    NotebookCommands::Messages { notebook_id, limit } => {
+      let doc = client
+        .list_notebook_messages(&notebook_id, Some(limit.clamp(1, 500)))
+        .await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+      } else {
+        let messages = doc["messages"].as_array().cloned().unwrap_or_default();
+        if messages.is_empty() {
+          println!("No persisted Q&A messages in notebook {notebook_id}.");
+        } else {
+          for (idx, msg) in messages.iter().enumerate() {
+            println!(
+              "[{}] Q: {}\n    A: {}",
+              idx + 1,
+              msg["question"].as_str().unwrap_or(""),
+              msg["answer"].as_str().unwrap_or("")
+            );
+          }
+        }
+      }
+    }
+    NotebookCommands::ClearMessages { notebook_id } => {
+      let doc = client.clear_notebook_messages(&notebook_id).await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+      } else {
+        println!(
+          "Cleared {} message(s) from notebook {notebook_id}",
+          doc["deleted"].as_u64().unwrap_or(0)
+        );
       }
     }
     NotebookCommands::Generate {
@@ -1269,6 +1457,58 @@ async fn execute_cli_batch(
   Ok(())
 }
 
+fn resolve_text_or_stdin(raw: &str) -> Result<String> {
+  if raw == "-" {
+    use std::io::Read as _;
+    let mut buf = String::new();
+    std::io::stdin()
+      .read_to_string(&mut buf)
+      .context("failed to read --text from stdin")?;
+    if buf.trim().is_empty() {
+      bail!("stdin provided for `--text -` was empty");
+    }
+    Ok(buf)
+  } else {
+    if raw.trim().is_empty() {
+      bail!("--text must not be empty");
+    }
+    Ok(raw.to_string())
+  }
+}
+
+fn format_saved_ask_note(
+  question: &str,
+  ans: &Value,
+  title_override: Option<&str>,
+) -> (String, String) {
+  let title = title_override
+    .map(str::trim)
+    .filter(|t| !t.is_empty())
+    .map(str::to_string)
+    .unwrap_or_else(|| {
+      let short_q: String = question.trim().chars().take(48).collect();
+      format!("Q&A Note: {short_q}")
+    });
+  let mut body = format!(
+    "Question: {}\n\nAnswer:\n{}",
+    question.trim(),
+    ans["answer"].as_str().unwrap_or("").trim()
+  );
+  if let Some(citations) = ans["citations"].as_array()
+    && !citations.is_empty()
+  {
+    body.push_str("\n\nCitations:\n");
+    for cit in citations {
+      let cid = cit["chunk_id"].as_str().unwrap_or("").trim();
+      let quote = cit["quote"].as_str().unwrap_or("").trim();
+      if !cid.is_empty() || !quote.is_empty() {
+        body.push_str(&format!("- [{cid}] \"{quote}\"\n"));
+      }
+    }
+  }
+  (title, body)
+}
+
 fn build_add_source_payload(
   url: Option<String>,
   text: Option<String>,
@@ -1294,9 +1534,10 @@ fn build_add_source_payload(
   }
 
   if let Some(body) = text {
+    let resolved = resolve_text_or_stdin(&body)?;
     let mut map = serde_json::Map::from_iter([
       ("kind".to_string(), Value::String("text".to_string())),
-      ("text".to_string(), Value::String(body)),
+      ("text".to_string(), Value::String(resolved)),
     ]);
     if let Some(t) = clean_title {
       map.insert("title".to_string(), Value::String(t));
@@ -1401,5 +1642,16 @@ mod tests {
       .decode(payload["content_base64"].as_str().expect("b64"))
       .expect("decode");
     assert_eq!(decoded, b"col,val\na,1\n");
+
+    let (note_title, note_body) = format_saved_ask_note(
+      "What drives spring tides?",
+      &json!({
+        "answer": "Sun and Moon syzygy.",
+        "citations": [{"chunk_id": "s1:0", "quote": "syzygy alignment"}]
+      }),
+      None,
+    );
+    assert!(note_title.starts_with("Q&A Note: What drives spring tides?"));
+    assert!(note_body.contains("[s1:0] \"syzygy alignment\""));
   }
 }

@@ -547,6 +547,84 @@ impl ServerClient {
     expect_success(response).await
   }
 
+  /// `GET /v1/notebooks/{id}/messages` — list persisted grounded Q&A turns.
+  pub async fn list_notebook_messages(
+    &self,
+    notebook_id: &str,
+    limit: Option<usize>,
+  ) -> Result<Value> {
+    let base = self.url(&format!(
+      "/v1/notebooks/{}/messages",
+      encode_uri_segment(notebook_id)
+    ));
+    let mut url = reqwest::Url::parse(&base).context("invalid server messages URL")?;
+    if let Some(lim) = limit {
+      url.query_pairs_mut().append_pair("limit", &lim.to_string());
+    }
+    let response = self
+      .http
+      .get(url)
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/messages")?;
+    expect_success(response).await
+  }
+
+  /// `DELETE /v1/notebooks/{id}/messages` — clear persisted grounded Q&A turns.
+  pub async fn clear_notebook_messages(&self, notebook_id: &str) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/messages", encode_uri_segment(notebook_id));
+    let response = self
+      .http
+      .delete(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to DELETE /v1/notebooks/{id}/messages")?;
+    expect_success(response).await
+  }
+
+  /// `PATCH /v1/notebooks/{id}/sources/{source_id}` — rename a source or edit inline `text`.
+  pub async fn update_notebook_source(
+    &self,
+    notebook_id: &str,
+    source_id: &str,
+    body: &Value,
+  ) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/sources/{}",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(source_id)
+    );
+    let response = self
+      .http
+      .patch(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to PATCH /v1/notebooks/{id}/sources/{source_id}")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/sources/{source_id}:retry` — retry a failed URL source.
+  pub async fn retry_notebook_source(&self, notebook_id: &str, source_id: &str) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/sources/{}:retry",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(source_id)
+    );
+    let response = self
+      .http
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/sources/{source_id}:retry")?;
+    expect_success(response).await
+  }
+
   /// `POST /v1/notebooks/{id}/generate` — launch a Studio generator against notebook sources.
   pub async fn generate_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
     let path = format!("/v1/notebooks/{}/generate", encode_uri_segment(notebook_id));

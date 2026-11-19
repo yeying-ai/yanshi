@@ -722,7 +722,7 @@ async fn notebook_cli_runs_against_live_postgres_gateway_when_configured() {
     .as_str()
     .expect("imported id")
     .to_string();
-  let imported_search = run_cli(vec!["search".into(), imported_id, "Severn".into()])
+  let imported_search = run_cli(vec!["search".into(), imported_id.clone(), "Severn".into()])
     .await
     .expect("search imported");
   assert!(
@@ -730,6 +730,98 @@ async fn notebook_cli_runs_against_live_postgres_gateway_when_configured() {
       .as_array()
       .is_some_and(|arr| !arr.is_empty())
   );
+
+  // AF3: `ask --save-as-source`, `messages`, `clear-messages`, and `update-source`
+  // First seed one mock reply for `ask --save-as-source` against `imported_id`
+  let imported_detail = run_cli(vec!["show".into(), imported_id.clone()])
+    .await
+    .expect("show imported");
+  let imported_src_id = imported_detail["sources"][0]["id"]
+    .as_str()
+    .expect("imported src id")
+    .to_string();
+  let imported_cid = format!("{imported_src_id}:0");
+  // SAFETY: serial single-test execution before invoking subprocess CLI.
+  unsafe {
+    std::env::set_var(
+      "YANSHI_MOCK_RESPONSES",
+      json!([json!({
+        "answer": "Severn Bore reaches 15.0 m during spring tides.",
+        "citations": [{"chunk_id": imported_cid, "quote": "Severn Bore reaches 15.0 m"}]
+      })
+      .to_string()])
+      .to_string(),
+    );
+  }
+  yanshi_llm::Yanshi::init_with_config(models_yml.to_str().expect("utf8"))
+    .await
+    .expect("reinit mock");
+  let ask_saved = run_cli(vec![
+    "ask".into(),
+    imported_id.clone(),
+    "How high is Severn Bore?".into(),
+    "--model".into(),
+    "mock-cli-nb".into(),
+    "--save-as-source".into(),
+    "--save-title".into(),
+    "Saved Bore Q&A".into(),
+  ])
+  .await
+  .expect("ask --save-as-source");
+  let saved_note_id = ask_saved["saved_source"]["id"]
+    .as_str()
+    .expect("saved note id")
+    .to_string();
+  assert_eq!(ask_saved["saved_source"]["title"], "Saved Bore Q&A");
+
+  let listed_msgs = run_cli(vec!["messages".into(), imported_id.clone()])
+    .await
+    .expect("messages");
+  assert!(
+    listed_msgs["messages"]
+      .as_array()
+      .is_some_and(|arr| !arr.is_empty())
+  );
+  let cleared_msgs = run_cli(vec!["clear-messages".into(), imported_id.clone()])
+    .await
+    .expect("clear-messages");
+  assert!(cleared_msgs["deleted"].as_u64().is_some_and(|n| n >= 1));
+
+  // Wait briefly for the saved note source to finish ingesting, then `update-source`
+  for _ in 0..30 {
+    let det = run_cli(vec!["show".into(), imported_id.clone()])
+      .await
+      .expect("poll saved note");
+    if det["sources"]
+      .as_array()
+      .and_then(|arr| arr.iter().find(|s| s["id"] == saved_note_id))
+      .and_then(|s| s["status"].as_str())
+      == Some("ready")
+    {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+  let updated_note = run_cli(vec![
+    "update-source".into(),
+    imported_id.clone(),
+    saved_note_id,
+    "--title".into(),
+    "Edited Bore Q&A".into(),
+    "--text".into(),
+    "SpringSyzygyPeak reaches 15.4 meters at spring equinox.".into(),
+  ])
+  .await
+  .expect("update-source");
+  assert_eq!(updated_note["title"], "Edited Bore Q&A");
+  let updated_search = run_cli(vec![
+    "search".into(),
+    imported_id,
+    "SpringSyzygyPeak".into(),
+  ])
+  .await
+  .expect("search updated note");
+  assert_eq!(updated_search["chunks"].as_array().map(Vec::len), Some(1));
 
   let deleted = run_cli(vec!["delete".into(), nb_id]).await.expect("delete");
   assert_eq!(deleted["deleted"], true);
