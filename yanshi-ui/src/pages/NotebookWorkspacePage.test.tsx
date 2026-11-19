@@ -11,6 +11,7 @@ import {
 import { OFFICIAL_GENERATOR_PRESETS } from '../studio/generatorCatalog';
 import { inspectYamlLocally } from '../studio/presets';
 import {
+  buildAskHistoryPayload,
   dedupeDeliverableCitations,
   encodeBytesToBase64,
   NotebookAskResultCard,
@@ -196,7 +197,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('<search>');
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="nb-tab-recording"');
-    expect(html).toContain('accept=".pdf,.docx,.csv,');
+    expect(html).toContain('accept=".pdf,.docx,.xlsx,.pptx,.csv,');
     expect(html).toContain('data-testid="notebook-ask-card"');
     expect(html).toContain('data-testid="notebook-ask-input"');
     expect(html).toContain('data-testid="notebook-ask-submit"');
@@ -263,6 +264,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     const askHtml = renderToStaticMarkup(
       <NotebookAskResultCard
         result={askParsed}
+        turnIndex={1}
         sourceTitleById={new Map([['src-a', 'Basins CSV']])}
         onInspectChunk={() => {}}
         onUseAsFocus={() => {}}
@@ -270,10 +272,20 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
       />,
     );
     expect(askHtml).toContain('data-testid="notebook-ask-result"');
+    expect(askHtml).toContain('#2 · Q:');
     expect(askHtml).toContain('16.3 米');
     expect(askHtml).toContain('data-testid="citation-chip-src-a:0"');
     expect(askHtml).toContain('data-testid="save-ask-as-source-btn"');
     expect(askHtml).toContain('Basins CSV');
+
+    const manyTurns = Array.from({ length: 10 }, (_, idx) => ({
+      question: `  Q${idx + 1} `,
+      answer: `  A${idx + 1} `,
+    }));
+    const historyPayload = buildAskHistoryPayload(manyTurns);
+    expect(historyPayload).toHaveLength(8);
+    expect(historyPayload[0]).toEqual({ question: 'Q3', answer: 'A3' });
+    expect(historyPayload[7]).toEqual({ question: 'Q10', answer: 'A10' });
   });
 
   it('deduplicates deliverable citations and renders accessible chunk-lookup buttons', () => {

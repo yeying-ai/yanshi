@@ -573,8 +573,32 @@ export function resolveScopedSourceIds(
   return selectedIds;
 }
 
+export interface NotebookAskTurnPayload {
+  question: string;
+  answer: string;
+}
+
+/**
+ * Normalize prior Q&A turns into a bounded `history` payload (`<= 8` turns)
+ * for multi-turn follow-up grounding on `POST /v1/notebooks/{id}/ask`.
+ */
+export function buildAskHistoryPayload(
+  turns: ReadonlyArray<Pick<NotebookAskResponse, 'question' | 'answer'>>,
+  maxTurns = 8,
+): NotebookAskTurnPayload[] {
+  const cleaned = turns
+    .map((t) => ({
+      question: t.question.trim(),
+      answer: t.answer.trim(),
+    }))
+    .filter((t) => t.question.length > 0 || t.answer.length > 0);
+  const skip = Math.max(0, cleaned.length - Math.max(1, maxTurns));
+  return cleaned.slice(skip);
+}
+
 export interface NotebookAskResultCardProps {
   result: NotebookAskResponse;
+  turnIndex?: number;
   sourceTitleById: ReadonlyMap<string, string>;
   onInspectChunk: (chunkId: string) => void;
   onUseAsFocus?: (answerText: string) => void;
@@ -584,16 +608,20 @@ export interface NotebookAskResultCardProps {
 
 export function NotebookAskResultCard({
   result,
+  turnIndex,
   sourceTitleById,
   onInspectChunk,
   onUseAsFocus,
   onSaveAsSource,
   saveBusy = false,
 }: NotebookAskResultCardProps): React.ReactElement {
+  const turnPrefix = typeof turnIndex === 'number' ? `#${turnIndex + 1} · ` : '';
   return (
     <div className="nb-ask-answer" data-testid="notebook-ask-result">
       <div className="nb-ask-answer__meta">
-        <strong>Q: {result.question}</strong>
+        <strong>
+          {turnPrefix}Q: {result.question}
+        </strong>
         <span>
           {result.model} · 检索 {result.used_chunk_count} 段原文
         </span>
@@ -684,6 +712,9 @@ export function NotebookWorkspacePage({
 
   const [newNotebookTitle, setNewNotebookTitle] = useState<string>('');
   const [createNotebookBusy, setCreateNotebookBusy] = useState<boolean>(false);
+  const [renamingNotebook, setRenamingNotebook] = useState<boolean>(false);
+  const [renameTitleDraft, setRenameTitleDraft] = useState<string>('');
+  const [renameNotebookBusy, setRenameNotebookBusy] = useState<boolean>(false);
 
   // Source ingestion state
   const [ingestTab, setIngestTab] = useState<SourceIngestTab>('text');
@@ -706,7 +737,7 @@ export function NotebookWorkspacePage({
   const [excludedSourceIds, setExcludedSourceIds] = useState<string[]>([]);
   const [askQuestionDraft, setAskQuestionDraft] = useState<string>('');
   const [askBusy, setAskBusy] = useState<boolean>(false);
-  const [askResult, setAskResult] = useState<NotebookAskResponse | null>(null);
+  const [askThread, setAskThread] = useState<NotebookAskResponse[]>([]);
   const [saveAskSourceBusy, setSaveAskSourceBusy] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchBusy, setSearchBusy] = useState<boolean>(false);
@@ -715,6 +746,7 @@ export function NotebookWorkspacePage({
   const [chunkLookupBusy, setChunkLookupBusy] = useState<boolean>(false);
   const [inspectedChunk, setInspectedChunk] = useState<NotebookChunk | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteNotebookBusy, setDeleteNotebookBusy] = useState<boolean>(false);
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const chunkDialogRef = useRef<HTMLDialogElement | null>(null);
@@ -844,7 +876,8 @@ export function NotebookWorkspacePage({
 
   useEffect(() => {
     setExcludedSourceIds([]);
-    setAskResult(null);
+    setAskThread([]);
+    setRenamingNotebook(false);
     setSearchHits(null);
     setInspectedChunk(null);
     void loadNotebookDetailAndArtifacts(selectedNotebookId);
@@ -1146,6 +1179,69 @@ export function NotebookWorkspacePage({
     }
   };
 
+  const handleRenameNotebook = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    if (!selectedNotebookId) return;
+    const trimmed = renameTitleDraft.trim();
+    if (!trimmed) {
+      setErrorBanner('笔记本标题不能为空。');
+      return;
+    }
+    setRenameNotebookBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}`,
+        apiToken,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: trimmed }),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`重命名笔记本失败 (${res.status}): ${text}`);
+      }
+      const updated = await parseJsonResponse(NotebookSchema, res, 'PATCH /v1/notebooks/:id');
+      setActiveNotebook(updated);
+      setNotebooks((prev) => prev.map((nb) => (nb.id === updated.id ? updated : nb)));
+      setRenamingNotebook(false);
+      setNoticeBanner(`已将笔记本重命名为「${updated.title}」。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setRenameNotebookBusy(false);
+    }
+  };
+
+  const handleDeleteArtifact = async (art: NotebookArtifact) => {
+    if (!selectedNotebookId) return;
+    setDeletingArtifactId(art.id);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/artifacts/${encodeURIComponent(
+          art.id,
+        )}`,
+        apiToken,
+        { method: 'DELETE' },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`移除成品失败 (${res.status}): ${text}`);
+      }
+      setArtifacts((prev) => prev.filter((item) => item.id !== art.id));
+      setNoticeBanner(`已从笔记本移除成品「${art.name}」。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setDeletingArtifactId(null);
+    }
+  };
+
   const handleIngestSource = async (ev: React.FormEvent<HTMLFormElement>) => {
     ev.preventDefault();
     if (!selectedNotebookId) {
@@ -1177,7 +1273,9 @@ export function NotebookWorkspacePage({
         };
       } else if (ingestTab === 'file') {
         if (!selectedUploadFile) {
-          throw new Error('请选择一个 .pdf、.docx、.csv、.tsv、.json、.txt、.md 或 .html 文档文件。');
+          throw new Error(
+            '请选择一个 .pdf、.docx、.xlsx、.pptx、.csv、.tsv、.json、.txt、.md 或 .html 文档文件。',
+          );
         }
         const buffer = await selectedUploadFile.arrayBuffer();
         const contentBase64 = encodeBytesToBase64(new Uint8Array(buffer));
@@ -1307,7 +1405,11 @@ export function NotebookWorkspacePage({
     setAskBusy(true);
     setErrorBanner(null);
     try {
+      const historyPayload = buildAskHistoryPayload(askThread);
       const body: Record<string, unknown> = { question };
+      if (historyPayload.length > 0) {
+        body.history = historyPayload;
+      }
       if (modelName.trim()) {
         body.model = modelName.trim();
       }
@@ -1333,7 +1435,8 @@ export function NotebookWorkspacePage({
         res,
         'POST /v1/notebooks/:id/ask',
       );
-      setAskResult(parsed);
+      setAskThread((prev) => [...prev, parsed]);
+      setAskQuestionDraft('');
     } catch (err) {
       setErrorBanner(formatApiError(err));
     } finally {
@@ -1502,7 +1605,7 @@ export function NotebookWorkspacePage({
       <StudioSubpageHeader
         eyebrow="Yanshi Content Studio"
         title="多源内容笔记本工作台"
-        subtitle="汇集网页、PDF/DOCX/CSV 文档、笔记与语音录音构建本地 BM25 知识索引，支持勾选来源问答溯源与 12 套多模态生成器"
+        subtitle="汇集网页、PDF/DOCX/XLSX/PPTX/CSV 文档、笔记与语音录音构建本地 BM25 知识索引，支持勾选来源多轮追问溯源与 12 套多模态生成器"
         activeSection="notebooks"
         actions={
           <div className="nb-header-controls">
@@ -1567,16 +1670,31 @@ export function NotebookWorkspacePage({
                 <div className="nb-picker-label-row">
                   <label htmlFor="nb-select">切换已有笔记本</label>
                   {activeNotebook && (
-                    <button
-                      type="button"
-                      className="studio-link-btn nb-danger-link"
-                      data-testid="open-delete-notebook-btn"
-                      aria-label={`删除笔记本 ${activeNotebook.title}`}
-                      disabled={deleteNotebookBusy}
-                      onClick={() => openModalDialog(deleteDialogRef.current)}
-                    >
-                      删除笔记本
-                    </button>
+                    <div className="nb-picker-actions">
+                      <button
+                        type="button"
+                        className="studio-link-btn"
+                        data-testid="open-rename-notebook-btn"
+                        aria-expanded={renamingNotebook}
+                        aria-controls="nb-rename-form"
+                        onClick={() => {
+                          setRenameTitleDraft(activeNotebook.title);
+                          setRenamingNotebook((prev) => !prev);
+                        }}
+                      >
+                        {renamingNotebook ? '收起重命名' : '重命名'}
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-link-btn nb-danger-link"
+                        data-testid="open-delete-notebook-btn"
+                        aria-label={`删除笔记本 ${activeNotebook.title}`}
+                        disabled={deleteNotebookBusy}
+                        onClick={() => openModalDialog(deleteDialogRef.current)}
+                      >
+                        删除笔记本
+                      </button>
+                    </div>
                   )}
                 </div>
                 <select
@@ -1593,6 +1711,47 @@ export function NotebookWorkspacePage({
                   ))}
                 </select>
               </div>
+            )}
+
+            {activeNotebook && renamingNotebook && (
+              <form
+                id="nb-rename-form"
+                className="nb-create-form"
+                method="POST"
+                action={`/v1/notebooks/${encodeURIComponent(activeNotebook.id)}`}
+                aria-label="重命名当前笔记本"
+                onSubmit={(ev) => void handleRenameNotebook(ev)}
+              >
+                <label htmlFor="nb-rename-title">重命名当前笔记本</label>
+                <div className="nb-create-form__row">
+                  <input
+                    id="nb-rename-title"
+                    name="title"
+                    type="text"
+                    enterKeyHint="done"
+                    required
+                    data-testid="rename-notebook-input"
+                    value={renameTitleDraft}
+                    onChange={(ev) => setRenameTitleDraft(ev.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="studio-btn-primary studio-btn-sm"
+                    data-testid="save-rename-notebook-btn"
+                    disabled={renameNotebookBusy}
+                  >
+                    {renameNotebookBusy ? '保存中…' : '保存'}
+                  </button>
+                  <button
+                    type="button"
+                    className="studio-btn-secondary studio-btn-sm"
+                    disabled={renameNotebookBusy}
+                    onClick={() => setRenamingNotebook(false)}
+                  >
+                    取消
+                  </button>
+                </div>
+              </form>
             )}
 
             <form
@@ -1753,13 +1912,13 @@ export function NotebookWorkspacePage({
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
                     <label htmlFor="nb-src-file">
-                      选择本地文档或表格（支持 .pdf / .docx / .csv / .tsv / .json / .md / .txt / .html，≤10MB）
+                      选择本地文档、表格或课件（支持 .pdf / .docx / .xlsx / .pptx / .csv / .tsv / .json / .md / .txt / .html，≤10MB）
                     </label>
                     <input
                       id="nb-src-file"
                       name="file"
                       type="file"
-                      accept=".pdf,.docx,.csv,.tsv,.json,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,text/tab-separated-values,application/json,text/plain,text/markdown,text/html"
+                      accept=".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.json,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/csv,text/tab-separated-values,application/json,text/plain,text/markdown,text/html"
                       onChange={(ev) => setSelectedUploadFile(ev.target.files?.[0] ?? null)}
                     />
                   </div>
@@ -1953,6 +2112,7 @@ export function NotebookWorkspacePage({
                 <button
                   type="submit"
                   className="studio-btn-secondary studio-btn-sm"
+                  data-testid="notebook-search-submit"
                   disabled={searchBusy || !selectedNotebookId}
                 >
                   {searchBusy ? '检索中…' : '检索'}
@@ -2065,12 +2225,25 @@ export function NotebookWorkspacePage({
             aria-labelledby="nb-ask-heading"
           >
             <div className="nb-card__head">
-              <h3 id="nb-ask-heading">向笔记本提问（源接地引用问答）</h3>
-              <span>
-                {scopedSourceIds
-                  ? `限定 ${selectedReadyCount} 份已选来源`
-                  : `覆盖全部 ${readySourceCount} 份就绪来源`}
-              </span>
+              <h3 id="nb-ask-heading">向笔记本提问（源接地多轮问答）</h3>
+              <div className="nb-picker-actions">
+                <span>
+                  {scopedSourceIds
+                    ? `限定 ${selectedReadyCount} 份已选来源`
+                    : `覆盖全部 ${readySourceCount} 份就绪来源`}
+                  {askThread.length > 0 ? ` · 对话 ${askThread.length} 轮` : ''}
+                </span>
+                {askThread.length > 0 && (
+                  <button
+                    type="button"
+                    className="studio-link-btn"
+                    data-testid="clear-ask-thread-btn"
+                    onClick={() => setAskThread([])}
+                  >
+                    清空对话
+                  </button>
+                )}
+              </div>
             </div>
             <form
               className="nb-ask-form"
@@ -2080,14 +2253,19 @@ export function NotebookWorkspacePage({
               onSubmit={(ev) => void handleAskNotebook(ev)}
             >
               <label htmlFor="nb-ask-input" className="nb-sr-only">
-                针对已勾选笔记本资料输入问题
+                针对已勾选笔记本资料输入问题或追问
               </label>
               <input
                 id="nb-ask-input"
                 name="question"
                 type="text"
+                enterKeyHint="send"
                 data-testid="notebook-ask-input"
-                placeholder="针对已选资料提问（例如：各方案的核心指标与权衡差异是什么？）…"
+                placeholder={
+                  askThread.length > 0
+                    ? '继续追问上一轮回答（例如：那它的内存开销与权衡是什么？）…'
+                    : '针对已选资料提问（例如：各方案的核心指标与权衡差异是什么？）…'
+                }
                 value={askQuestionDraft}
                 onChange={(ev) => setAskQuestionDraft(ev.target.value)}
               />
@@ -2097,18 +2275,25 @@ export function NotebookWorkspacePage({
                 data-testid="notebook-ask-submit"
                 disabled={askBusy || !selectedNotebookId || selectedReadyCount === 0}
               >
-                {askBusy ? '溯源推理中…' : '提问溯源'}
+                {askBusy ? '溯源推理中…' : askThread.length > 0 ? '继续追问' : '提问溯源'}
               </button>
             </form>
-            {askResult && (
-              <NotebookAskResultCard
-                result={askResult}
-                sourceTitleById={sourceTitleById}
-                onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
-                onUseAsFocus={(answerText) => applyHitAsGeneratorFocus(answerText)}
-                onSaveAsSource={(res) => void handleSaveAnswerAsSource(res)}
-                saveBusy={saveAskSourceBusy}
-              />
+            {askThread.length > 0 && (
+              <ol className="nb-ask-thread" role="list" data-testid="notebook-ask-thread">
+                {askThread.map((turn, idx) => (
+                  <li key={`${turn.question}-${idx}`}>
+                    <NotebookAskResultCard
+                      result={turn}
+                      turnIndex={idx}
+                      sourceTitleById={sourceTitleById}
+                      onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+                      onUseAsFocus={(answerText) => applyHitAsGeneratorFocus(answerText)}
+                      onSaveAsSource={(res) => void handleSaveAnswerAsSource(res)}
+                      saveBusy={saveAskSourceBusy}
+                    />
+                  </li>
+                ))}
+              </ol>
             )}
           </section>
 
@@ -2299,14 +2484,26 @@ export function NotebookWorkspacePage({
                         <div className="nb-artifact-block__meta">
                           <span className="nb-gen-badge">{art.kind}</span>
                           <small>{formatTime(art.created_at)}</small>
-                          <SpaLink
-                            className="studio-link-btn"
-                            to={`/ui/studio?run_id=${encodeURIComponent(
-                              art.run_id,
-                            )}&preset=${encodeURIComponent(art.kind)}`}
-                          >
-                            查看运行 #{art.run_id.slice(0, 8)}
-                          </SpaLink>
+                          <div className="nb-picker-actions">
+                            <SpaLink
+                              className="studio-link-btn"
+                              to={`/ui/studio?run_id=${encodeURIComponent(
+                                art.run_id,
+                              )}&preset=${encodeURIComponent(art.kind)}`}
+                            >
+                              查看运行 #{art.run_id.slice(0, 8)}
+                            </SpaLink>
+                            <button
+                              type="button"
+                              className="studio-link-btn nb-danger-link"
+                              data-testid={`delete-artifact-${art.id}`}
+                              aria-label={`移除成品 ${art.name}`}
+                              disabled={deletingArtifactId === art.id}
+                              onClick={() => void handleDeleteArtifact(art)}
+                            >
+                              {deletingArtifactId === art.id ? '移除中…' : '移除'}
+                            </button>
+                          </div>
                         </div>
                         {showDeliverableBar && art.deliverable && (
                           <NotebookDeliverableCitationBar

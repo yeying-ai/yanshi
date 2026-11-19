@@ -5484,6 +5484,28 @@ button.nb-citation-chip:focus-visible {
   flex-wrap: wrap;
 }
 
+.nb-picker-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.nb-ask-thread {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.nb-ask-thread .nb-ask-answer {
+  margin-top: 0;
+}
+
 @media (max-width: 1180px) {
   .nb-workbench {
     grid-template-columns: 1fr;

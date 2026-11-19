@@ -52,7 +52,8 @@ npm run e2e:install              # installs Chromium + system deps
 
    ```bash
    cd yanshi-ui
-   npm run e2e                   # all specs
+   npm run e2e                   # all specs (runs-new, harness-sessions, notebooks)
+   npm run e2e -- notebooks      # filter to the Content Studio notebooks spec
    npm run e2e -- runs-new       # filter to one spec
    npm run e2e -- -g "persists"  # filter by test name
    ```
