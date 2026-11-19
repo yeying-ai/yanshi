@@ -54,7 +54,6 @@ yanshi-memory = { path = "../yanshi-memory", version = "0.1" }
 
 # CLI framework
 clap = { version = "4.4", features = ["derive", "color", "suggestions"] }
-clap_complete = "4.4"
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -101,8 +100,7 @@ indicatif = "0.17"
 console = "0.15"
 colored = "2.1"
 
-# Configuration
-config = "0.13"
+# Configuration & user directories
 dirs = "5.0"
 
 # Time handling
