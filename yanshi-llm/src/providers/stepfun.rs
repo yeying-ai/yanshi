@@ -103,6 +103,9 @@ impl StepFunProvider {
     for (key, value) in &request.parameters {
       body[key] = value.clone();
     }
+    if request.stream && body.get("stream_options").is_none() {
+      body["stream_options"] = json!({ "include_usage": true });
+    }
 
     // StepFun is OpenAI-compatible — pass tools / tool_choice / response_format
     // through unchanged.
@@ -538,9 +541,26 @@ impl StepFunStreamingResponse {
       });
     }
 
-    if let Ok(chunk) = serde_json::from_str::<StepFunStreamingChunk>(data)
-      && let Some(choice) = chunk.choices.first()
-    {
+    let Ok(chunk) = serde_json::from_str::<StepFunStreamingChunk>(data) else {
+      return None;
+    };
+    if chunk.choices.is_empty() {
+      return chunk.usage.map(|u| StreamChunk {
+        thinking: String::new(),
+        media: Vec::new(),
+        content: String::new(),
+        is_final: false,
+        metadata: None,
+        usage: Some(TokenUsage {
+          prompt_tokens: Some(u.prompt_tokens),
+          completion_tokens: Some(u.completion_tokens),
+          total_tokens: Some(u.total_tokens),
+        }),
+        content_type: Some("text".to_string()),
+        tool_call_deltas: Vec::new(),
+      });
+    }
+    if let Some(choice) = chunk.choices.first() {
       // Handle both string and array content in streaming
       let content_text = match &choice.delta.content {
         Some(serde_json::Value::String(text)) => text.clone(),
@@ -1334,5 +1354,28 @@ mod tests {
       "a tool-call-only delta (no text content) must not be dropped"
     );
     assert_eq!(chunk.unwrap().content, "");
+  }
+
+  #[test]
+  fn streaming_requests_include_usage_and_parse_empty_choices_usage_frame() {
+    let provider = StepFunProvider::new("test-key", None).unwrap();
+    let req = ProviderRequest {
+      model: "step-3.5-flash".to_string(),
+      messages: vec![json!({"role": "user", "content": "hi"})],
+      stream: true,
+      parameters: std::collections::HashMap::new(),
+      tools: None,
+      tool_choice: None,
+      thinking: None,
+      response_format: None,
+    };
+    let body = provider.build_request_body(&req).unwrap();
+    assert_eq!(body["stream_options"]["include_usage"], true);
+
+    let chunk = StepFunStreamingResponse::parse_sse_chunk(
+      "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"step-3.5-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":12,\"total_tokens\":52}}",
+    )
+    .expect("usage-only chunk");
+    assert_eq!(chunk.usage.unwrap().total_tokens, Some(52));
   }
 }

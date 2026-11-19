@@ -262,12 +262,13 @@ impl TextToVideoNode {
           message: "No videos returned from text-to-video provider".to_string(),
         })?;
     // Billed per second of video produced; fall back to the requested
-    // length when the vendor does not report one.
+    // length, and finally to the vendor's standard clip duration when neither
+    // the response nor the node input specifies `duration_seconds`.
+    let fallback_secs = duration_seconds.unwrap_or_else(|| default_video_duration_seconds(&model));
     let seconds: f64 = video_response
       .videos
       .iter()
-      .filter_map(|video| video.duration_seconds.or(duration_seconds))
-      .map(f64::from)
+      .map(|video| f64::from(video.duration_seconds.unwrap_or(fallback_secs)))
       .sum();
     crate::cost::record(&model, |p| p.cost_for_seconds(seconds))?;
 
@@ -433,5 +434,27 @@ mod tests {
       "upstream failure must propagate; got Ok({:?})",
       result.ok()
     );
+  }
+
+  #[test]
+  fn default_video_duration_seconds_covers_veo_hailuo_and_generic_vendors() {
+    assert_eq!(
+      default_video_duration_seconds("veo-3.1-fast-generate-001"),
+      8
+    );
+    assert_eq!(default_video_duration_seconds("MiniMax-Hailuo-2.3"), 6);
+    assert_eq!(default_video_duration_seconds("kling-4.0-flash"), 5);
+    assert_eq!(default_video_duration_seconds("wan2.7-t2v"), 5);
+  }
+}
+
+fn default_video_duration_seconds(model: &str) -> u32 {
+  let lower = model.to_ascii_lowercase();
+  if lower.contains("veo-") {
+    8
+  } else if lower.contains("hailuo") || lower.contains("minimax") {
+    6
+  } else {
+    5
   }
 }

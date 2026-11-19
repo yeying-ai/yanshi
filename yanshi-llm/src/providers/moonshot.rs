@@ -106,6 +106,9 @@ impl MoonshotProvider {
         .as_object()
         .is_some_and(|map| map.contains_key("thinking"))
     {
+      // Moonshot Kimi K2.x/K3 Instant Mode (`thinking: disabled`) rejects any
+      // temperature other than `0.6` (`moonshot.yml` carries `1.0` for
+      // thinking-enabled mode), so force `0.6` whenever Instant Mode applies.
       body["thinking"] = json!({ "type": "disabled" });
       body["temperature"] = json!(0.6);
     }
@@ -180,6 +183,10 @@ impl LLMProvider for MoonshotProvider {
     let stop_reason = first_choice
       .and_then(|c| c.finish_reason.as_deref())
       .map(StopReason::from_openai_finish_reason);
+    let thinking = first_choice
+      .and_then(|c| c.message.reasoning_content.as_deref())
+      .filter(|s| !s.is_empty())
+      .map(str::to_owned);
 
     Ok(ProviderResponse {
       content,
@@ -187,7 +194,7 @@ impl LLMProvider for MoonshotProvider {
       metadata: Some(serde_json::to_value(&moonshot_response)?),
       tool_calls,
       stop_reason,
-      thinking: None,
+      thinking,
     })
   }
 
@@ -274,6 +281,8 @@ struct MoonshotChoice {
 struct MoonshotMessage {
   role: String,
   content: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  reasoning_content: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   tool_calls: Option<serde_json::Value>,
 }
@@ -367,9 +376,26 @@ impl MoonshotStreamingResponse {
       });
     }
 
-    if let Ok(chunk) = serde_json::from_str::<MoonshotStreamingChunk>(data)
-      && let Some(choice) = chunk.choices.first()
-    {
+    let Ok(chunk) = serde_json::from_str::<MoonshotStreamingChunk>(data) else {
+      return None;
+    };
+    if chunk.choices.is_empty() {
+      return chunk.usage.map(|u| StreamChunk {
+        thinking: String::new(),
+        media: Vec::new(),
+        content: String::new(),
+        is_final: false,
+        metadata: None,
+        usage: Some(TokenUsage {
+          prompt_tokens: Some(u.prompt_tokens),
+          completion_tokens: Some(u.completion_tokens),
+          total_tokens: Some(u.total_tokens),
+        }),
+        content_type: Some("text".to_string()),
+        tool_call_deltas: Vec::new(),
+      });
+    }
+    if let Some(choice) = chunk.choices.first() {
       let content_text = choice.delta.content.clone().unwrap_or_default();
       let tool_call_deltas = openai_streaming_tool_call_deltas(choice.delta.tool_calls.as_deref());
       let thinking = choice.delta.reasoning_content.clone().unwrap_or_default();
@@ -618,5 +644,14 @@ mod tests {
       "a tool-call-only delta (no text content) must not be dropped"
     );
     assert_eq!(chunk.unwrap().content, "");
+  }
+
+  #[test]
+  fn parses_empty_choices_usage_frame_in_streaming() {
+    let chunk = MoonshotStreamingResponse::parse_sse_chunk(
+      "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"kimi-k2.5\",\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":10,\"total_tokens\":40}}",
+    )
+    .expect("usage-only chunk");
+    assert_eq!(chunk.usage.unwrap().total_tokens, Some(40));
   }
 }

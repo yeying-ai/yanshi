@@ -180,7 +180,11 @@ where
     .map(|(id, name, arguments_json)| ToolCallRequest {
       id: id.unwrap_or_default(),
       name: name.unwrap_or_default(),
-      arguments: serde_json::from_str(&arguments_json).unwrap_or(serde_json::Value::Null),
+      arguments: if arguments_json.trim().is_empty() {
+        serde_json::json!({})
+      } else {
+        serde_json::from_str(&arguments_json).unwrap_or(serde_json::Value::Null)
+      },
     })
     .collect();
 
@@ -426,5 +430,30 @@ mod collect_streaming_response_tests {
 
     assert_eq!(forwarded_count, 1);
     assert_eq!(response.content, "the whole answer at once");
+  }
+
+  #[tokio::test]
+  async fn zero_arg_streamed_tool_call_defaults_to_empty_json_object() {
+    let stream: Box<dyn StreamingResponse> =
+      Box::new(FixedChunkStream(VecDeque::from(vec![StreamChunk {
+        thinking: String::new(),
+        media: Vec::new(),
+        content: String::new(),
+        is_final: true,
+        metadata: None,
+        usage: None,
+        content_type: Some("tool_use".to_string()),
+        tool_call_deltas: vec![ToolCallDelta {
+          index: 0,
+          id: Some("toolu_1".to_string()),
+          name: Some("list_files".to_string()),
+          arguments_delta: None,
+        }],
+      }])));
+    let response = collect_streaming_response(stream, |_| async {})
+      .await
+      .unwrap();
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].arguments, serde_json::json!({}));
   }
 }

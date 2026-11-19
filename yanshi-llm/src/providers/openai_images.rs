@@ -108,7 +108,7 @@ impl OpenAIImageProvider {
       .part("image", image_part);
 
     if let Some(ref size) = request.size {
-      form = form.text("size", size.clone());
+      form = form.text("size", normalize_openai_image_size(&request.model, size));
     }
     if let Some(ref response_format) = request.response_format
       && accepts_response_format(&request.model)

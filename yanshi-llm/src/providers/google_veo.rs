@@ -137,11 +137,15 @@ fn push_video_item(videos: &mut Vec<GeneratedVideo>, item: &Value) {
     .or_else(|| item.get("gcsUri"))
     .and_then(Value::as_str)
     .map(ToString::to_string);
+  let duration_seconds = item
+    .get("durationSeconds")
+    .and_then(Value::as_u64)
+    .and_then(|s| u32::try_from(s).ok());
   if b64.is_some() || url.is_some() {
     videos.push(GeneratedVideo {
       url,
       b64_data: b64,
-      duration_seconds: None,
+      duration_seconds,
     });
   }
 }

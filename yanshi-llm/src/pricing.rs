@@ -310,5 +310,25 @@ models:
     assert!(table.models.contains_key("deepseek-chat"));
     assert!(table.models.contains_key("gemini-2.5-flash"));
     assert!(table.models.contains_key("glm-4-flash"));
+    for video_model in [
+      "veo-3.1-fast-generate-001",
+      "veo-3.1-generate-001",
+      "kling-4.0-flash",
+      "MiniMax-Hailuo-2.3",
+      "wan2.7-t2v",
+    ] {
+      assert!(
+        table.lookup(video_model).cost_for_seconds(5.0) > 0.0,
+        "video model {video_model} must record non-zero spend"
+      );
+    }
+    assert!(
+      table
+        .lookup("imagen-4.0-generate-preview-06-06")
+        .cost_for_images(1)
+        > 0.0
+    );
+    assert!(table.lookup("speech-2.8-hd").cost_for_speech(1000, None) > 0.0);
+    assert!(table.lookup("step-tts-vivid").cost_for_speech(1000, None) > 0.0);
   }
 }

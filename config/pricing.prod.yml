@@ -5,6 +5,9 @@
 default:
   input_per_1k: 0.0005
   output_per_1k: 0.0015
+  per_image: 0.0200
+  per_output_second: 0.0500
+  per_1k_input_chars: 0.0050
 
 models:
   # DeepSeek
@@ -140,6 +143,12 @@ models:
     output_per_1k: 0.00080
   wan2.5-t2i-preview:
     per_image: 0.02000
+  wan2.5-i2i-preview:
+    per_image: 0.02500
+  wan2.5-t2v-preview:
+    per_output_second: 0.08000
+  wan2.7-t2v:
+    per_output_second: 0.08000
   qwen-tts:
     per_1k_input_chars: 0.00200
   qwen-tts-2025-05-22:
@@ -150,11 +159,51 @@ models:
     per_1k_input_chars: 0.01500
   step-tts-mini:
     per_1k_input_chars: 0.00800
+  step-tts-vivid:
+    per_1k_input_chars: 0.01200
+  step-asr:
+    per_output_second: 0.00008
+
+  # MiniMax Speech & Hailuo Video
+  speech-2.8-hd:
+    per_1k_input_chars: 0.01000
+  MiniMax-Hailuo-2.3:
+    per_output_second: 0.08000
+  MiniMax-Hailuo-02:
+    per_output_second: 0.07000
+
+  # Kling Video
+  kling-4.0:
+    per_output_second: 0.14000
+  kling-4.0-flash:
+    per_output_second: 0.07000
+  kling-v2-6:
+    per_output_second: 0.10000
+  kling-v2-5-turbo:
+    per_output_second: 0.07000
+  kling-v2-1-master:
+    per_output_second: 0.14000
 
   # Google Imagen / Gemini Image / Veo Video
   gemini-3.1-flash-image:
     per_image: 0.03900
   imagen-3.0-generate-002:
     per_image: 0.03000
+  imagen-4.0-generate-preview-06-06:
+    per_image: 0.04000
+  imagen-4.0-ultra-generate-preview-06-06:
+    per_image: 0.06000
+  veo-2.0-generate-001:
+    per_output_second: 0.35000
+  veo-3.0-fast-generate-preview:
+    per_output_second: 0.15000
+  veo-3.0-fast-generate-001:
+    per_output_second: 0.15000
+  veo-3.0-generate-preview:
+    per_output_second: 0.40000
   veo-3.1-fast-generate-001:
     per_output_second: 0.15000
+  veo-3.1-generate-preview:
+    per_output_second: 0.40000
+  veo-3.1-generate-001:
+    per_output_second: 0.40000

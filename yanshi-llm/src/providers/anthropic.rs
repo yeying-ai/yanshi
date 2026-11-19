@@ -68,8 +68,11 @@ impl AnthropicProvider {
   }
 
   fn build_request_body(&self, request: &ProviderRequest) -> Result<Value> {
-    // Convert OpenAI-style messages to Anthropic format
-    let mut system_message = None;
+    // Convert OpenAI-style messages to Anthropic format. Multiple `system`
+    // messages (e.g. ReAct persona/tool instructions + user preferences +
+    // project facts + compacted session summary) are concatenated rather
+    // than overwritten.
+    let mut system_messages: Vec<String> = Vec::new();
     let mut anthropic_messages = Vec::new();
 
     for message in &request.messages {
@@ -78,16 +81,9 @@ impl AnthropicProvider {
       {
         match role.as_str() {
           Some("system") => {
-            // System messages stay text-only on Anthropic (mirrors Google's
-            // `systemInstruction`); flatten any array parts to their
-            // concatenated text rather than dropping non-string content
-            // silently (P-LLM2.4 — pre-fix this was `content.as_str()`,
-            // which yielded `None` — the whole system prompt vanishing —
-            // for any multimodal system message, since `content` is an
-            // array in that case, not a string).
             let text = super::openai_content_to_text(content);
             if !text.is_empty() {
-              system_message = Some(text);
+              system_messages.push(text);
             }
           }
           Some("user") | Some("assistant") => {
@@ -107,8 +103,8 @@ impl AnthropicProvider {
       "stream": request.stream
     });
 
-    if let Some(system) = system_message {
-      body["system"] = json!(system);
+    if !system_messages.is_empty() {
+      body["system"] = json!(system_messages.join("\n\n"));
     }
 
     // Add additional parameters
@@ -355,9 +351,19 @@ pub(crate) fn apply_anthropic_thinking(
     return Ok(());
   }
   if kind == ClaudeThinking::Budget {
+    let budget = config.to_token_budget().unwrap_or(4096);
+    // Anthropic rejects `max_tokens <= thinking.budget_tokens` with HTTP 400;
+    // ensure headroom above the thinking budget when caller left default 4096.
+    let current_max = body
+      .get("max_tokens")
+      .and_then(Value::as_u64)
+      .unwrap_or(4096);
+    if current_max <= u64::from(budget) {
+      body["max_tokens"] = json!(u64::from(budget) + 4096);
+    }
     body["thinking"] = json!({
       "type": "enabled",
-      "budget_tokens": config.to_token_budget().unwrap_or(4096),
+      "budget_tokens": budget,
     });
     return Ok(());
   }
@@ -707,10 +713,32 @@ struct AnthropicStreamingEvent {
   data: Option<Value>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct AnthropicStreamUsageAcc {
+  input_tokens: Option<u32>,
+  output_tokens: Option<u32>,
+}
+
+impl AnthropicStreamUsageAcc {
+  fn to_token_usage(self) -> Option<crate::client::TokenUsage> {
+    if self.input_tokens.is_none() && self.output_tokens.is_none() {
+      return None;
+    }
+    let prompt = self.input_tokens.unwrap_or(0);
+    let completion = self.output_tokens.unwrap_or(0);
+    Some(crate::client::TokenUsage {
+      prompt_tokens: self.input_tokens,
+      completion_tokens: self.output_tokens,
+      total_tokens: Some(prompt.saturating_add(completion)),
+    })
+  }
+}
+
 pub struct AnthropicStreamingResponse {
   stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>,
   buffer: LineBuffer,
   finished: bool,
+  usage_acc: AnthropicStreamUsageAcc,
 }
 
 // Make it Send + Sync
@@ -731,10 +759,20 @@ impl AnthropicStreamingResponse {
       stream: Box::pin(string_stream),
       buffer: LineBuffer::default(),
       finished: false,
+      usage_acc: AnthropicStreamUsageAcc::default(),
     }
   }
 
+  #[cfg(test)]
   fn parse_sse_event(line: &str) -> Option<StreamChunk> {
+    let mut acc = AnthropicStreamUsageAcc::default();
+    Self::parse_sse_event_with_state(line, &mut acc)
+  }
+
+  fn parse_sse_event_with_state(
+    line: &str,
+    usage_acc: &mut AnthropicStreamUsageAcc,
+  ) -> Option<StreamChunk> {
     if line.starts_with("event: ") {
       return None; // Event type line, not data
     }
@@ -749,6 +787,27 @@ impl AnthropicStreamingResponse {
       && let Some(event_type) = event.get("type").and_then(|t| t.as_str())
     {
       match event_type {
+        "message_start" => {
+          if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
+            let input = usage
+              .get("input_tokens")
+              .and_then(Value::as_u64)
+              .unwrap_or(0) as u32;
+            let cache_create = usage
+              .get("cache_creation_input_tokens")
+              .and_then(Value::as_u64)
+              .unwrap_or(0) as u32;
+            let cache_read = usage
+              .get("cache_read_input_tokens")
+              .and_then(Value::as_u64)
+              .unwrap_or(0) as u32;
+            usage_acc.input_tokens = Some(
+              input
+                .saturating_add(cache_create)
+                .saturating_add(cache_read),
+            );
+          }
+        }
         "content_block_start" => {
           // Q2.5.2: tool_use blocks emit their `id` and `name` here, before any
           // `input_json_delta`. Surface them as a ToolCallDelta with empty args
@@ -833,6 +892,25 @@ impl AnthropicStreamingResponse {
             }
           }
         }
+        "message_delta" => {
+          if let Some(out) = event
+            .get("usage")
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(Value::as_u64)
+          {
+            usage_acc.output_tokens = Some(out as u32);
+            return Some(StreamChunk {
+              thinking: String::new(),
+              media: Vec::new(),
+              content: String::new(),
+              is_final: false,
+              metadata: Some(event.clone()),
+              usage: usage_acc.to_token_usage(),
+              content_type: Some("text".to_string()),
+              tool_call_deltas: Vec::new(),
+            });
+          }
+        }
         "message_stop" => {
           // Q2.5.1: Anthropic emits `message_stop` exactly once at the end of the
           // entire response. `content_block_stop` fires after each block (text,
@@ -844,7 +922,7 @@ impl AnthropicStreamingResponse {
             content: String::new(),
             is_final: true,
             metadata: Some(event.clone()),
-            usage: None,
+            usage: usage_acc.to_token_usage(),
             content_type: Some("text".to_string()),
             tool_call_deltas: Vec::new(),
           });
@@ -865,19 +943,10 @@ impl StreamingResponse for AnthropicStreamingResponse {
     }
 
     loop {
-      // W0.3: drain any complete lines already sitting in the buffer
-      // *before* pulling more bytes off the network — see `openai.rs`'s
-      // `OpenAIStreamingResponse::next_chunk` (same bug, same fix) and
-      // `stepfun.rs` for the original reference fix. Draining only
-      // inside the `Some(Ok(data))` arm and returning on the first
-      // parsed line stranded every subsequent buffered line until
-      // another network read happened to re-trigger the drain; if the
-      // stream had already ended, that line (e.g. the terminal
-      // `message_stop` event) was silently dropped.
       {
         while let Some(line) = self.buffer.next_line() {
           if !line.is_empty()
-            && let Some(chunk) = Self::parse_sse_event(&line)
+            && let Some(chunk) = Self::parse_sse_event_with_state(&line, &mut self.usage_acc)
           {
             if chunk.is_final {
               self.finished = true;
@@ -1612,5 +1681,63 @@ mod tests {
     ).unwrap();
     assert_eq!(chunk.content, "hi");
     assert!(chunk.tool_call_deltas.is_empty());
+  }
+
+  #[test]
+  fn multiple_system_messages_concatenated_and_budget_thinking_bumps_max_tokens() {
+    let provider = AnthropicProvider::new("test-key", None).unwrap();
+    let request = ProviderRequest {
+      model: "claude-haiku-4-5-20251001".to_string(),
+      messages: vec![
+        json!({"role": "system", "content": "Primary ReAct + tool instructions"}),
+        json!({"role": "system", "content": "User preferences: concise"}),
+        json!({"role": "system", "content": "Session summary so far: step 1 done"}),
+        json!({"role": "user", "content": "continue"}),
+      ],
+      stream: false,
+      parameters: std::collections::HashMap::new(),
+      tools: None,
+      tool_choice: None,
+      thinking: Some(ThinkingConfig::Medium),
+      response_format: None,
+    };
+    let body = provider.build_request_body(&request).unwrap();
+    let sys = body["system"].as_str().expect("system string");
+    assert!(sys.contains("Primary ReAct + tool instructions"));
+    assert!(sys.contains("User preferences: concise"));
+    assert!(sys.contains("Session summary so far: step 1 done"));
+    assert!(
+      body["max_tokens"].as_u64().unwrap() > body["thinking"]["budget_tokens"].as_u64().unwrap(),
+      "max_tokens must strictly exceed thinking.budget_tokens: {body}"
+    );
+  }
+
+  #[test]
+  fn streaming_accumulates_message_start_and_message_delta_token_usage() {
+    let mut acc = AnthropicStreamUsageAcc::default();
+    assert!(
+      AnthropicStreamingResponse::parse_sse_event_with_state(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":30}}}",
+        &mut acc,
+      )
+      .is_none()
+    );
+    let delta_chunk = AnthropicStreamingResponse::parse_sse_event_with_state(
+      "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":45}}",
+      &mut acc,
+    )
+    .expect("message_delta chunk");
+    let usage = delta_chunk.usage.expect("usage on message_delta");
+    assert_eq!(usage.prompt_tokens, Some(150));
+    assert_eq!(usage.completion_tokens, Some(45));
+    assert_eq!(usage.total_tokens, Some(195));
+
+    let stop_chunk = AnthropicStreamingResponse::parse_sse_event_with_state(
+      "data: {\"type\":\"message_stop\"}",
+      &mut acc,
+    )
+    .expect("message_stop chunk");
+    assert!(stop_chunk.is_final);
+    assert_eq!(stop_chunk.usage.unwrap().total_tokens, Some(195));
   }
 }

@@ -49,8 +49,10 @@ impl GoogleProvider {
   }
 
   fn build_request_body(&self, request: &ProviderRequest) -> Value {
-    // Convert OpenAI-style messages to Gemini format
-    let mut system_instruction = None;
+    // Convert OpenAI-style messages to Gemini format. Multiple `system`
+    // messages (persona + preferences + project facts + session summary)
+    // are concatenated in order rather than overwritten.
+    let mut system_messages: Vec<String> = Vec::new();
     let mut gemini_contents = Vec::new();
 
     for message in &request.messages {
@@ -59,12 +61,9 @@ impl GoogleProvider {
       {
         match role.as_str() {
           Some("system") => {
-            // System messages stay text-only on Gemini; flatten any array parts
-            // to their concatenated text rather than dropping non-text content
-            // silently.
             let text = super::openai_content_to_text(content);
             if !text.is_empty() {
-              system_instruction = Some(json!({"parts": [{"text": text}]}));
+              system_messages.push(text);
             }
           }
           Some("user") => {
@@ -88,8 +87,8 @@ impl GoogleProvider {
       "contents": gemini_contents
     });
 
-    if let Some(system) = system_instruction {
-      body["systemInstruction"] = system;
+    if !system_messages.is_empty() {
+      body["systemInstruction"] = json!({"parts": [{"text": system_messages.join("\n\n")}]});
     }
 
     // Add generation config
@@ -1775,5 +1774,32 @@ mod tests {
       "properties": { "left": { "type": "object" } }
     });
     assert!(sanitize_schema_for_gemini(&untyped).is_none());
+  }
+
+  #[test]
+  fn multiple_system_messages_are_joined_into_system_instruction() {
+    let provider = GoogleProvider::new("test-key", None).unwrap();
+    let req = ProviderRequest {
+      model: "models/gemini-2.5-flash".to_string(),
+      messages: vec![
+        json!({"role": "system", "content": "Primary system prompt and tool schema"}),
+        json!({"role": "system", "content": "Project facts: Rust workspace"}),
+        json!({"role": "user", "content": "hello"}),
+      ],
+      stream: false,
+      parameters: std::collections::HashMap::new(),
+      tools: None,
+      tool_choice: None,
+      thinking: None,
+      response_format: None,
+    };
+    let body = provider.build_request_body(&req);
+    let sys_text = body["systemInstruction"]["parts"][0]["text"]
+      .as_str()
+      .expect("systemInstruction text");
+    assert_eq!(
+      sys_text,
+      "Primary system prompt and tool schema\n\nProject facts: Rust workspace"
+    );
   }
 }

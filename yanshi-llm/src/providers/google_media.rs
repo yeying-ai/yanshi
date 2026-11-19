@@ -334,6 +334,78 @@ async fn resolve_source_image(_client: &Client, source_url: &str) -> Result<(Str
   Ok((mime, b64))
 }
 
+fn is_imagen_model(model: &str) -> bool {
+  let trimmed = model
+    .strip_prefix("models/")
+    .or_else(|| model.strip_prefix("publishers/google/models/"))
+    .unwrap_or(model);
+  trimmed.starts_with("imagen-")
+}
+
+impl GoogleMediaProvider {
+  async fn generate_imagen_predict(
+    &self,
+    request: &Text2ImageRequest,
+  ) -> Result<ImageGenerationResponse> {
+    let url = self
+      .endpoint
+      .model_action_url(&request.model, "predict", None);
+    let mut parameters = json!({
+      "sampleCount": request.n.unwrap_or(1).max(1),
+    });
+    if let Some(ratio) = size_to_aspect_ratio(request.size.as_deref()) {
+      parameters["aspectRatio"] = json!(ratio);
+    }
+    let body = json!({
+      "instances": [{ "prompt": request.prompt }],
+      "parameters": parameters,
+    });
+    let response = self
+      .client
+      .post(&url)
+      .headers(self.build_headers()?)
+      .json(&body)
+      .send()
+      .await?;
+    if !response.status().is_success() {
+      let status_code = response.status().as_u16();
+      let headers = response.headers().clone();
+      let error_text = response.text().await.unwrap_or_default();
+      return Err(super::chat_http_error(status_code, error_text, &headers));
+    }
+    let payload: Value = response.json().await?;
+    let mut images = Vec::new();
+    if let Some(preds) = payload.get("predictions").and_then(Value::as_array) {
+      for pred in preds {
+        if let Some(b64) = pred
+          .get("bytesBase64Encoded")
+          .and_then(Value::as_str)
+          .filter(|s| !s.is_empty())
+        {
+          images.push(GeneratedImage {
+            url: None,
+            b64_json: Some(b64.to_string()),
+            seed: None,
+          });
+        }
+      }
+    }
+    if images.is_empty() {
+      return Err(LLMError::ResponseParsingError {
+        message: format!(
+          "Google Imagen `:predict` response for '{}' contained no `predictions[].bytesBase64Encoded`",
+          request.model
+        ),
+      });
+    }
+    Ok(ImageGenerationResponse {
+      created: 0,
+      images,
+      metadata: Some(payload),
+    })
+  }
+}
+
 #[async_trait]
 impl Text2ImageProvider for GoogleMediaProvider {
   fn name(&self) -> &str {
@@ -341,6 +413,9 @@ impl Text2ImageProvider for GoogleMediaProvider {
   }
 
   async fn generate(&self, request: Text2ImageRequest) -> Result<ImageGenerationResponse> {
+    if is_imagen_model(&request.model) {
+      return self.generate_imagen_predict(&request).await;
+    }
     let generation_config = image_generation_config(request.size.as_deref());
     let parts = self
       .generate_content_media(&request.model, &request.prompt, generation_config)
@@ -970,6 +1045,64 @@ mod tests {
 
     assert_eq!(out.images.len(), 1);
     assert_eq!(out.images[0].b64_json.as_deref(), Some("b3V0"));
+    server.await.expect("server join");
+  }
+
+  #[tokio::test]
+  async fn imagen_models_route_to_predict_endpoint() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.expect("accept");
+      let mut buf = vec![0_u8; 4096];
+      let n = stream.read(&mut buf).await.expect("read");
+      let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+      assert!(
+        req_str.contains(":predict"),
+        "expected :predict route for imagen model, got: {req_str}"
+      );
+      let resp_body = json!({
+        "predictions": [
+          { "bytesBase64Encoded": "aW1n", "mimeType": "image/png" }
+        ]
+      })
+      .to_string();
+      let http_resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        resp_body.len(),
+        resp_body
+      );
+      stream
+        .write_all(http_resp.as_bytes())
+        .await
+        .expect("write response");
+    });
+
+    let no_proxy_client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("test client");
+    let provider =
+      GoogleMediaProvider::with_client(no_proxy_client, "test-key", Some(format!("http://{addr}")))
+        .expect("provider");
+    let out = provider
+      .generate(Text2ImageRequest {
+        model: "models/imagen-4.0-generate-preview-06-06".to_string(),
+        prompt: "Editorial architectural blueprint".to_string(),
+        size: Some("16:9".to_string()),
+        n: Some(1),
+        response_format: None,
+        seed: None,
+        steps: None,
+        cfg_scale: None,
+      })
+      .await
+      .expect("imagen generate");
+    assert_eq!(out.images.len(), 1);
+    assert_eq!(out.images[0].b64_json.as_deref(), Some("aW1n"));
     server.await.expect("server join");
   }
 }
