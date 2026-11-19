@@ -844,6 +844,11 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     .iter()
     .map(|(k, v)| (k.clone(), yanshi_core::value::FlowValue::Json(v.clone())))
     .collect();
+  yanshi_config::executor::seed_chat_model_from_override(
+    &flow_def,
+    &mut initial_inputs,
+    ctx.model.as_deref(),
+  );
   yanshi_config::executor::apply_declared_inputs(&flow_def, &mut initial_inputs)?;
   // The gateway always streams workflow events into Postgres + the SSE
   // broker. `YANSHI_TRACE_DIR` opts in to *additionally* writing a
@@ -907,6 +912,9 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
       ctx.cancellation_token.clone(),
     ),
   ));
+  if let Some(ref model) = ctx.model {
+    execution_config = execution_config.with_model_override(model.clone());
+  }
   if let Some(limit) = flow_def
     .effective_cost_limit(ctx.cost_limit_usd)
     .map_err(anyhow::Error::msg)?
@@ -930,14 +938,16 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     // The checkpoint carries the original inputs, spend and cost limit;
     // scheduling and cancellation stay this gateway's.
     flow
-      .resume_with_config(
-        &run_id,
-        &ResumePlanOptions::default(),
-        |recorded| match recorded.cost_limit_usd {
-          Some(limit) => execution_config.with_cost_limit_usd(limit),
-          None => execution_config,
-        },
-      )
+      .resume_with_config(&run_id, &ResumePlanOptions::default(), |recorded| {
+        let mut cfg = execution_config;
+        if let Some(limit) = recorded.cost_limit_usd {
+          cfg = cfg.with_cost_limit_usd(limit);
+        }
+        if let Some(m) = recorded.model_override.filter(|s| !s.is_empty()) {
+          cfg = cfg.with_model_override(m);
+        }
+        cfg
+      })
       .await?
   } else {
     flow

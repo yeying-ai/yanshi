@@ -273,6 +273,14 @@ pub trait HarnessSessionRepo: Send + Sync {
   /// executor call, mirroring how [`Self::reset_for_resume`] prepares the
   /// row before a fresh executor run.
   async fn clear_pending_question_for_resume(&self, id: Uuid) -> Result<(), DbError>;
+  /// Persist optional per-session spend and step ceilings (`0018`) so
+  /// `interrupt/answer` and `:resume` retain the original limits.
+  async fn set_limits(
+    &self,
+    id: Uuid,
+    cost_limit_usd: Option<f64>,
+    max_steps: Option<i32>,
+  ) -> Result<(), DbError>;
 }
 
 /// Harness session event log persistence (P-H.5).
@@ -916,7 +924,8 @@ impl HarnessSessionRepo for PgHarnessSessionRepo {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id, tenant_id, status, user_input, workspace_root, profile,
                    runtime_kind, model, skill_name, started_at, finished_at,
-                   final_answer, error, pending_question, pending_question_step_index"#,
+                   final_answer, error, pending_question, pending_question_step_index,
+                   cost_limit_usd, max_steps"#,
     )
     .bind(session.id)
     .bind(&session.tenant_id)
@@ -936,7 +945,8 @@ impl HarnessSessionRepo for PgHarnessSessionRepo {
     let row = sqlx::query_as::<_, HarnessSession>(
       r#"SELECT id, tenant_id, status, user_input, workspace_root, profile,
                 runtime_kind, model, skill_name, started_at, finished_at,
-                final_answer, error, pending_question, pending_question_step_index
+                final_answer, error, pending_question, pending_question_step_index,
+                cost_limit_usd, max_steps
          FROM harness_sessions
          WHERE id = $1"#,
     )
@@ -950,7 +960,8 @@ impl HarnessSessionRepo for PgHarnessSessionRepo {
     let rows = sqlx::query_as::<_, HarnessSession>(
       r#"SELECT id, tenant_id, status, user_input, workspace_root, profile,
                 runtime_kind, model, skill_name, started_at, finished_at,
-                final_answer, error, pending_question, pending_question_step_index
+                final_answer, error, pending_question, pending_question_step_index,
+                cost_limit_usd, max_steps
          FROM harness_sessions
          WHERE tenant_id = $1
          ORDER BY started_at DESC
@@ -1104,6 +1115,32 @@ impl HarnessSessionRepo for PgHarnessSessionRepo {
          WHERE id = $1"#,
     )
     .bind(id)
+    .execute(&self.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Err(DbError::NotFound {
+        entity_type: "harness_session",
+        id: id.to_string(),
+      });
+    }
+    Ok(())
+  }
+
+  async fn set_limits(
+    &self,
+    id: Uuid,
+    cost_limit_usd: Option<f64>,
+    max_steps: Option<i32>,
+  ) -> Result<(), DbError> {
+    let result = sqlx::query(
+      r#"UPDATE harness_sessions
+         SET cost_limit_usd = $2,
+             max_steps = $3
+         WHERE id = $1"#,
+    )
+    .bind(id)
+    .bind(cost_limit_usd)
+    .bind(max_steps)
     .execute(&self.pool)
     .await?;
     if result.rows_affected() == 0 {

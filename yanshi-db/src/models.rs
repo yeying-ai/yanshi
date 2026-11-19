@@ -299,6 +299,10 @@ pub struct HarnessSession {
   /// V2.3: the `AgentStep` index the paused question belongs to.
   /// Meaningless when `pending_question` is `None`.
   pub pending_question_step_index: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cost_limit_usd: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_steps: Option<i32>,
 }
 
 /// Input for creating a new harness session via

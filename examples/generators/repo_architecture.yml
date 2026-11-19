@@ -126,6 +126,7 @@ nodes:
       png: true
       png_width: 1800
       max_attempts: 4
+      ignore_ambient_source: true
 
   - id: dep_fig_prompt
     type: template
@@ -153,6 +154,7 @@ nodes:
       png: true
       png_width: 1800
       max_attempts: 4
+      ignore_ambient_source: true
 
   - id: assemble_report
     type: template

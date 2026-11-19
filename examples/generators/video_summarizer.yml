@@ -202,7 +202,7 @@ nodes:
 
   - id: assemble_report
     type: template
-    dependencies: ["ingest", "transcribe", "summarize_video", "mindmap_png", "polish_srt_llm"]
+    dependencies: ["ingest", "transcribe", "summarize_video", "mindmap_png"]
     input_mapping:
       has_native_subs: "{{ nodes.ingest.outputs.has_subtitles }}"
       duration_secs: "{{ nodes.ingest.outputs.duration_seconds }}"

@@ -299,14 +299,15 @@ impl IllustrationNode {
     refine: bool,
     prompt_model: Option<&str>,
   ) -> Result<(FlowValue, String), YanshiError> {
-    let core_subject = if refine && let Some(pm) = prompt_model.filter(|m| !m.trim().is_empty()) {
+    let core_subject = if refine {
+      let pm = prompt_model.map(str::trim).unwrap_or("");
       match self
         .refine_visual_concept(pm, raw_concept, context, preset, theme)
         .await
       {
         Ok(refined) => refined,
         Err(err @ YanshiError::CostLimitExceeded { .. }) => return Err(err),
-        Err(err) if self.graceful_fallback => {
+        Err(err) => {
           tracing::warn!(
             node = %self.id,
             error = %err,
@@ -314,7 +315,6 @@ impl IllustrationNode {
           );
           raw_concept.to_string()
         }
-        Err(err) => return Err(err),
       }
     } else {
       raw_concept.to_string()

@@ -1743,4 +1743,58 @@ async fn run_resume_context_and_source_raw_content_roundtrip() {
   assert_eq!(fetched_run.cost_limit_usd, Some(3.5));
   assert_eq!(fetched_run.notebook_id, Some(nb.id));
   assert_eq!(fetched_run.notebook_kind.as_deref(), Some("report"));
+
+  use yanshi_db::{NewNotebookMessage, NotebookMessageRepo};
+  for turn in 1..=4 {
+    repos
+      .notebook_messages
+      .append(NewNotebookMessage {
+        notebook_id: nb.id,
+        tenant_id: tenant.clone(),
+        question: format!("Q{turn}"),
+        answer: format!("A{turn}"),
+        model: "mock".to_string(),
+        citations: serde_json::json!([]),
+        used_chunk_count: 1,
+      })
+      .await
+      .expect("append notebook message");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+  }
+  let recent_two = repos
+    .notebook_messages
+    .list_for_notebook(&tenant, nb.id, 2)
+    .await
+    .expect("list recent messages");
+  assert_eq!(recent_two.len(), 2);
+  assert_eq!(recent_two[0].question, "Q3");
+  assert_eq!(recent_two[1].question, "Q4");
+
+  let hs = repos
+    .harness_sessions
+    .create(NewHarnessSession {
+      id: Uuid::new_v4(),
+      tenant_id: tenant.clone(),
+      user_input: "audit".to_string(),
+      workspace_root: "/tmp".to_string(),
+      profile: "dev".to_string(),
+      runtime_kind: "react".to_string(),
+      model: "mock".to_string(),
+      skill_name: None,
+    })
+    .await
+    .expect("create harness session");
+  repos
+    .harness_sessions
+    .set_limits(hs.id, Some(1.25), Some(8))
+    .await
+    .expect("set harness limits");
+  let hs_fetched = repos
+    .harness_sessions
+    .get(hs.id)
+    .await
+    .expect("get harness session")
+    .expect("session exists");
+  assert_eq!(hs_fetched.cost_limit_usd, Some(1.25));
+  assert_eq!(hs_fetched.max_steps, Some(8));
 }

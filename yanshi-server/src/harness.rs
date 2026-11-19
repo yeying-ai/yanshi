@@ -875,6 +875,17 @@ pub async fn submit_harness_session(
       skill_name: req.skill_name.clone(),
     })
     .await?;
+  if req.cost_limit_usd.is_some() || req.max_steps.is_some() {
+    state
+      .repos
+      .harness_sessions
+      .set_limits(
+        session.id,
+        req.cost_limit_usd,
+        req.max_steps.and_then(|n| i32::try_from(n).ok()),
+      )
+      .await?;
+  }
 
   // Dispatch in the background so the HTTP request returns immediately.
   // The executor owns the entire session lifecycle from this point.
@@ -1246,6 +1257,8 @@ pub async fn resume_harness_session(
     .as_deref()
     .and_then(|name| state.skills.resolve(name))
     .map(|entry| entry.path);
+  let cost_limit_usd = session.cost_limit_usd;
+  let max_steps = session.max_steps.and_then(|n| usize::try_from(n).ok());
   let user_input_owned = user_input.clone();
   let cancel_guard = state.harness_cancellations.register(id);
   tokio::spawn(async move {
@@ -1260,17 +1273,8 @@ pub async fn resume_harness_session(
         model,
         skill_name,
         skill_dir,
-        // U1.3: cost_limit_usd isn't a persisted `harness_sessions`
-        // column (unlike profile/runtime_kind/model/skill_name), so a
-        // resume can't recover the original session's limit — it
-        // restarts with no cost-based stop condition. Only the create
-        // path (`CreateHarnessSessionRequest::cost_limit_usd`) can set
-        // it today; persisting + re-applying it across resume is a
-        // follow-up if operators need it.
-        cost_limit_usd: None,
-        // W0.1: same "not a persisted column" caveat as cost_limit_usd
-        // above — a resume falls back to the server default step cap.
-        max_steps: None,
+        cost_limit_usd,
+        max_steps,
         repos,
         broker,
         initial_seq,
@@ -1426,9 +1430,8 @@ pub async fn answer_interrupt(
     model: session.model.clone(),
     skill_name: session.skill_name.clone(),
     skill_dir,
-    cost_limit_usd: None,
-    // W0.1: not a persisted column — see the `reset_for_resume` site above.
-    max_steps: None,
+    cost_limit_usd: session.cost_limit_usd,
+    max_steps: session.max_steps.and_then(|n| usize::try_from(n).ok()),
     repos,
     broker,
     initial_seq,

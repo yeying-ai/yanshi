@@ -3155,7 +3155,7 @@ pub fn deck_to_interactive_html(
          if (e.key === 'ArrowRight') stepDelta(1);\n\
          if (e.key === 'ArrowLeft') stepDelta(-1);\n\
        }});\n\
-       if (window.self !== window.top) {{\n\
+       if (window.self !== window.top || location.protocol === 'blob:' || location.pathname.indexOf('/v1/runs/') !== -1) {{\n\
          document.querySelectorAll('.deck-ext-link').forEach((el) => el.classList.add('hidden'));\n\
        }}\n\
        selectFrame(0, false);\n\

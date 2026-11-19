@@ -686,6 +686,8 @@ fn specs_for_node_type(node_type: &str) -> Option<Vec<ParamSpec>> {
       ParamSpec::optional("model", ParamType::String),
       ParamSpec::optional("description", ParamType::String),
       ParamSpec::optional("source", ParamType::String),
+      ParamSpec::optional("diagram_source", ParamType::String),
+      ParamSpec::optional("ignore_ambient_source", ParamType::Bool),
       ParamSpec::optional("max_attempts", ParamType::Integer),
       ParamSpec::optional("png", ParamType::Bool),
       ParamSpec::optional("png_width", ParamType::Integer),

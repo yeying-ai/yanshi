@@ -764,10 +764,14 @@ impl NotebookMessageRepo for PgNotebookMessageRepo {
     Ok(
       sqlx::query_as::<_, NotebookMessage>(&format!(
         r#"SELECT {MESSAGE_COLUMNS}
-           FROM notebook_messages
-           WHERE notebook_id = $1 AND tenant_id = $2
-           ORDER BY created_at ASC, id ASC
-           LIMIT $3"#
+           FROM (
+             SELECT {MESSAGE_COLUMNS}
+             FROM notebook_messages
+             WHERE notebook_id = $1 AND tenant_id = $2
+             ORDER BY created_at DESC, id DESC
+             LIMIT $3
+           ) recent
+           ORDER BY created_at ASC, id ASC"#
       ))
       .bind(notebook_id)
       .bind(tenant_id)

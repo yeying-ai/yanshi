@@ -3771,26 +3771,58 @@ async fn load_completed_run_deliverable(
     }
   }
 
-  // 2. Fallback: scan persisted `node_output_captured` events for `deliverable`.
+  // 2. Fallback: scan persisted `node.output.captured` events for `deliverable`.
   if let Ok(events) = state
     .repos
     .events
-    .list_after(tenant_id, run.id, -1, 500)
+    .list_after(tenant_id, run.id, -1, 5000)
     .await
   {
     for ev in events.into_iter().rev() {
-      if ev.kind == "node_output_captured"
+      if (ev.kind == "node.output.captured" || ev.kind == "node_output_captured")
         && ev.payload.get("node_id").and_then(Value::as_str) == Some("deliverable")
         && let Some(output) = ev.payload.get("output")
       {
-        if let Some(inner) = output.get("deliverable").filter(|v| v.is_object()) {
-          return Some(inner.clone());
-        }
-        if output.get("kind").is_some() && output.get("title").is_some() {
-          return Some(output.clone());
+        if let Some(deliv) = unwrap_captured_deliverable_output(output) {
+          return Some(deliv);
         }
       }
     }
+  }
+  None
+}
+
+fn unwrap_flow_json_envelope(val: &Value) -> &Value {
+  if val.get("type").and_then(Value::as_str) == Some("json")
+    && let Some(inner) = val.get("value")
+  {
+    return inner;
+  }
+  val
+}
+
+fn unwrap_captured_deliverable_output(output: &Value) -> Option<Value> {
+  if let Some(raw_deliv) = output.get("deliverable") {
+    let candidate = unwrap_flow_json_envelope(raw_deliv);
+    if candidate.get("kind").is_some() && candidate.get("title").is_some() {
+      return Some(candidate.clone());
+    }
+  }
+  if let Some(raw_out) = output.get("output") {
+    let inner_out = unwrap_flow_json_envelope(raw_out);
+    if let Some(nested) = inner_out.get("deliverable") {
+      let candidate = unwrap_flow_json_envelope(nested);
+      if candidate.get("kind").is_some() && candidate.get("title").is_some() {
+        return Some(candidate.clone());
+      }
+    }
+    if inner_out.get("kind").is_some() && inner_out.get("title").is_some() {
+      return Some(inner_out.clone());
+    }
+  }
+  let direct = unwrap_flow_json_envelope(output);
+  if direct.get("kind").is_some() && direct.get("title").is_some() {
+    return Some(direct.clone());
   }
   None
 }
@@ -4264,10 +4296,11 @@ fn validate_notebook_import_bundle(
 
   let mut validated_deliverables = Vec::new();
   for deliv in bundle.deliverables.iter().take(200) {
-    let kind = deliv.kind.trim();
-    if kind.is_empty() {
+    let raw_kind = deliv.kind.trim();
+    if raw_kind.is_empty() {
       continue;
     }
+    let kind = crate::artifacts::sanitize_zip_segment(raw_kind, "deliverable");
     let name = {
       let n = deliv.name.trim();
       if n.is_empty() {
@@ -4278,7 +4311,7 @@ fn validate_notebook_import_bundle(
     };
     validated_deliverables.push(ValidatedImportDeliverable {
       old_run_id: deliv.run_id,
-      kind: kind.to_string(),
+      kind,
       name,
       mime_type: deliv
         .mime_type
@@ -6115,5 +6148,41 @@ mod tests {
       remapped_nested["citations"][0]["chunk_id"],
       format!("{new_src}:0")
     );
+
+    let flow_wrapped = json!({
+      "deliverable": {
+        "type": "json",
+        "value": { "kind": "slides", "title": "Deck", "files": [] }
+      }
+    });
+    let unwrapped = unwrap_captured_deliverable_output(&flow_wrapped).expect("unwrapped");
+    assert_eq!(unwrapped["kind"], "slides");
+    assert_eq!(unwrapped["title"], "Deck");
+
+    let bundle_with_slash_kind: NotebookExportBundle = serde_json::from_value(json!({
+      "version": 1,
+      "notebook": { "title": "Slash Kind Import" },
+      "sources": [],
+      "deliverables": [{
+        "artifact_id": Uuid::new_v4(),
+        "run_id": Uuid::new_v4(),
+        "kind": "custom/report",
+        "name": "out.bin",
+        "mime_type": "text/html",
+        "created_at": chrono::Utc::now()
+      }],
+      "messages": []
+    }))
+    .expect("bundle json");
+    let validated =
+      validate_notebook_import_bundle(&bundle_with_slash_kind, None).expect("validates");
+    assert!(!validated.deliverables[0].kind.contains('/'));
+    let (synth_name, _, _) = synthesize_imported_deliverable_bytes(
+      &validated.deliverables[0].kind,
+      &validated.deliverables[0].name,
+      validated.deliverables[0].mime_type.as_deref(),
+      None,
+    );
+    assert!(!synth_name.contains('/'));
   }
 }

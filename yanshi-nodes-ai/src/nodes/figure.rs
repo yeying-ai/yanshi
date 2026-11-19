@@ -714,11 +714,22 @@ impl AsyncNode for FigureNode {
     };
     let domain_text = domain.as_ref().map(Domain::instructions);
     let can_generate = description.is_some();
-    if string_input(inputs, "source").is_none() && !can_generate {
-      return Err(self.input_error("give 'source' or 'description'"));
+    let ignore_ambient_source = matches!(
+      inputs.get("ignore_ambient_source"),
+      Some(FlowValue::Json(Value::Bool(true)))
+    );
+    let explicit_diagram_source = string_input(inputs, "diagram_source").or_else(|| {
+      if ignore_ambient_source && can_generate {
+        return None;
+      }
+      string_input(inputs, "source")
+        .filter(|raw| !(can_generate && is_ambient_workflow_source_locator(raw, language)))
+    });
+    if explicit_diagram_source.is_none() && !can_generate {
+      return Err(self.input_error("give 'source' (or 'diagram_source') or 'description'"));
     }
 
-    let mut source = match string_input(inputs, "source") {
+    let mut source = match explicit_diagram_source {
       Some(source) => source.to_string(),
       None => {
         let prompt = prompt_for(language, description.unwrap_or_default(), None);
@@ -816,6 +827,47 @@ impl AsyncNode for FigureNode {
     }
     Ok(outputs)
   }
+}
+
+fn is_ambient_workflow_source_locator(raw: &str, language: Language) -> bool {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return true;
+  }
+  let lower = trimmed.to_ascii_lowercase();
+  if lower.starts_with("http://")
+    || lower.starts_with("https://")
+    || lower.starts_with("data:")
+    || lower.starts_with("file://")
+    || trimmed.starts_with('/')
+    || trimmed.starts_with("./")
+    || trimmed.starts_with("../")
+    || trimmed.starts_with("~/")
+  {
+    return true;
+  }
+  if !trimmed.contains('\n') {
+    if lower.ends_with(".pdf")
+      || lower.ends_with(".git")
+      || lower.ends_with(".zip")
+      || lower.ends_with(".md")
+      || lower.ends_with(".txt")
+    {
+      return true;
+    }
+    // Single-line `owner/repo` GitHub shorthand has one `/` and no D2/TikZ/SVG syntax.
+    if language == Language::D2
+      && trimmed.contains('/')
+      && !trimmed.contains("->")
+      && !trimmed.contains("--")
+      && !trimmed.contains("<-")
+      && !trimmed.contains('{')
+      && !trimmed.contains(':')
+    {
+      return true;
+    }
+  }
+  false
 }
 
 /// Normalize common LLM D2 syntax slip-ups before invoking `d2`:
@@ -2552,5 +2604,32 @@ client -> "svc_user": HTTPS
       out.get("salvage_test_svg"),
       Some(FlowValue::File { .. })
     ));
+  }
+
+  #[test]
+  fn ambient_workflow_source_locator_is_ignored_when_description_is_present() {
+    for locator in [
+      "https://github.com/yeying-ai/yanshi",
+      "https://arxiv.org/abs/2501.00001",
+      "/Users/hal/arch/yanshi",
+      "./local-paper.pdf",
+      "yeying-ai/yanshi",
+    ] {
+      assert!(
+        is_ambient_workflow_source_locator(locator, Language::D2),
+        "expected ambient locator detection for {locator}"
+      );
+    }
+    for real_code in [
+      "client -> server: HTTPS\nserver -> db: SQL",
+      "box: { label: \"Gateway\" }",
+      "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+      "\\begin{tikzpicture}\\draw (0,0) -- (1,1);\\end{tikzpicture}",
+    ] {
+      assert!(
+        !is_ambient_workflow_source_locator(real_code, Language::D2),
+        "real diagram code must not be misclassified: {real_code}"
+      );
+    }
   }
 }

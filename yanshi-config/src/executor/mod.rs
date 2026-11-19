@@ -89,6 +89,28 @@ pub fn apply_declared_inputs(
   Ok(())
 }
 
+/// Seed workflow-level `chat_model` input from `model_override` when the
+/// workflow declares `inputs.chat_model` and the caller did not explicitly
+/// supply `inputs["chat_model"]`. Ensures Studio's / CLI's run-level `model`
+/// override governs workflows (`tech_slides_video`, `debate_podcast_show`,
+/// `episodic_drama_studio`, `worldbuilding_bible`) that route node models via
+/// `{{ nodes.options.outputs.chat_model }}`.
+pub fn seed_chat_model_from_override(
+  flow_def: &FlowDefinitionV2,
+  external_inputs: &mut AsyncNodeInputs,
+  model_override: Option<&str>,
+) {
+  if let Some(model) = model_override.map(str::trim).filter(|m| !m.is_empty())
+    && flow_def.inputs.contains_key("chat_model")
+    && !external_inputs.contains_key("chat_model")
+  {
+    external_inputs.insert(
+      "chat_model".to_string(),
+      FlowValue::Json(Value::String(model.to_string())),
+    );
+  }
+}
+
 /// Y4.4: a JSON Schema for a workflow's declared `inputs`, so an agent
 /// that calls the workflow as a tool sees typed, described parameters
 /// (RFC §3: the planner picks from a closed menu). Types come from each
@@ -375,5 +397,39 @@ nodes:
     assert_eq!(schema["properties"]["pdf"]["type"], "boolean");
     assert_eq!(schema["required"], serde_json::json!(["topic"]));
     assert_eq!(schema["additionalProperties"], false);
+  }
+
+  #[test]
+  fn seed_chat_model_from_override_respects_explicit_input_and_beats_default() {
+    let flow_def = parse(
+      r#"
+name: Studio
+inputs:
+  chat_model: { default: "gemini-2.5-flash" }
+nodes:
+  - id: t
+    type: template
+    parameters: { template: "{{ chat_model }}" }
+"#,
+    );
+    let mut inputs = AsyncNodeInputs::new();
+    seed_chat_model_from_override(&flow_def, &mut inputs, Some("claude-sonnet-4-6"));
+    apply_declared_inputs(&flow_def, &mut inputs).unwrap();
+    assert_eq!(
+      inputs.get("chat_model"),
+      Some(&FlowValue::Json(Value::String(
+        "claude-sonnet-4-6".to_string()
+      )))
+    );
+
+    let mut explicit = AsyncNodeInputs::from([(
+      "chat_model".to_string(),
+      FlowValue::Json(Value::String("gpt-4.1".to_string())),
+    )]);
+    seed_chat_model_from_override(&flow_def, &mut explicit, Some("claude-sonnet-4-6"));
+    assert_eq!(
+      explicit.get("chat_model"),
+      Some(&FlowValue::Json(Value::String("gpt-4.1".to_string())))
+    );
   }
 }

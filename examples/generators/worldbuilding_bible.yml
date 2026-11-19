@@ -254,7 +254,25 @@ nodes:
               label: { type: string }
               children:
                 type: array
-                items: { type: object }
+                items:
+                  type: object
+                  required: [label]
+                  properties:
+                    label: { type: string }
+                    children:
+                      type: array
+                      items:
+                        type: object
+                        required: [label]
+                        properties:
+                          label: { type: string }
+                          children:
+                            type: array
+                            items:
+                              type: object
+                              required: [label]
+                              properties:
+                                label: { type: string }
 
   # Unpack structured fields for parallel diagram/mindmap/atelier nodes.
   - id: codex_parts

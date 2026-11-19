@@ -295,9 +295,9 @@ where
     // forever). Surface a warn so the operator notices the override.
     let slots = config.free_slots.max(1) as usize;
     if slots != config.free_slots as usize {
-      eprintln!(
-        "yanshi-worker: free_slots={} clamped to 1 to avoid dispatch deadlock",
-        config.free_slots
+      tracing::warn!(
+        configured_free_slots = config.free_slots,
+        "yanshi-worker: free_slots clamped to 1 to avoid dispatch deadlock"
       );
     }
     Self {
@@ -380,6 +380,42 @@ where
   where
     P: Clone + Send + 'static,
   {
+    struct HeartbeatTaskGuard(tokio::task::JoinHandle<()>);
+    impl Drop for HeartbeatTaskGuard {
+      fn drop(&mut self) {
+        self.0.abort();
+      }
+    }
+
+    let hb_protocol = self.protocol.clone();
+    let hb_worker_id = self.config.worker_id.clone();
+    let hb_caps = self.config.capabilities.clone();
+    let hb_slots = self.dispatch_slots.clone();
+    let hb_interval = self
+      .config
+      .heartbeat_interval
+      .max(Duration::from_millis(50));
+    let hb_cancel = self.cancellation.clone();
+    let _hb_guard = HeartbeatTaskGuard(tokio::spawn(async move {
+      let mut ticker = tokio::time::interval(hb_interval);
+      // Skip immediate tick so initial claim path sends first heartbeat synchronously.
+      ticker.tick().await;
+      loop {
+        tokio::select! {
+          _ = ticker.tick() => {
+            let advertised_free = hb_slots.available_permits() as u32;
+            let _ = hb_protocol
+              .heartbeat(
+                WorkerHeartbeat::now(hb_worker_id.clone(), None, advertised_free)
+                  .with_capabilities(hb_caps.clone()),
+              )
+              .await;
+          }
+          _ = wait_for_cancel(&hb_cancel) => break,
+        }
+      }
+    }));
+
     let mut last_backoff: Option<Duration> = None;
     let mut transport_failures: u32 = 0;
     loop {
@@ -418,18 +454,21 @@ where
           if let Some(cap) = self.config.reconnect_backoff.max_attempts
             && transport_failures > cap
           {
-            eprintln!(
-              "yanshi-worker: transport error past --max-reconnect-attempts ({cap}); \
-               giving up. last error: {message}"
+            tracing::error!(
+              max_attempts = cap,
+              error = %message,
+              "yanshi-worker: transport error past --max-reconnect-attempts; giving up"
             );
             return Err(WorkerError::Scheduler(SchedulerError::Transport {
               message,
             }));
           }
           let delay = self.config.reconnect_backoff.next_delay(last_backoff);
-          eprintln!(
-            "yanshi-worker: transport error (attempt {transport_failures}); \
-             retrying in {delay:?}. error: {message}"
+          tracing::warn!(
+            attempt = transport_failures,
+            ?delay,
+            error = %message,
+            "yanshi-worker: transport error; retrying"
           );
           last_backoff = Some(delay);
           let sleep_fut = sleep(delay);
@@ -504,9 +543,10 @@ where
       {
         // Best-effort: log + drop. The scheduler will eventually
         // requeue the task via stale-heartbeat reaping.
-        eprintln!(
-          "yanshi-worker: failed to report result for task {}: {err}",
-          task.task_id
+        tracing::warn!(
+          task_id = %task.task_id,
+          error = %err,
+          "yanshi-worker: failed to report result for task"
         );
       }
       // permit drops here, freeing the slot.
@@ -736,7 +776,12 @@ async fn execute_node_payload(
     }
     Err(error) => WorkerTaskResult::Failed {
       error: error.to_string(),
-      retryable: matches!(error, YanshiError::AsyncExecutionError { .. }),
+      retryable: matches!(
+        error,
+        YanshiError::AsyncExecutionError { .. }
+          | YanshiError::NetworkError { .. }
+          | YanshiError::TimeoutExceeded { .. }
+      ),
       events: vec![
         started,
         WorkerTraceEvent {

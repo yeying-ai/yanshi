@@ -295,6 +295,7 @@ nodes:
       png: true
       png_width: 1800
       max_attempts: 4
+      ignore_ambient_source: true
 
   - id: mindmap_tree_json
     type: template

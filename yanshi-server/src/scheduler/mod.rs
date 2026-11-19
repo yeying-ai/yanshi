@@ -184,6 +184,10 @@ where
     run.trace_events.extend(result.events().iter().cloned());
     match result {
       WorkerTaskResult::Succeeded { output, .. } => {
+        run.failures.remove(&assignment.node_id);
+        if run.failures.is_empty() {
+          run.last_error = None;
+        }
         run.succeeded_tasks += 1;
         run.outputs.insert(assignment.node_id, output);
       }
@@ -381,7 +385,7 @@ impl RunControlSnapshot {
   }
 
   fn derive_status(&self) -> RunControlStatus {
-    if self.failed_tasks > 0 {
+    if !self.failures.is_empty() {
       RunControlStatus::Failed
     } else if self.running_tasks > 0 {
       RunControlStatus::Running

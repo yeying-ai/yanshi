@@ -196,7 +196,7 @@ where
       let Some(state) = self.state.get_mut(&assignment.node_id) else {
         continue;
       };
-      if state.status != DistributedNodeStatus::Running {
+      if state.status != DistributedNodeStatus::Running || assignment.attempt != state.attempt {
         continue;
       }
       let _ = self.control.forget_assignment(assignment.task_id).await;
@@ -342,7 +342,7 @@ where
     let Some(snapshot) = self.control.run_snapshot(self.run_id).await else {
       return Ok(());
     };
-    if snapshot.status != super::RunControlStatus::Failed {
+    if snapshot.failures.is_empty() {
       return Ok(());
     }
     let failed_nodes = snapshot
@@ -354,7 +354,7 @@ where
       let Some(state) = self.state.get_mut(&node_id) else {
         continue;
       };
-      if state.status != DistributedNodeStatus::Running {
+      if state.status != DistributedNodeStatus::Running || failure.attempt != state.attempt {
         continue;
       }
       if failure.retryable && state.attempt + 1 < self.max_attempts {
