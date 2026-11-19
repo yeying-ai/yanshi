@@ -434,12 +434,21 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
       delete(delete_source),
     )
     .route(
+      "/v1/notebooks/:id/sources/:source_id/chunks",
+      get(list_source_chunks),
+    )
+    .route(
       "/v1/notebooks/:id/chunks/:chunk_id",
       get(get_notebook_chunk),
     )
     .route("/v1/notebooks/:id/search", get(search_notebook))
     .route("/v1/notebooks/:id/ask", post(ask_notebook))
+    .route("/v1/notebooks/:id/plan", post(plan_notebook))
     .route("/v1/notebooks/:id/generate", post(generate_from_notebook))
+    .route(
+      "/v1/notebooks/:id/generate-batch",
+      post(generate_batch_from_notebook),
+    )
     .route("/v1/notebooks/:id/artifacts", get(list_notebook_artifacts))
     .route(
       "/v1/notebooks/:id/artifacts.zip",
@@ -668,6 +677,45 @@ async fn get_notebook_chunk(
       &format!("chunk '{chunk_id}' in notebook {notebook_id} not found"),
     ),
   }
+}
+
+async fn list_source_chunks(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath((notebook_id, source_id)): RoutePath<(Uuid, Uuid)>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let guard = engine.notebooks().lock_entries();
+  let Some(entry) = guard
+    .get(&notebook_id)
+    .filter(|e| e.notebook.tenant_id == tenant)
+  else {
+    return notebook_error_json(
+      StatusCode::NOT_FOUND,
+      &format!("notebook {notebook_id} not found"),
+    );
+  };
+  let Some(source) = entry.sources.iter().find(|s| s.id == source_id).cloned() else {
+    return notebook_error_json(
+      StatusCode::NOT_FOUND,
+      &format!("source {source_id} in notebook {notebook_id} not found"),
+    );
+  };
+  let mut chunks = entry
+    .chunks_by_source
+    .get(&source_id)
+    .cloned()
+    .unwrap_or_default();
+  chunks.sort_by_key(|c| c.ordinal);
+  (
+    StatusCode::OK,
+    Json(json!({
+      "notebook_id": notebook_id,
+      "source": source,
+      "chunks": chunks,
+    })),
+  )
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2466,6 +2514,9 @@ async fn ask_notebook(
     .into_response()
 }
 
+const MAX_BATCH_GENERATE_ITEMS: usize = 6;
+const DEFAULT_PLAN_MAX_ITEMS: usize = 4;
+
 #[derive(Debug, Deserialize)]
 struct GenerateRequest {
   kind: String,
@@ -2479,90 +2530,114 @@ struct GenerateRequest {
   cost_limit_usd: Option<f64>,
 }
 
-async fn generate_from_notebook(
-  State(engine): State<LocalEngineState>,
-  headers: HeaderMap,
-  RoutePath(id): RoutePath<Uuid>,
-  Json(req): Json<GenerateRequest>,
-) -> Response {
-  let tenant = extract_tenant(&headers);
-  let notebooks = engine.notebooks().clone();
-  let (has_scope, ready_chunks) = {
-    let guard = notebooks.lock_entries();
-    let Some(entry) = guard.get(&id).filter(|e| e.notebook.tenant_id == tenant) else {
-      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
-    };
-    let scope = match validate_entry_source_scope(entry, id, req.source_ids.as_deref()) {
-      Ok(scope) => scope,
-      Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
-    };
-    let chunks = ready_chunks_for_entry(entry, scope.as_ref());
-    (scope.is_some(), chunks)
-  };
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BatchGenerateItem {
+  kind: String,
+  #[serde(default)]
+  params: serde_json::Map<String, Value>,
+}
 
-  let Some((_, template)) = GENERATORS.iter().find(|(k, _)| *k == req.kind) else {
-    let known = GENERATORS
-      .iter()
-      .map(|(k, _)| *k)
-      .collect::<Vec<_>>()
-      .join(", ");
-    return notebook_error_json(
-      StatusCode::BAD_REQUEST,
-      &format!("unknown kind '{}': expected one of {known}", req.kind),
-    );
-  };
+#[derive(Debug, Deserialize)]
+struct GenerateBatchRequest {
+  items: Vec<BatchGenerateItem>,
+  #[serde(default)]
+  source_ids: Option<Vec<Uuid>>,
+  #[serde(default)]
+  model: Option<String>,
+  #[serde(default)]
+  cost_limit_usd: Option<f64>,
+}
 
-  let model = match resolve_notebook_model(req.model.as_deref()) {
-    Ok(m) => m,
-    Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
+struct PreparedLocalGeneratorItem {
+  kind: String,
+  template: &'static str,
+  inputs: serde_json::Map<String, Value>,
+}
+
+fn find_local_generator_template(kind: &str) -> Result<&'static str, String> {
+  GENERATORS
+    .iter()
+    .find(|(k, _)| *k == kind)
+    .map(|(_, tpl)| *tpl)
+    .ok_or_else(|| {
+      let known = GENERATORS
+        .iter()
+        .map(|(k, _)| *k)
+        .collect::<Vec<_>>()
+        .join(", ");
+      format!("unknown kind '{kind}': expected one of {known}")
+    })
+}
+
+fn load_local_ready_chunks(
+  notebooks: &LocalNotebooksState,
+  tenant: &str,
+  notebook_id: Uuid,
+  source_ids: Option<&[Uuid]>,
+  verb: &str,
+) -> Result<Vec<LocalSourceChunk>, (StatusCode, String)> {
+  let guard = notebooks.lock_entries();
+  let Some(entry) = guard
+    .get(&notebook_id)
+    .filter(|e| e.notebook.tenant_id == tenant)
+  else {
+    return Err((
+      StatusCode::NOT_FOUND,
+      format!("notebook {notebook_id} not found"),
+    ));
   };
-  if let Some(limit) = req.cost_limit_usd
-    && let Err(msg) = yanshi_config::config::v2::validate_cost_limit(limit)
-  {
-    return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
+  let scope = validate_entry_source_scope(entry, notebook_id, source_ids)
+    .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+  let chunks = ready_chunks_for_entry(entry, scope.as_ref());
+  if chunks.is_empty() {
+    let msg = if scope.is_some() {
+      format!("selected sources have no ready chunks to {verb}")
+    } else {
+      format!("notebook {notebook_id} has no ready sources to {verb}")
+    };
+    return Err((StatusCode::BAD_REQUEST, msg));
   }
+  Ok(chunks)
+}
 
-  let definition = match yanshi_config::executor::parse_workflow_definition(template) {
-    Ok(def) => def,
-    Err(err) => {
-      return notebook_error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &format!("generator template: {err:#}"),
-      );
-    }
-  };
-  for key in req.params.keys() {
+async fn prepare_local_generator_item(
+  kind: &str,
+  params: serde_json::Map<String, Value>,
+  ready_chunks: &[LocalSourceChunk],
+  model: &str,
+) -> Result<PreparedLocalGeneratorItem, (StatusCode, String)> {
+  let trimmed_kind = kind.trim();
+  let template =
+    find_local_generator_template(trimmed_kind).map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+  let definition = yanshi_config::executor::parse_workflow_definition(template).map_err(|err| {
+    (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("generator template: {err:#}"),
+    )
+  })?;
+  for key in params.keys() {
     if matches!(key.as_str(), "chunks" | "url" | "text") {
-      return notebook_error_json(
+      return Err((
         StatusCode::BAD_REQUEST,
-        &format!("'{key}' comes from the notebook and cannot be set"),
-      );
+        format!("'{key}' comes from the notebook and cannot be set"),
+      ));
     }
     if !definition.inputs.contains_key(key) {
-      return notebook_error_json(
+      return Err((
         StatusCode::BAD_REQUEST,
-        &format!("'{key}' is not a parameter of '{}'", req.kind),
-      );
+        format!("'{key}' is not a parameter of '{trimmed_kind}'"),
+      ));
     }
   }
 
-  if ready_chunks.is_empty() {
-    let msg = if has_scope {
-      "selected sources have no ready chunks to generate from".to_string()
-    } else {
-      format!("notebook {id} has no ready sources to generate from")
-    };
-    return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
-  }
-
-  let query_hint = req
-    .params
+  let query_hint = params
     .get("focus")
     .and_then(Value::as_str)
-    .or_else(|| req.params.get("topic").and_then(Value::as_str))
+    .or_else(|| params.get("topic").and_then(Value::as_str))
     .map(str::trim)
     .filter(|s| !s.is_empty());
-  let selected = select_chunks_for_generate(ready_chunks, query_hint, GENERATE_CHUNK_BUDGET).await;
+  let selected =
+    select_chunks_for_generate(ready_chunks.to_vec(), query_hint, GENERATE_CHUNK_BUDGET).await;
   let packed_chunks: Vec<Value> = selected
     .into_iter()
     .map(|chunk| {
@@ -2574,15 +2649,31 @@ async fn generate_from_notebook(
     })
     .collect();
 
-  let mut inputs = req.params;
+  let mut inputs = params;
   inputs.insert("chunks".to_string(), Value::Array(packed_chunks));
   if definition.inputs.contains_key("chat_model") && !inputs.contains_key("chat_model") {
-    inputs.insert("chat_model".to_string(), Value::String(model.clone()));
+    inputs.insert("chat_model".to_string(), Value::String(model.to_string()));
   }
 
-  let kind_for_hook = req.kind.clone();
-  let tenant_for_hook = tenant.clone();
-  let notebooks_for_hook = notebooks;
+  Ok(PreparedLocalGeneratorItem {
+    kind: trimmed_kind.to_string(),
+    template,
+    inputs,
+  })
+}
+
+async fn dispatch_prepared_local_generator(
+  engine: &LocalEngineState,
+  notebooks: &LocalNotebooksState,
+  tenant: &str,
+  notebook_id: Uuid,
+  prepared: PreparedLocalGeneratorItem,
+  model: &str,
+  cost_limit_usd: Option<f64>,
+) -> Result<(Uuid, String), String> {
+  let kind_for_hook = prepared.kind.clone();
+  let tenant_for_hook = tenant.to_string();
+  let notebooks_for_hook = notebooks.clone();
   let hook = Arc::new(
     move |run_id: Uuid,
           _status: &str,
@@ -2590,7 +2681,7 @@ async fn generate_from_notebook(
           deliverable: Option<&Value>| {
       notebooks_for_hook.attach_run_artifacts(
         &tenant_for_hook,
-        id,
+        notebook_id,
         &kind_for_hook,
         run_id,
         summaries,
@@ -2599,19 +2690,74 @@ async fn generate_from_notebook(
     },
   );
 
-  let run_id = match engine
+  let run_id = engine
     .spawn_workflow_run(SpawnLocalRunParams {
-      tenant_id: tenant,
-      workflow: (*template).to_string(),
-      inputs,
-      model: Some(model),
-      cost_limit_usd: req.cost_limit_usd,
+      tenant_id: tenant.to_string(),
+      workflow: prepared.template.to_string(),
+      inputs: prepared.inputs,
+      model: Some(model.to_string()),
+      cost_limit_usd,
       debug_controller: None,
       on_complete: Some(hook),
     })
-    .await
+    .await?;
+  Ok((run_id, prepared.kind))
+}
+
+async fn generate_from_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+  Json(req): Json<GenerateRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let notebooks = engine.notebooks().clone();
+  if let Err(msg) = find_local_generator_template(req.kind.trim()) {
+    let has_nb = notebooks
+      .lock_entries()
+      .get(&id)
+      .is_some_and(|e| e.notebook.tenant_id == tenant);
+    if !has_nb {
+      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+    }
+    return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
+  }
+  let model = match resolve_notebook_model(req.model.as_deref()) {
+    Ok(m) => m,
+    Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
+  };
+  if let Some(limit) = req.cost_limit_usd
+    && let Err(msg) = yanshi_config::config::v2::validate_cost_limit(limit)
   {
-    Ok(rid) => rid,
+    return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
+  }
+  let ready_chunks = match load_local_ready_chunks(
+    &notebooks,
+    &tenant,
+    id,
+    req.source_ids.as_deref(),
+    "generate from",
+  ) {
+    Ok(c) => c,
+    Err((code, msg)) => return notebook_error_json(code, &msg),
+  };
+  let prepared =
+    match prepare_local_generator_item(&req.kind, req.params, &ready_chunks, &model).await {
+      Ok(p) => p,
+      Err((code, msg)) => return notebook_error_json(code, &msg),
+    };
+  let (run_id, kind) = match dispatch_prepared_local_generator(
+    &engine,
+    &notebooks,
+    &tenant,
+    id,
+    prepared,
+    &model,
+    req.cost_limit_usd,
+  )
+  .await
+  {
+    Ok(pair) => pair,
     Err(msg) => return notebook_error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
   };
 
@@ -2619,8 +2765,481 @@ async fn generate_from_notebook(
     StatusCode::OK,
     Json(json!({
       "run_id": run_id,
-      "kind": req.kind,
+      "kind": kind,
       "status": "queued",
+    })),
+  )
+    .into_response()
+}
+
+async fn generate_batch_from_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+  Json(req): Json<GenerateBatchRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let notebooks = engine.notebooks().clone();
+  let has_nb = notebooks
+    .lock_entries()
+    .get(&id)
+    .is_some_and(|e| e.notebook.tenant_id == tenant);
+  if !has_nb {
+    return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+  }
+  if req.items.is_empty() {
+    return notebook_error_json(
+      StatusCode::BAD_REQUEST,
+      "items must contain at least one generator",
+    );
+  }
+  if req.items.len() > MAX_BATCH_GENERATE_ITEMS {
+    return notebook_error_json(
+      StatusCode::BAD_REQUEST,
+      &format!(
+        "batch contains {} items, exceeding limit of {MAX_BATCH_GENERATE_ITEMS}",
+        req.items.len()
+      ),
+    );
+  }
+  let model = match resolve_notebook_model(req.model.as_deref()) {
+    Ok(m) => m,
+    Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
+  };
+  let per_run_cost_limit_usd = match req.cost_limit_usd {
+    None => None,
+    Some(limit) => match yanshi_config::config::v2::validate_cost_limit(limit) {
+      Ok(valid) => {
+        let per_run = valid / (req.items.len().max(1) as f64);
+        if let Err(msg) = yanshi_config::config::v2::validate_cost_limit(per_run) {
+          return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
+        }
+        Some(per_run)
+      }
+      Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
+    },
+  };
+  let ready_chunks = match load_local_ready_chunks(
+    &notebooks,
+    &tenant,
+    id,
+    req.source_ids.as_deref(),
+    "generate from",
+  ) {
+    Ok(c) => c,
+    Err((code, msg)) => return notebook_error_json(code, &msg),
+  };
+
+  let mut prepared_items = Vec::with_capacity(req.items.len());
+  for item in req.items {
+    match prepare_local_generator_item(&item.kind, item.params, &ready_chunks, &model).await {
+      Ok(p) => prepared_items.push(p),
+      Err((code, msg)) => return notebook_error_json(code, &msg),
+    }
+  }
+
+  let mut runs = Vec::with_capacity(prepared_items.len());
+  for prepared in prepared_items {
+    let (run_id, kind) = match dispatch_prepared_local_generator(
+      &engine,
+      &notebooks,
+      &tenant,
+      id,
+      prepared,
+      &model,
+      per_run_cost_limit_usd,
+    )
+    .await
+    {
+      Ok(pair) => pair,
+      Err(msg) => return notebook_error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    };
+    runs.push(json!({
+      "run_id": run_id,
+      "kind": kind,
+      "status": "queued",
+    }));
+  }
+
+  let mut out = serde_json::Map::new();
+  out.insert("notebook_id".to_string(), json!(id));
+  out.insert("runs".to_string(), Value::Array(runs));
+  if let Some(per_run) = per_run_cost_limit_usd {
+    out.insert("per_run_cost_limit_usd".to_string(), json!(per_run));
+  }
+  (StatusCode::OK, Json(Value::Object(out))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanNotebookRequest {
+  goal: String,
+  #[serde(default)]
+  source_ids: Option<Vec<Uuid>>,
+  #[serde(default)]
+  model: Option<String>,
+  #[serde(default)]
+  max_items: Option<usize>,
+}
+
+fn studio_plan_schema() -> Value {
+  let kinds: Vec<Value> = GENERATORS
+    .iter()
+    .map(|(k, _)| Value::String((*k).to_string()))
+    .collect();
+  json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["rationale", "items"],
+    "properties": {
+      "rationale": { "type": "string" },
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason", "parameters"],
+          "properties": {
+            "kind": { "type": "string", "enum": kinds },
+            "reason": { "type": "string" },
+            "parameters": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["key", "value"],
+                "properties": {
+                  "key": { "type": "string" },
+                  "value": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  })
+}
+
+fn build_generator_catalogue_prompt() -> String {
+  let mut lines = Vec::with_capacity(GENERATORS.len());
+  for &(kind, template) in GENERATORS {
+    let Ok(def) = yanshi_config::executor::parse_workflow_definition(template) else {
+      continue;
+    };
+    let mut param_names: Vec<&String> = def
+      .inputs
+      .keys()
+      .filter(|k| !matches!(k.as_str(), "chunks" | "url" | "text" | "chat_model"))
+      .collect();
+    param_names.sort();
+    let param_specs = param_names
+      .into_iter()
+      .map(|name| {
+        let spec = &def.inputs[name];
+        let default_hint = spec
+          .default
+          .as_ref()
+          .and_then(|v| serde_json::to_value(v).ok())
+          .map(|v| format!("={v}"))
+          .unwrap_or_default();
+        let desc = spec
+          .description
+          .as_deref()
+          .map(str::trim)
+          .filter(|d| !d.is_empty())
+          .map(|d| format!(" ({d})"))
+          .unwrap_or_default();
+        format!("{name}{default_hint}{desc}")
+      })
+      .collect::<Vec<_>>()
+      .join("; ");
+    lines.push(format!("- `{kind}`: params [{param_specs}]"));
+  }
+  lines.join("\n")
+}
+
+fn coerce_planned_param_value(
+  raw: Value,
+  spec: &yanshi_config::config::v2::InputDefinitionV2,
+) -> Option<Value> {
+  if raw.is_null() {
+    return None;
+  }
+  let default_json = spec
+    .default
+    .as_ref()
+    .and_then(|v| serde_json::to_value(v).ok());
+  match &default_json {
+    Some(Value::Bool(_)) => match raw {
+      Value::Bool(b) => Some(Value::Bool(b)),
+      Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(Value::Bool(true)),
+        "false" | "0" | "no" => Some(Value::Bool(false)),
+        _ => None,
+      },
+      _ => None,
+    },
+    Some(Value::Number(default_num)) => {
+      let prefer_int = default_num.is_i64() || default_num.is_u64();
+      match raw {
+        Value::Number(n) => {
+          if prefer_int {
+            n.as_i64()
+              .map(Value::from)
+              .or_else(|| n.as_f64().map(|f| Value::from(f.round() as i64)))
+          } else {
+            n.as_f64().filter(|f| f.is_finite()).map(Value::from)
+          }
+        }
+        Value::String(s) => {
+          let trimmed = s.trim();
+          if prefer_int {
+            trimmed.parse::<i64>().ok().map(Value::from).or_else(|| {
+              trimmed
+                .parse::<f64>()
+                .ok()
+                .filter(|f| f.is_finite())
+                .map(|f| Value::from(f.round() as i64))
+            })
+          } else {
+            trimmed
+              .parse::<f64>()
+              .ok()
+              .filter(|f| f.is_finite())
+              .map(Value::from)
+          }
+        }
+        _ => None,
+      }
+    }
+    Some(Value::String(_)) | None => match raw {
+      Value::String(s) => {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+          None
+        } else {
+          Some(Value::String(trimmed.to_string()))
+        }
+      }
+      Value::Bool(b) => Some(Value::String(b.to_string())),
+      Value::Number(n) => Some(Value::String(n.to_string())),
+      _ => None,
+    },
+    Some(_) => None,
+  }
+}
+
+fn sanitize_local_studio_plan_reply(
+  raw_reply: &str,
+  max_items: usize,
+) -> Result<(String, Vec<Value>), String> {
+  #[derive(Deserialize)]
+  struct RawKvParam {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: Value,
+  }
+  #[derive(Deserialize)]
+  struct RawPlanItem {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    parameters: Vec<RawKvParam>,
+    #[serde(default)]
+    params: serde_json::Map<String, Value>,
+  }
+  #[derive(Deserialize)]
+  struct RawPlan {
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    items: Vec<RawPlanItem>,
+  }
+
+  let value = extract_json_object(raw_reply)?;
+  let parsed: RawPlan =
+    serde_json::from_value(value).map_err(|e| format!("invalid studio plan JSON: {e}"))?;
+  let capped = max_items.clamp(1, MAX_BATCH_GENERATE_ITEMS);
+
+  let mut seen_kinds: HashSet<String> = HashSet::new();
+  let mut items = Vec::new();
+  for raw_item in parsed.items {
+    if items.len() >= capped {
+      break;
+    }
+    let kind = raw_item.kind.trim().to_string();
+    let Some(&(_, template)) = GENERATORS.iter().find(|(k, _)| *k == kind) else {
+      continue;
+    };
+    if !seen_kinds.insert(kind.clone()) {
+      continue;
+    }
+    let Ok(definition) = yanshi_config::executor::parse_workflow_definition(template) else {
+      continue;
+    };
+
+    let mut merged: Vec<(String, Value)> = Vec::new();
+    for kv in raw_item.parameters {
+      merged.push((kv.key, kv.value));
+    }
+    for (k, v) in raw_item.params {
+      merged.push((k, v));
+    }
+    let mut clean_params = serde_json::Map::new();
+    for (raw_key, raw_val) in merged {
+      let key = raw_key.trim();
+      if key.is_empty() || matches!(key, "chunks" | "url" | "text" | "chat_model") {
+        continue;
+      }
+      let Some(spec) = definition.inputs.get(key) else {
+        continue;
+      };
+      if let Some(coerced) = coerce_planned_param_value(raw_val, spec) {
+        clean_params.insert(key.to_string(), coerced);
+      }
+    }
+
+    let mut item_obj = serde_json::Map::new();
+    item_obj.insert("kind".to_string(), Value::String(kind));
+    if let Some(reason) = raw_item
+      .reason
+      .as_deref()
+      .map(str::trim)
+      .filter(|r| !r.is_empty())
+    {
+      item_obj.insert(
+        "reason".to_string(),
+        Value::String(truncate_chars(reason, 400)),
+      );
+    }
+    item_obj.insert("params".to_string(), Value::Object(clean_params));
+    items.push(Value::Object(item_obj));
+  }
+
+  if items.is_empty() {
+    return Err("studio planner returned no valid generator items".to_string());
+  }
+  let rationale = {
+    let trimmed = truncate_chars(&parsed.rationale, 1_200);
+    if trimmed.is_empty() {
+      format!(
+        "Selected {} studio deliverable(s) for this notebook.",
+        items.len()
+      )
+    } else {
+      trimmed
+    }
+  };
+  Ok((rationale, items))
+}
+
+async fn plan_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+  Json(req): Json<PlanNotebookRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let notebooks = engine.notebooks().clone();
+  let goal = req.goal.trim().to_string();
+  if goal.is_empty() {
+    let has_nb = notebooks
+      .lock_entries()
+      .get(&id)
+      .is_some_and(|e| e.notebook.tenant_id == tenant);
+    if !has_nb {
+      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+    }
+    return notebook_error_json(StatusCode::BAD_REQUEST, "goal must not be empty");
+  }
+  let max_items = req
+    .max_items
+    .unwrap_or(DEFAULT_PLAN_MAX_ITEMS)
+    .clamp(1, MAX_BATCH_GENERATE_ITEMS);
+  let model = match resolve_notebook_model(req.model.as_deref()) {
+    Ok(m) => m,
+    Err(msg) => return notebook_error_json(StatusCode::BAD_REQUEST, &msg),
+  };
+  let ready_chunks = match load_local_ready_chunks(
+    &notebooks,
+    &tenant,
+    id,
+    req.source_ids.as_deref(),
+    "plan from",
+  ) {
+    Ok(c) => c,
+    Err((code, msg)) => return notebook_error_json(code, &msg),
+  };
+  let selected = select_chunks_for_generate(ready_chunks, Some(&goal), 12_000).await;
+  let used_chunk_count = selected.len();
+  let passage_digest = selected
+    .iter()
+    .take(10)
+    .map(|c| format!("[{}] {}", c.chunk_id, truncate_chars(&c.content, 600)))
+    .collect::<Vec<_>>()
+    .join("\n\n");
+  let catalogue = build_generator_catalogue_prompt();
+  let schema = studio_plan_schema();
+  let schema_str = serde_json::to_string(&schema).unwrap_or_default();
+
+  let prompt = format!(
+    "You are the Content Studio producer for a research notebook (`RFC_CONTENT_STUDIO` §3).\n\
+     Choose between 1 and {max_items} distinct deliverable generators from the catalogue below \
+     that best satisfy the user's goal, and tailor each generator's declared parameters (`focus`, counts, etc.) \
+     to the notebook's actual passages.\n\
+     Never invent generator kinds or parameter names outside the catalogue, and never set `url`, `text`, or `chunks`.\n\n\
+     User goal: {goal}\n\n\
+     Available Studio generators:\n{catalogue}\n\n\
+     Representative notebook passages:\n{passage_digest}\n\n\
+     Output ONLY valid JSON strictly conforming to this JSON Schema (no markdown fences, no extra prose):\n{schema_str}"
+  );
+
+  if let Err(err) = yanshi_llm::Yanshi::ensure_init().await {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("initializing model registry: {err}"),
+    );
+  }
+  let response = match yanshi_llm::Yanshi::model(&model)
+    .system(
+      "You are a Content Studio planner. Select appropriate deliverable kinds from the closed catalogue and output strict JSON.",
+    )
+    .prompt(&prompt)
+    .json_schema("notebook_studio_plan", schema)
+    .execute_full()
+    .await
+  {
+    Ok(r) => r,
+    Err(err) => {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("LLM execution failed: {err}"),
+      );
+    }
+  };
+
+  let (rationale, items) = match sanitize_local_studio_plan_reply(&response.content, max_items) {
+    Ok(pair) => pair,
+    Err(err) => {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("parsing studio plan: {err}"),
+      );
+    }
+  };
+
+  (
+    StatusCode::OK,
+    Json(json!({
+      "notebook_id": id,
+      "goal": goal,
+      "model": model,
+      "rationale": rationale,
+      "items": items,
+      "used_chunk_count": used_chunk_count,
     })),
   )
     .into_response()
@@ -4149,6 +4768,158 @@ mod tests {
         .is_some_and(|arr| !arr.is_empty()),
       "imported desktop notebook must be immediately searchable: {imported_hits}"
     );
+
+    // AE2: `GET /v1/notebooks/:id/sources/:source_id/chunks` + `plan` + `generate-batch` parity.
+    let cross_src_chunks = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/sources/{csv_id}/chunks"
+      ))
+      .header("X-Yanshi-Tenant", "studio-b")
+      .send()
+      .await
+      .expect("cross-tenant source chunks");
+    assert_eq!(cross_src_chunks.status(), StatusCode::NOT_FOUND);
+
+    let src_chunks_doc: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/sources/{csv_id}/chunks"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("owner source chunks")
+      .json()
+      .await
+      .expect("source chunks json");
+    assert_eq!(src_chunks_doc["source"]["id"], csv_id);
+    assert!(
+      src_chunks_doc["chunks"]
+        .as_array()
+        .is_some_and(|arr| !arr.is_empty() && arr[0]["ordinal"] == 0),
+      "desktop source chunks must list ordered passages: {src_chunks_doc}"
+    );
+
+    let desktop_plan_reply = json!({
+      "rationale": "Flashcards and quiz on tidal ranges.",
+      "items": [
+        {
+          "kind": "flashcards",
+          "reason": "Key basin facts",
+          "parameters": [{"key": "count", "value": "4"}, {"key": "chunks", "value": "drop"}]
+        },
+        {
+          "kind": "unknown_kind",
+          "reason": "Dropped",
+          "parameters": []
+        },
+        {
+          "kind": "quiz",
+          "reason": "Self-check",
+          "parameters": [{"key": "count", "value": "3"}]
+        }
+      ]
+    })
+    .to_string();
+    let desktop_study_reply = json!({
+      "title": "Desktop Tidal Study",
+      "items": [{
+        "front": "Peak range in Bay of Fundy?",
+        "back": "16.3 m.",
+        "question": "Peak range in Bay of Fundy?",
+        "options": ["4.0 m", "16.3 m", "1.2 m"],
+        "answer": 1,
+        "explanation": "CSV records 16.3 m.",
+        "chunk_id": csv_chunk_id
+      }]
+    })
+    .to_string();
+    write_models(vec![
+      desktop_plan_reply,
+      desktop_study_reply.clone(),
+      desktop_study_reply,
+    ]);
+    yanshi_llm::Yanshi::init_with_config(models_cfg.to_str().expect("utf8"))
+      .await
+      .expect("reinit desktop plan + batch mock");
+
+    let plan_doc: Value = client
+      .post(format!("{restarted_url}/v1/notebooks/{notebook_id}/plan"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "goal": "Create flashcards and a quiz on Bay of Fundy",
+        "model": model,
+        "source_ids": [csv_id]
+      }))
+      .send()
+      .await
+      .expect("plan desktop notebook")
+      .json()
+      .await
+      .expect("plan desktop json");
+    let desktop_plan_items = plan_doc["items"].as_array().expect("desktop plan items");
+    assert_eq!(desktop_plan_items.len(), 2, "{plan_doc}");
+    assert_eq!(desktop_plan_items[0]["kind"], "flashcards");
+    assert_eq!(desktop_plan_items[0]["params"]["count"], 4);
+
+    let batch_doc: Value = client
+      .post(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/generate-batch"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "model": model,
+        "cost_limit_usd": 3.0,
+        "source_ids": [csv_id],
+        "items": desktop_plan_items
+      }))
+      .send()
+      .await
+      .expect("desktop generate-batch")
+      .json()
+      .await
+      .expect("desktop generate-batch json");
+    assert_eq!(batch_doc["per_run_cost_limit_usd"], 1.5);
+    let batch_runs = batch_doc["runs"].as_array().expect("desktop batch runs");
+    assert_eq!(batch_runs.len(), 2);
+    for br in batch_runs {
+      let rid = br["run_id"].as_str().expect("batch run_id");
+      for _ in 0..120 {
+        let rd: Value = client
+          .get(format!("{restarted_url}/v1/runs/{rid}"))
+          .header("X-Yanshi-Tenant", "studio-a")
+          .send()
+          .await
+          .expect("poll desktop batch run")
+          .json()
+          .await
+          .expect("poll json");
+        let st = rd["status"].as_str().unwrap_or_default();
+        if matches!(st, "succeeded" | "failed" | "cancelled") {
+          assert_eq!(st, "succeeded", "desktop batch run failed: {rd}");
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+      }
+    }
+    let after_batch_arts: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("list desktop artifacts after batch")
+      .json()
+      .await
+      .expect("artifacts json");
+    let kinds_attached: Vec<&str> = after_batch_arts["artifacts"]
+      .as_array()
+      .expect("artifacts")
+      .iter()
+      .filter_map(|a| a["kind"].as_str())
+      .collect();
+    assert!(kinds_attached.contains(&"flashcards"), "{kinds_attached:?}");
+    assert!(kinds_attached.contains(&"quiz"), "{kinds_attached:?}");
 
     let del_src = client
       .delete(format!(

@@ -147,6 +147,55 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
       }),
     )
     .route(
+      "/v1/notebooks/:id/sources/:source_id/chunks",
+      get(|Path((id, sid)): Path<(String, String)>| async move {
+        Json(json!({
+          "notebook_id": id,
+          "source": { "id": sid, "title": "Basins CSV", "status": "ready" },
+          "chunks": [
+            { "chunk_id": format!("{sid}:0"), "source_id": sid, "ordinal": 0, "content": "Row 1: basin: BayOfFundy | peak_m: 16.3", "metadata": {} }
+          ]
+        }))
+      }),
+    )
+    .route(
+      "/v1/notebooks/:id/plan",
+      post(|Path(id): Path<String>, Json(body): Json<Value>| async move {
+        assert_eq!(body["goal"], "Make flashcards and quiz");
+        Json(json!({
+          "notebook_id": id,
+          "goal": body["goal"],
+          "model": "mock-ask",
+          "rationale": "Flashcards and quiz cover tidal basin facts.",
+          "items": [
+            { "kind": "flashcards", "reason": "Recall", "params": { "count": 5 } }
+          ],
+          "used_chunk_count": 1
+        }))
+      }),
+    )
+    .route(
+      "/v1/notebooks/:id/generate-batch",
+      post({
+        let run_batch = run_id.clone();
+        move |Path(id): Path<String>, Json(body): Json<Value>| {
+          let run_batch = run_batch.clone();
+          async move {
+            let items = body["items"].as_array().expect("batch items");
+            assert!(!items.is_empty());
+            Json(json!({
+              "notebook_id": id,
+              "runs": [{
+                "run_id": run_batch,
+                "kind": items[0]["kind"],
+                "status": "queued"
+              }]
+            }))
+          }
+        }
+      }),
+    )
+    .route(
       "/v1/notebooks/:id/generate",
       post(move |Path(_id): Path<String>, Json(body): Json<Value>| {
         let run_gen = run_gen.clone();
@@ -434,6 +483,50 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
   assert!(zip_receipt["size_bytes"].as_u64().is_some_and(|n| n > 0));
   assert!(zip_dest.is_file());
 
+  // 5c. `chunks`, `plan --execute --output-dir`, and `generate-batch`
+  let source_chunks = bin_run(vec!["chunks".into(), nb_id.clone(), src_id.clone()])
+    .await
+    .expect("chunks");
+  assert_eq!(source_chunks["chunks"].as_array().map(Vec::len), Some(1));
+
+  let plan_out_dir = temp.path().join("plan-batch-out");
+  let plan_exec = bin_run(vec![
+    "plan".into(),
+    nb_id.clone(),
+    "Make flashcards and quiz".into(),
+    "--model".into(),
+    "mock-ask".into(),
+    "--execute".into(),
+    "--output-dir".into(),
+    plan_out_dir.display().to_string(),
+  ])
+  .await
+  .expect("plan --execute");
+  assert_eq!(plan_exec["plan"]["items"][0]["kind"], "flashcards");
+  assert_eq!(plan_exec["runs"][0]["status"], "succeeded");
+  assert!(
+    plan_out_dir
+      .join("flashcards")
+      .join("table_csv")
+      .join("1.csv")
+      .is_file()
+  );
+  assert!(plan_out_dir.join("batch_artifacts.json").is_file());
+
+  let batch_sub = bin_run(vec![
+    "generate-batch".into(),
+    nb_id.clone(),
+    "--kinds".into(),
+    "flashcards".into(),
+    "--focus".into(),
+    "peak ranges".into(),
+    "--model".into(),
+    "mock-ask".into(),
+  ])
+  .await
+  .expect("generate-batch");
+  assert_eq!(batch_sub["runs"][0]["kind"], "flashcards");
+
   // 6. Remove artifact, remove source & delete notebook
   let removed_art = bin_run(vec!["remove-artifact".into(), nb_id.clone(), art_id])
     .await
@@ -521,6 +614,12 @@ async fn notebook_cli_runs_against_live_postgres_gateway_when_configured() {
   .expect("add-source");
   let src_id = src["id"].as_str().expect("src id").to_string();
   let chunk_id = format!("{src_id}:0");
+
+  let listed_chunks = run_cli(vec!["chunks".into(), nb_id.clone(), src_id.clone()])
+    .await
+    .expect("live chunks");
+  assert_eq!(listed_chunks["chunks"].as_array().map(Vec::len), Some(1));
+  assert_eq!(listed_chunks["chunks"][0]["chunk_id"], chunk_id);
 
   let mock_replies = json!([
     json!({

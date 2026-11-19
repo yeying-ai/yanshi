@@ -478,6 +478,23 @@ impl ServerClient {
     expect_success(response).await
   }
 
+  /// `GET /v1/notebooks/{id}/sources/{source_id}/chunks` — list all ordered chunks of a source.
+  pub async fn list_source_chunks(&self, notebook_id: &str, source_id: &str) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/sources/{}/chunks",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(source_id)
+    );
+    let response = self
+      .http
+      .get(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to GET /v1/notebooks/{id}/sources/{source_id}/chunks")?;
+    expect_success(response).await
+  }
+
   /// `GET /v1/notebooks/{id}/search` — run BM25 search, optionally scoped to `source_ids`.
   pub async fn search_notebook(
     &self,
@@ -542,6 +559,43 @@ impl ServerClient {
       .send()
       .await
       .context("failed to POST /v1/notebooks/{id}/generate")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/plan` — plan a multi-deliverable Studio batch from a natural-language goal.
+  pub async fn plan_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}/plan", encode_uri_segment(notebook_id));
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .timeout(std::time::Duration::from_secs(180))
+      .build()
+      .context("failed to build HTTP client for notebook plan")?;
+    let response = client
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/plan")?;
+    expect_success(response).await
+  }
+
+  /// `POST /v1/notebooks/{id}/generate-batch` — launch multiple Studio generators atomically.
+  pub async fn generate_notebook_batch(&self, notebook_id: &str, body: &Value) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/generate-batch",
+      encode_uri_segment(notebook_id)
+    );
+    let response = self
+      .http
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/generate-batch")?;
     expect_success(response).await
   }
 

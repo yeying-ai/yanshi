@@ -141,6 +141,13 @@ pub enum NotebookCommands {
     /// Chunk ID (`<source_uuid>:<ordinal>`)
     chunk_id: String,
   },
+  /// List all ordered passages/chunks extracted from a single source (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`)
+  Chunks {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Source UUID
+    source_id: String,
+  },
   /// Run BM25 passage search across ready sources in a notebook
   Search {
     /// Notebook UUID
@@ -195,6 +202,71 @@ pub enum NotebookCommands {
     #[arg(long)]
     wait: bool,
     /// Download generated deliverable files into `<DIR>/<node_id>/<name>` and write `artifacts.json` (implies `--wait`)
+    #[arg(long, value_name = "DIR")]
+    output_dir: Option<PathBuf>,
+    /// Max seconds to wait when `--wait` or `--output-dir` is enabled
+    #[arg(long, default_value_t = 600)]
+    timeout_secs: u64,
+  },
+  /// Plan a tailored multi-deliverable Studio batch from a natural-language goal (`POST /v1/notebooks/{id}/plan`)
+  Plan {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Natural-language content production goal (e.g. "Prepare flashcards and a quiz on tidal energetics")
+    goal: String,
+    /// Planner (and optional batch) LLM model override (falls back to server `YANSHI_GENERATE_MODEL`)
+    #[arg(short = 'm', long)]
+    model: Option<String>,
+    /// Maximum deliverables to include in the plan (`1..=6`)
+    #[arg(long, default_value_t = 4)]
+    max_items: usize,
+    /// Restrict planning (and `--execute`) to specific source UUIDs (repeatable)
+    #[arg(long = "source-id", value_name = "UUID")]
+    source_ids: Vec<String>,
+    /// Immediately submit the planned deliverables to `POST /v1/notebooks/{id}/generate-batch`
+    #[arg(long)]
+    execute: bool,
+    /// Optional aggregate USD spend cap when `--execute` is enabled (`> 0`)
+    #[arg(long, value_name = "USD")]
+    cost_limit_usd: Option<f64>,
+    /// Poll all dispatched runs until completion (implies `--execute`)
+    #[arg(long)]
+    wait: bool,
+    /// Download generated deliverables into `<DIR>/<kind>/<node_id>/<name>` (implies `--execute` and `--wait`)
+    #[arg(long, value_name = "DIR")]
+    output_dir: Option<PathBuf>,
+    /// Max seconds to wait when `--wait` or `--output-dir` is enabled
+    #[arg(long, default_value_t = 600)]
+    timeout_secs: u64,
+  },
+  /// Launch multiple Studio generators atomically (`POST /v1/notebooks/{id}/generate-batch`)
+  GenerateBatch {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Comma-separated or repeated deliverable kinds (e.g. `--kinds report,flashcards,quiz`)
+    #[arg(
+      long = "kinds",
+      visible_alias = "kind",
+      value_delimiter = ',',
+      required = true
+    )]
+    kinds: Vec<String>,
+    /// Optional shared `focus` parameter applied to every selected generator that declares `focus`
+    #[arg(long)]
+    focus: Option<String>,
+    /// Generator LLM model override (falls back to server `YANSHI_GENERATE_MODEL`)
+    #[arg(short = 'm', long)]
+    model: Option<String>,
+    /// Restrict generation to specific source UUIDs (repeatable)
+    #[arg(long = "source-id", value_name = "UUID")]
+    source_ids: Vec<String>,
+    /// Optional aggregate USD spend cap split evenly across the batch (`> 0`)
+    #[arg(long, value_name = "USD")]
+    cost_limit_usd: Option<f64>,
+    /// Poll all dispatched runs until completion
+    #[arg(long)]
+    wait: bool,
+    /// Download generated deliverables into `<DIR>/<kind>/<node_id>/<name>` and write `batch_artifacts.json` (implies `--wait`)
     #[arg(long, value_name = "DIR")]
     output_dir: Option<PathBuf>,
     /// Max seconds to wait when `--wait` or `--output-dir` is enabled
@@ -525,6 +597,30 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         println!("{}", chunk["content"].as_str().unwrap_or(""));
       }
     }
+    NotebookCommands::Chunks {
+      notebook_id,
+      source_id,
+    } => {
+      let doc = client.list_source_chunks(&notebook_id, &source_id).await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+      } else {
+        let title = doc["source"]["title"].as_str().unwrap_or(&source_id);
+        let chunks = doc["chunks"].as_array().cloned().unwrap_or_default();
+        println!(
+          "Source '{title}' ({source_id}) — {} chunk(s):",
+          chunks.len()
+        );
+        for ch in chunks {
+          println!(
+            "  #{} [{}] {}",
+            ch["ordinal"].as_i64().unwrap_or(0),
+            ch["chunk_id"].as_str().unwrap_or("?"),
+            ch["content"].as_str().unwrap_or("")
+          );
+        }
+      }
+    }
     NotebookCommands::Search {
       notebook_id,
       query,
@@ -774,6 +870,140 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         }
       }
     }
+    NotebookCommands::Plan {
+      notebook_id,
+      goal,
+      model,
+      max_items,
+      source_ids,
+      execute,
+      cost_limit_usd,
+      wait,
+      output_dir,
+      timeout_secs,
+    } => {
+      if let Some(limit) = cost_limit_usd {
+        yanshi_config::config::v2::validate_cost_limit(limit).map_err(anyhow::Error::msg)?;
+      }
+      let clean_model = model.filter(|s| !s.trim().is_empty());
+      let mut plan_body = serde_json::Map::new();
+      plan_body.insert("goal".to_string(), Value::String(goal));
+      plan_body.insert("max_items".to_string(), json!(max_items.clamp(1, 6)));
+      if let Some(m) = &clean_model {
+        plan_body.insert("model".to_string(), Value::String(m.clone()));
+      }
+      if !source_ids.is_empty() {
+        plan_body.insert(
+          "source_ids".to_string(),
+          Value::Array(source_ids.iter().cloned().map(Value::String).collect()),
+        );
+      }
+
+      let plan_resp = client
+        .plan_notebook(&notebook_id, &Value::Object(plan_body))
+        .await?;
+      let should_execute = execute || wait || output_dir.is_some();
+      if !should_execute {
+        if json_mode {
+          println!("{}", serde_json::to_string_pretty(&plan_resp)?);
+        } else {
+          println!(
+            "Studio Plan ({}):\n  {}\n",
+            plan_resp["model"].as_str().unwrap_or("default"),
+            plan_resp["rationale"].as_str().unwrap_or("")
+          );
+          for (idx, item) in plan_resp["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+          {
+            println!(
+              "  {}. [{}] params={} {}",
+              idx + 1,
+              item["kind"].as_str().unwrap_or("?"),
+              item["params"],
+              item["reason"]
+                .as_str()
+                .map(|r| format!("— {r}"))
+                .unwrap_or_default()
+            );
+          }
+        }
+        return Ok(());
+      }
+
+      let planned_items = plan_resp["items"]
+        .as_array()
+        .cloned()
+        .filter(|arr| !arr.is_empty())
+        .context("plan response contained no items to execute")?;
+      execute_cli_batch(
+        &client,
+        &notebook_id,
+        planned_items,
+        clean_model,
+        source_ids,
+        cost_limit_usd,
+        wait || output_dir.is_some(),
+        output_dir,
+        timeout_secs,
+        Some(plan_resp),
+        json_mode,
+      )
+      .await?;
+    }
+    NotebookCommands::GenerateBatch {
+      notebook_id,
+      kinds,
+      focus,
+      model,
+      source_ids,
+      cost_limit_usd,
+      wait,
+      output_dir,
+      timeout_secs,
+    } => {
+      if let Some(limit) = cost_limit_usd {
+        yanshi_config::config::v2::validate_cost_limit(limit).map_err(anyhow::Error::msg)?;
+      }
+      let clean_focus = focus
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty());
+      let mut items: Vec<Value> = Vec::new();
+      for raw_kind in kinds {
+        let k = raw_kind.trim();
+        if k.is_empty() {
+          continue;
+        }
+        let mut params = serde_json::Map::new();
+        if let Some(f) = &clean_focus {
+          params.insert("focus".to_string(), Value::String(f.clone()));
+        }
+        items.push(json!({
+          "kind": k,
+          "params": params,
+        }));
+      }
+      if items.is_empty() {
+        bail!("--kinds must specify at least one generator kind");
+      }
+      execute_cli_batch(
+        &client,
+        &notebook_id,
+        items,
+        model.filter(|s| !s.trim().is_empty()),
+        source_ids,
+        cost_limit_usd,
+        wait || output_dir.is_some(),
+        output_dir,
+        timeout_secs,
+        None,
+        json_mode,
+      )
+      .await?;
+    }
     NotebookCommands::Artifacts { notebook_id } => {
       let env = client.list_notebook_artifacts(&notebook_id).await?;
       if json_mode {
@@ -854,6 +1084,188 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
     }
   }
 
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_cli_batch(
+  client: &ServerClient,
+  notebook_id: &str,
+  items: Vec<Value>,
+  model: Option<String>,
+  source_ids: Vec<String>,
+  cost_limit_usd: Option<f64>,
+  should_wait: bool,
+  output_dir: Option<PathBuf>,
+  timeout_secs: u64,
+  plan_meta: Option<Value>,
+  json_mode: bool,
+) -> Result<()> {
+  let mut req_body = serde_json::Map::new();
+  req_body.insert("items".to_string(), Value::Array(items));
+  if let Some(m) = model {
+    req_body.insert("model".to_string(), Value::String(m));
+  }
+  if !source_ids.is_empty() {
+    req_body.insert(
+      "source_ids".to_string(),
+      Value::Array(source_ids.into_iter().map(Value::String).collect()),
+    );
+  }
+  if let Some(limit) = cost_limit_usd
+    && let Some(num) = serde_json::Number::from_f64(limit)
+  {
+    req_body.insert("cost_limit_usd".to_string(), Value::Number(num));
+  }
+
+  let batch_resp = client
+    .generate_notebook_batch(notebook_id, &Value::Object(req_body))
+    .await?;
+  let dispatched = batch_resp["runs"]
+    .as_array()
+    .cloned()
+    .context("generate-batch response missing runs array")?;
+
+  if !should_wait {
+    if json_mode {
+      let mut out = serde_json::Map::new();
+      if let Some(plan) = plan_meta {
+        out.insert("plan".to_string(), plan);
+      }
+      out.insert("batch".to_string(), batch_resp);
+      println!(
+        "{}",
+        serde_json::to_string_pretty(&if out.contains_key("plan") {
+          Value::Object(out)
+        } else {
+          out.remove("batch").unwrap_or(Value::Null)
+        })?
+      );
+    } else {
+      println!("Submitted {} generator run(s):", dispatched.len());
+      for r in &dispatched {
+        println!(
+          "  - [{}] run_id={}",
+          r["kind"].as_str().unwrap_or("?"),
+          r["run_id"].as_str().unwrap_or("?")
+        );
+      }
+    }
+    return Ok(());
+  }
+
+  let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+  let mut finished_runs: Vec<Value> = Vec::with_capacity(dispatched.len());
+
+  for entry in &dispatched {
+    let run_id = entry["run_id"]
+      .as_str()
+      .context("dispatched run missing run_id")?
+      .to_string();
+    let kind = entry["kind"].as_str().unwrap_or("deliverable").to_string();
+
+    let final_run = loop {
+      let run_env = client.get_run(&run_id).await?;
+      let run_obj = run_env.get("run").unwrap_or(&run_env);
+      let status = run_obj["status"].as_str().unwrap_or("");
+      match status {
+        "succeeded" => break run_obj.clone(),
+        "failed" | "cancelled" => {
+          let err = run_obj["error"]
+            .as_str()
+            .unwrap_or("generator run did not succeed");
+          bail!("batch generator '{kind}' ({run_id}) ended with status '{status}': {err}");
+        }
+        _ => {}
+      }
+      if Instant::now() >= deadline {
+        bail!("timed out after {timeout_secs}s waiting for batch generator '{kind}' ({run_id})");
+      }
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    let mut run_downloaded: Vec<Value> = Vec::new();
+    if let Some(out_dir) = &output_dir {
+      let safe_kind = sanitize_path_segment(&kind, "deliverable");
+      let kind_root = out_dir.join(&safe_kind);
+      std::fs::create_dir_all(&kind_root)
+        .with_context(|| format!("failed to create {}", kind_root.display()))?;
+      let art_env = client.list_run_artifacts(&run_id).await?;
+      let art_list = art_env["artifacts"]
+        .as_array()
+        .cloned()
+        .or_else(|| art_env.as_array().cloned())
+        .unwrap_or_default();
+      for art in art_list {
+        let art_id = art["id"].as_str().context("artifact entry missing id")?;
+        let node_id =
+          sanitize_path_segment(art["node_id"].as_str().unwrap_or("artifact"), "artifact");
+        let file_name = sanitize_path_segment(art["name"].as_str().unwrap_or(art_id), art_id);
+        let bytes = client.download_run_artifact(&run_id, art_id).await?;
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let node_dir = kind_root.join(&node_id);
+        std::fs::create_dir_all(&node_dir)
+          .with_context(|| format!("failed to create {}", node_dir.display()))?;
+        let dest = node_dir.join(&file_name);
+        std::fs::write(&dest, &bytes)
+          .with_context(|| format!("failed to write {}", dest.display()))?;
+        run_downloaded.push(json!({
+          "id": art_id,
+          "node_id": node_id,
+          "name": file_name,
+          "mime_type": art["mime_type"],
+          "size_bytes": bytes.len(),
+          "sha256": sha256,
+          "path": dest.display().to_string(),
+        }));
+      }
+    }
+
+    finished_runs.push(json!({
+      "run_id": run_id,
+      "kind": kind,
+      "status": final_run["status"],
+      "artifacts": run_downloaded,
+    }));
+  }
+
+  if let Some(out_dir) = &output_dir {
+    std::fs::create_dir_all(out_dir)
+      .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    let manifest_path = out_dir.join("batch_artifacts.json");
+    std::fs::write(
+      &manifest_path,
+      serde_json::to_vec_pretty(&json!({
+        "notebook_id": notebook_id,
+        "runs": finished_runs,
+      }))?,
+    )
+    .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+  }
+
+  if json_mode {
+    let mut payload = json!({
+      "notebook_id": notebook_id,
+      "runs": finished_runs,
+    });
+    if let Some(plan) = plan_meta {
+      payload["plan"] = plan;
+    }
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+  } else {
+    println!(
+      "Batch completed ({} deliverable run(s)):",
+      finished_runs.len()
+    );
+    for entry in &finished_runs {
+      println!(
+        "  - [{}] {} (run_id={})",
+        entry["kind"].as_str().unwrap_or("?"),
+        entry["status"].as_str().unwrap_or("?"),
+        entry["run_id"].as_str().unwrap_or("?")
+      );
+    }
+  }
   Ok(())
 }
 
