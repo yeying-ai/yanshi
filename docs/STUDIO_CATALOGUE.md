@@ -8,7 +8,8 @@ downloadable deliverables through a deterministic five-stage pipeline
 1. **Sources** — ingest web search results, pages (`http` with SSRF protection),
    codebases (`repo_snapshot`), PDFs (`pdf_extract`), arXiv source tarballs
    (`arxiv`), or recordings (`video_ingest` + `asr`).
-2. **Planner** — optional content-level planning (`examples/applications/content-studio/`
+2. **Planner** — optional content-level planning (`POST /v1/notebooks/{id}/plan`,
+   `yanshi notebook plan --execute`, `examples/applications/content-studio/`,
    or interactive `type: agent` clarification via `ask_user`).
 3. **Generators** — hand-authored, schema-validated DAG templates under
    [`examples/generators/`](../examples/generators/) with structured JSON

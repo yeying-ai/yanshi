@@ -1,15 +1,17 @@
 # Current Project Status
 
 Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-**AC**, and **AD** closed, plus the daily productivity, keynote & multi-paradigm creative
+**AC**, **AD**, and **AE** closed, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
 `worldbuilding_bible`, multi-turn source-grounded Notebook Q&A (`POST /v1/notebooks/{id}/ask`)
-with `source_ids` scoping, portable Notebook bundle export/import & one-click
-`artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion,
-first-class `yanshi notebook` CLI, 1:1 Tauri desktop Notebook engine parity, and
-Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
+with `source_ids` scoping, Notebook Studio planner (`POST /v1/notebooks/{id}/plan`)
+& atomic multi-deliverable `generate-batch`, per-source passage reader
+(`GET /v1/notebooks/{id}/sources/{source_id}/chunks`), portable Notebook bundle
+export/import & one-click `artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv`
+source ingestion, first-class `yanshi notebook` CLI, 1:1 Tauri desktop Notebook
+engine parity, and Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
 evaluations, roadmap notes, and TODO queues may explain how the project arrived
@@ -144,10 +146,14 @@ engine parity & `yanshi notebook` CLI), **AC** (2026-11-19
 `PATCH /v1/notebooks/{id}` rename, `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`,
 multi-turn `/ask` `history`, pure-Rust `.xlsx`/`.pptx` OOXML source ingestion,
 `ExplicitOrigins` CORS `PATCH` + `x-yanshi-tenant` fix, and `/ui/notebooks`
-Playwright E2E), and **AD** (2026-11-19 portable Notebook bundle export/import,
+Playwright E2E), **AD** (2026-11-19 portable Notebook bundle export/import,
 one-click `GET /v1/notebooks/{id}/artifacts.zip` with `BRIEFING.md`,
 `generate.cost_limit_usd` enforcement, desktop/CLI/UI parity + live Chromium
-Playwright E2E, and `yanshi-core` / `yanshi-cli` Cargo manifest dependency pruning)
+Playwright E2E, and `yanshi-core` / `yanshi-cli` Cargo manifest dependency pruning),
+and **AE** (2026-11-19 `GET /v1/notebooks/{id}/sources/{source_id}/chunks` passage
+reader, `POST /v1/notebooks/{id}/plan` Studio planner, `POST /v1/notebooks/{id}/generate-batch`
+multi-deliverable batch generation across gateway/Tauri/CLI/UI, concurrent UI run
+tracking + terminal-status gallery sync, and 7/7 live Chromium Playwright E2E closure)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts

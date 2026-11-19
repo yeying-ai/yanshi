@@ -99,11 +99,11 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
   --input topic "Rust 零拷贝序列化设计" \
   --output-dir out/video
 
-# 5. 多源笔记本 CLI（支持 .pdf/.docx/.xlsx/.pptx/.csv 摄取、多轮源接地追问、预算封顶与可移植导出）
+# 5. 多源笔记本 CLI（支持 .pdf/.docx/.xlsx/.pptx/.csv 摄取、多轮源接地追问、AI 规划批量生成与可移植导出）
 yanshi notebook create "海洋动力学调研"
 yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
 yanshi notebook ask <notebook_id> "对比主要强潮河口的峰值潮差" --history-file chat.json
-yanshi notebook generate <notebook_id> data_table --cost-limit-usd 2.50 --output-dir out/table
+yanshi notebook plan <notebook_id> "生成峰值潮差记忆闪卡与自测题库" --execute --output-dir out/study
 yanshi notebook export <notebook_id> --out out/oceanography.json --brief-out out/BRIEFING.md
 
 # 6. 启动 Web Studio (/ui/notebooks、/ui/studio 与 /ui/app) 或一键构建安装 macOS 桌面端 Yanshi Studio.app

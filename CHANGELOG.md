@@ -130,6 +130,14 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Nightly Playwright E2E `workspace_root` 400 and Notebook gallery terminal-run polling race (`39f80f6`).**
+  `e2e/harness-sessions.spec.ts`'s second test omitted `workspace_root: /tmp`,
+  hitting a gateway `400 Bad Request` against `YANSHI_GATEWAY_PATH_ROOTS=/tmp` in
+  `ui-e2e.yml`; and `NotebookWorkspacePage.tsx`'s SSE run watcher fetched
+  notebook artifacts immediately upon `workflow.completed` before `flow_execute`
+  finished `attach_artifact_with_deliverable` and flipped `runs.status` to
+  terminal, leaving fast runs without an automatic gallery refresh. Both are
+  fixed and verified across all 7 Chromium Playwright E2E tests.
 - **Notebook `generate.cost_limit_usd` enforcement, tabular preview MIME types, and `yanshi-core` / `yanshi-cli` unused dependency pruning (`623dfce`, `e1b1311`, `8573e00`).**
   `POST /v1/notebooks/{id}/generate` (on both `yanshi-server` and the Tauri
   desktop `local_notebooks.rs` engine, plus `yanshi notebook generate --cost-limit-usd`
@@ -416,6 +424,18 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Notebook Studio planner (`POST /v1/notebooks/{id}/plan`), atomic multi-deliverable batch generation (`POST /v1/notebooks/{id}/generate-batch`), and source passage reader (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`) (`1bc0971`, `b4e9655`, `cf205eb`).**
+  `SourceChunkRepo::list_for_source` and `GET /v1/notebooks/{id}/sources/{source_id}/chunks`
+  expose ordered passages per source; `POST /v1/notebooks/{id}/plan` selects and
+  parameterizes 1–6 Studio deliverables via an OpenAI-strict `json_schema`
+  planner with server-side hallucination/duplicate/policy sanitization; and
+  `POST /v1/notebooks/{id}/generate-batch` validates all items up front, checks
+  tenant concurrency capacity, shares `ready_chunks`, and splits `cost_limit_usd`
+  evenly across runs — mirrored 1:1 across Tauri (`local_notebooks.rs`),
+  `yanshi notebook` CLI (`chunks`, `plan --execute --output-dir`,
+  `generate-batch --kinds`), and `/ui/notebooks` (`trackedGenRuns` concurrent
+  tracker, AI planner card, multi-select batch bar, and `<dialog>` passage
+  reader).
 - **Portable Notebook bundle export/import (`GET /v1/notebooks/{id}/export` + `POST /v1/notebooks/import`) and one-click Notebook deliverables `.zip` archive (`GET /v1/notebooks/{id}/artifacts.zip`) (`623dfce`, `e1b1311`, `a7e63cc`).**
   Export a versioned `NotebookExportBundle` containing notebook metadata,
   ingested sources + ordered `source_chunks`, deliverable citations, and a

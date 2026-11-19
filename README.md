@@ -99,11 +99,11 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
   --input topic "Zero-Copy Serialization in Rust" \
   --output-dir out/video
 
-# 5. Multi-Source Notebook CLI (.pdf/.docx/.xlsx/.pptx/.csv + multi-turn cited Q&A + portable export)
+# 5. Multi-Source Notebook CLI (.pdf/.docx/.xlsx/.pptx/.csv + multi-turn cited Q&A + Studio plan/batch + export)
 yanshi notebook create "Oceanography Research"
 yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
 yanshi notebook ask <notebook_id> "Compare peak macrotidal ranges" --history-file chat.json
-yanshi notebook generate <notebook_id> data_table --cost-limit-usd 2.50 --output-dir out/table
+yanshi notebook plan <notebook_id> "Create flashcards and a quiz on macrotidal ranges" --execute --output-dir out/study
 yanshi notebook export <notebook_id> --out out/oceanography.json --brief-out out/BRIEFING.md
 
 # 6. Launch Web Studio (/ui/notebooks, /ui/studio, /ui/app) or build & install Yanshi Studio.app (macOS)
