@@ -106,6 +106,14 @@ pub struct NotebookArtifact {
 pub trait NotebookRepo: Send + Sync {
   async fn create(&self, tenant_id: &str, title: &str) -> Result<Notebook, DbError>;
   async fn get(&self, tenant_id: &str, id: Uuid) -> Result<Option<Notebook>, DbError>;
+  /// Rename an owned notebook and bump `updated_at`. Returns `None` when no
+  /// such notebook exists for this tenant.
+  async fn rename(
+    &self,
+    tenant_id: &str,
+    id: Uuid,
+    title: &str,
+  ) -> Result<Option<Notebook>, DbError>;
   /// Newest first.
   async fn list(&self, tenant_id: &str, limit: i64) -> Result<Vec<Notebook>, DbError>;
   /// Deletes the notebook with its sources and artifact links; `false`
@@ -140,6 +148,14 @@ pub trait NotebookRepo: Send + Sync {
     tenant_id: &str,
     notebook_id: Uuid,
   ) -> Result<Vec<NotebookArtifact>, DbError>;
+  /// Unlink an artifact from an owned notebook (`notebook_artifacts`). Returns
+  /// `false` when the link does not exist or belongs to another tenant.
+  async fn detach_artifact(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    artifact_id: Uuid,
+  ) -> Result<bool, DbError>;
 }
 
 #[async_trait]
@@ -209,6 +225,24 @@ impl NotebookRepo for PgNotebookRepo {
       .bind(id)
       .bind(tenant_id)
       .fetch_optional(&self.read_pool)
+      .await?,
+    )
+  }
+
+  async fn rename(
+    &self,
+    tenant_id: &str,
+    id: Uuid,
+    title: &str,
+  ) -> Result<Option<Notebook>, DbError> {
+    Ok(
+      sqlx::query_as::<_, Notebook>(&format!(
+        "UPDATE notebooks SET title = $3, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING {NOTEBOOK_COLUMNS}"
+      ))
+      .bind(id)
+      .bind(tenant_id)
+      .bind(title)
+      .fetch_optional(&self.pool)
       .await?,
     )
   }
@@ -299,6 +333,29 @@ impl NotebookRepo for PgNotebookRepo {
         })
         .collect(),
     )
+  }
+
+  async fn detach_artifact(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    artifact_id: Uuid,
+  ) -> Result<bool, DbError> {
+    let deleted = sqlx::query(
+      r#"DELETE FROM notebook_artifacts na
+         USING notebooks n
+         WHERE na.notebook_id = n.id
+           AND na.notebook_id = $1
+           AND na.artifact_id = $2
+           AND n.tenant_id = $3"#,
+    )
+    .bind(notebook_id)
+    .bind(artifact_id)
+    .bind(tenant_id)
+    .execute(&self.pool)
+    .await?
+    .rows_affected();
+    Ok(deleted == 1)
   }
 }
 

@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_retry::{Retry, strategy::ExponentialBackoff};
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/embeddings";
 /// Q2.8.1: pre-fix `MAX_BATCH_SIZE = 2048` was reused both as a token
@@ -136,13 +135,12 @@ impl OpenAIEmbedding {
     // Wait for rate limiter
     self.rate_limiter.until_ready().await;
 
-    // Retry strategy: exponential backoff with max 3 retries
-    let retry_strategy = ExponentialBackoff::from_millis(100)
-      .max_delay(Duration::from_secs(10))
-      .take(3);
-
-    let response = Retry::spawn(retry_strategy, || async {
-      self
+    // Retry strategy: exponential backoff (100ms, 200ms, 400ms; max 10s) with up to 3 retries
+    let mut delay = Duration::from_millis(100);
+    let max_retries = 3usize;
+    let mut attempt = 0usize;
+    let response = loop {
+      match self
         .client
         .post(OPENAI_API_URL)
         .header("Authorization", format!("Bearer {}", self.api_key))
@@ -150,9 +148,19 @@ impl OpenAIEmbedding {
         .json(&request)
         .send()
         .await
-        .map_err(|e| RAGError::embedding(format!("HTTP request failed: {}", e)))
-    })
-    .await?;
+      {
+        Ok(resp) => break resp,
+        Err(e) if attempt < max_retries => {
+          attempt += 1;
+          tokio::time::sleep(delay).await;
+          delay = (delay * 2).min(Duration::from_secs(10));
+          let _ = e;
+        }
+        Err(e) => {
+          return Err(RAGError::embedding(format!("HTTP request failed: {}", e)));
+        }
+      }
+    };
 
     // Check status code
     let status = response.status();

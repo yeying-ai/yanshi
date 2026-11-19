@@ -4,6 +4,7 @@
 //! POST   /v1/notebooks                              {title}              → notebook
 //! GET    /v1/notebooks                                                   → {notebooks}
 //! GET    /v1/notebooks/{id}                                              → {notebook, sources}
+//! PATCH  /v1/notebooks/{id}                         {title}              → notebook
 //! DELETE /v1/notebooks/{id}                                              → 204 No Content
 //! POST   /v1/notebooks/{id}/sources                 {kind, ...}          → source (pending; ingests in the background)
 //! DELETE /v1/notebooks/{id}/sources/{source_id}                          → 204 No Content
@@ -12,6 +13,7 @@
 //! POST   /v1/notebooks/{id}/ask                     {question, ...}      → {answer, citations, ...}
 //! POST   /v1/notebooks/{id}/generate                {kind, params, model} → {run_id, kind}
 //! GET    /v1/notebooks/{id}/artifacts                                    → {artifacts}
+//! DELETE /v1/notebooks/{id}/artifacts/{artifact_id}                      → 204 No Content
 //! ```
 //!
 //! Ingestion: fetch (`url`, through the http tool's SSRF filter: the URL
@@ -138,6 +140,11 @@ async fn own_notebook(state: &AppState, tenant: &TenantId, id: Uuid) -> Result<N
     .ok_or_else(|| ApiError::NotFound(format!("notebook {id} not found")))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateNotebookRequest {
+  pub title: String,
+}
+
 pub async fn get_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
@@ -150,6 +157,25 @@ pub async fn get_notebook(
     .list_for_notebook(tenant.as_str(), id)
     .await?;
   Ok(Json(json!({ "notebook": notebook, "sources": sources })))
+}
+
+pub async fn update_notebook(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+  Json(req): Json<UpdateNotebookRequest>,
+) -> Result<Json<Notebook>, ApiError> {
+  let title = req.title.trim();
+  if title.is_empty() {
+    return Err(ApiError::BadRequest("title must not be empty".into()));
+  }
+  let updated = state
+    .repos
+    .notebooks
+    .rename(tenant.as_str(), id, title)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("notebook {id} not found")))?;
+  Ok(Json(updated))
 }
 
 pub async fn delete_notebook(
@@ -1139,9 +1165,25 @@ pub async fn search_notebook(
 
 // ── grounded Q&A (`/ask`) ───────────────────────────────────────────────
 
+/// Maximum prior Q&A turns retained in multi-turn grounded `/ask`.
+pub const MAX_ASK_HISTORY_TURNS: usize = 8;
+/// Per-field character cap when normalizing caller-supplied conversation turns.
+const MAX_ASK_TURN_CHARS: usize = 2_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotebookConversationTurn {
+  #[serde(default)]
+  pub question: String,
+  #[serde(default)]
+  pub answer: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AskNotebookRequest {
   pub question: String,
+  /// Optional prior Q&A turns for multi-turn follow-up grounding.
+  #[serde(default)]
+  pub history: Vec<NotebookConversationTurn>,
   /// Optional subset of notebook source IDs to ground the answer against.
   #[serde(default)]
   pub source_ids: Option<Vec<Uuid>>,
@@ -1298,6 +1340,67 @@ fn extract_json_object(reply: &str) -> Result<Value, String> {
   Err("model reply did not contain valid JSON".to_string())
 }
 
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+  s.trim().chars().take(max_chars).collect()
+}
+
+fn normalize_ask_history(raw: &[NotebookConversationTurn]) -> Vec<NotebookConversationTurn> {
+  let cleaned: Vec<NotebookConversationTurn> = raw
+    .iter()
+    .filter_map(|turn| {
+      let question = truncate_chars(&turn.question, MAX_ASK_TURN_CHARS);
+      let answer = truncate_chars(&turn.answer, MAX_ASK_TURN_CHARS);
+      if question.is_empty() && answer.is_empty() {
+        None
+      } else {
+        Some(NotebookConversationTurn { question, answer })
+      }
+    })
+    .collect();
+  let skip = cleaned.len().saturating_sub(MAX_ASK_HISTORY_TURNS);
+  cleaned.into_iter().skip(skip).collect()
+}
+
+/// Build a BM25 retrieval hint combining recent conversation turns with the
+/// active follow-up question so pronoun/coreference follow-ups ("What is its
+/// peak range?") still match the subject introduced in prior turns.
+fn build_ask_retrieval_hint(question: &str, history: &[NotebookConversationTurn]) -> String {
+  let recent_skip = history.len().saturating_sub(2);
+  let mut parts: Vec<String> = Vec::with_capacity(5);
+  for turn in history.iter().skip(recent_skip) {
+    if !turn.question.is_empty() {
+      parts.push(truncate_chars(&turn.question, 240));
+    }
+    if !turn.answer.is_empty() {
+      parts.push(truncate_chars(&turn.answer, 240));
+    }
+  }
+  parts.push(question.trim().to_string());
+  parts.join(" ")
+}
+
+fn format_ask_history_block(history: &[NotebookConversationTurn]) -> String {
+  if history.is_empty() {
+    return String::new();
+  }
+  let turns = history
+    .iter()
+    .enumerate()
+    .map(|(idx, turn)| {
+      format!(
+        "Turn {}:\nUser: {}\nAssistant: {}",
+        idx + 1,
+        turn.question,
+        turn.answer
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n");
+  format!(
+    "Prior conversation context (use ONLY to resolve follow-up references; every factual claim MUST still be grounded in Source passages below):\n{turns}\n\n"
+  )
+}
+
 pub async fn ask_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
@@ -1311,6 +1414,8 @@ pub async fn ask_notebook(
   }
   let model = resolve_notebook_model(req.model.as_deref())?;
   let scope = validate_source_scope(&state, &tenant, id, req.source_ids.as_deref()).await?;
+  let history = normalize_ask_history(&req.history);
+  let retrieval_hint = build_ask_retrieval_hint(&question, &history);
 
   let mut ready_chunks = state
     .repos
@@ -1330,7 +1435,7 @@ pub async fn ask_notebook(
   }
 
   let mut selected =
-    select_chunks_for_generate(ready_chunks, Some(&question), GENERATE_CHUNK_BUDGET).await;
+    select_chunks_for_generate(ready_chunks, Some(&retrieval_hint), GENERATE_CHUNK_BUDGET).await;
   if let Some(limit) = req.top_k.map(|k| k.clamp(1, 50))
     && selected.len() > limit
   {
@@ -1349,10 +1454,12 @@ pub async fn ask_notebook(
 
   let schema = grounded_answer_schema();
   let schema_str = serde_json::to_string(&schema).unwrap_or_default();
+  let history_block = format_ask_history_block(&history);
   let prompt = format!(
     "Answer the user's question strictly using ONLY the notebook source passages below. \
      If the passages do not contain enough evidence, state clearly what is missing rather than guessing. \
      Cite every supporting passage by its exact `chunk_id` and a verbatim `quote` copied from that passage.\n\n\
+     {history_block}\
      Question: {question}\n\n\
      Source passages:\n{formatted_passages}\n\n\
      Output ONLY valid JSON strictly conforming to this JSON Schema (no markdown fences, no extra prose):\n{schema_str}"
@@ -1682,6 +1789,24 @@ pub async fn list_notebook_artifacts(
   Ok(Json(json!({ "notebook_id": id, "artifacts": artifacts })))
 }
 
+pub async fn delete_notebook_artifact(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path((notebook_id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+  let deleted = state
+    .repos
+    .notebooks
+    .detach_artifact(tenant.as_str(), notebook_id, artifact_id)
+    .await?;
+  if !deleted {
+    return Err(ApiError::NotFound(format!(
+      "artifact {artifact_id} in notebook {notebook_id} not found"
+    )));
+  }
+  Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -2002,6 +2127,96 @@ mod tests {
           quote: "zero-amplitude rotary tidal systems".to_string(),
         },
       ]
+    );
+  }
+
+  #[test]
+  fn normalize_ask_history_trims_drops_blank_and_caps_recent_turns() {
+    let mut raw = vec![NotebookConversationTurn {
+      question: "   ".to_string(),
+      answer: "\n\t".to_string(),
+    }];
+    for idx in 1..=10 {
+      raw.push(NotebookConversationTurn {
+        question: format!("  Question {idx}  "),
+        answer: format!("  Answer {idx}  "),
+      });
+    }
+    let normalized = normalize_ask_history(&raw);
+    assert_eq!(normalized.len(), MAX_ASK_HISTORY_TURNS);
+    assert_eq!(normalized[0].question, "Question 3");
+    assert_eq!(
+      normalized[MAX_ASK_HISTORY_TURNS - 1].question,
+      "Question 10"
+    );
+    let block = format_ask_history_block(&normalized);
+    assert!(block.contains("Turn 1:\nUser: Question 3\nAssistant: Answer 3"));
+    assert!(block.contains("Turn 8:\nUser: Question 10\nAssistant: Answer 10"));
+  }
+
+  #[tokio::test]
+  async fn multi_turn_retrieval_hint_recovers_coreference_follow_up_chunks() {
+    let notebook_id = Uuid::new_v4();
+    let src_doc = Uuid::new_v4();
+
+    let mut ready = Vec::new();
+    for ord in 0..20 {
+      ready.push(SourceChunk {
+        chunk_id: format!("{src_doc}:{ord}"),
+        source_id: src_doc,
+        notebook_id,
+        tenant_id: "t1".to_string(),
+        ordinal: ord,
+        content: format!(
+          "Chapter {ord} oceanic tidal dynamics: lunar gravitational pull governs semidiurnal amplitude. {}",
+          "Coastal tide gauge measurements and spring-neap cycles. ".repeat(4)
+        ),
+        metadata: json!({"start_line": 1, "end_line": 8}),
+      });
+    }
+    for ord in 20..23 {
+      ready.push(SourceChunk {
+        chunk_id: format!("{src_doc}:{ord}"),
+        source_id: src_doc,
+        notebook_id,
+        tenant_id: "t1".to_string(),
+        ordinal: ord,
+        content: format!(
+          "Appendix {ord} PostgreSQL concurrency: pg_advisory_xact_lock serialises tenant run admission. {}",
+          "Transaction-level advisory lock semantics under multi-tenant connection pooling. ".repeat(3)
+        ),
+        metadata: json!({"start_line": 1, "end_line": 4}),
+      });
+    }
+
+    // Reverse verification: a pronoun follow-up ("What exact primitive does it invoke?")
+    // WITHOUT history has zero lexical overlap with the late Appendix chunks (`ord 20..23`),
+    // so sequential budget fill starves all 3 PostgreSQL chunks (`0` recalled).
+    let follow_up = "What exact primitive does it invoke?";
+    let without_history = select_chunks_for_generate(ready.clone(), Some(follow_up), 2_000).await;
+    let pg_without_history = without_history
+      .iter()
+      .filter(|c| c.content.contains("pg_advisory_xact_lock"))
+      .count();
+    assert_eq!(
+      pg_without_history, 0,
+      "reverse check: pronoun-only query without history must miss late appendix chunks"
+    );
+
+    // WITH prior conversation turn naming PostgreSQL concurrency, BM25 recalls all 3 appendix chunks.
+    let history = vec![NotebookConversationTurn {
+      question: "How does PostgreSQL concurrency serialise tenant admission?".to_string(),
+      answer: "It relies on a transaction-scoped lock in PostgreSQL.".to_string(),
+    }];
+    let hint = build_ask_retrieval_hint(follow_up, &history);
+    let with_history = select_chunks_for_generate(ready, Some(&hint), 2_000).await;
+    let pg_with_history = with_history
+      .iter()
+      .filter(|c| c.content.contains("pg_advisory_xact_lock"))
+      .count();
+    assert_eq!(
+      pg_with_history, 3,
+      "multi-turn retrieval hint must recall all 3 PostgreSQL appendix chunks on pronoun follow-up"
     );
   }
 }

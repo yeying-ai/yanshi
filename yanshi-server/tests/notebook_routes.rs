@@ -122,6 +122,36 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(code, StatusCode::OK, "{notebook}");
   let id = notebook["id"].as_str().expect("id").to_string();
 
+  // PATCH /v1/notebooks/{id} validates title, enforces tenant ownership, and persists rename.
+  let (code, _) = call(
+    &state,
+    "PATCH",
+    &format!("/v1/notebooks/{id}"),
+    &tenant,
+    Some(json!({"title": "   "})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST, "blank title rejected");
+  let (code, _) = call(
+    &state,
+    "PATCH",
+    &format!("/v1/notebooks/{id}"),
+    &other,
+    Some(json!({"title": "Intruder"})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant rename 404");
+  let (code, renamed) = call(
+    &state,
+    "PATCH",
+    &format!("/v1/notebooks/{id}"),
+    &tenant,
+    Some(json!({"title": "Oceanic Tides & Estuaries"})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{renamed}");
+  assert_eq!(renamed["title"], "Oceanic Tides & Estuaries");
+
   // Text, an HTML file, and a URL the SSRF filter must refuse.
   let text = "The tides are caused by the gravitational pull of the moon.\n\nSpring tides happen when the sun and moon align.";
   let (code, _) = call(
@@ -410,15 +440,24 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     .as_str()
     .expect("docx chunk_id")
     .to_string();
-  let mock_ask_reply = json!([json!({
-    "answer": "Severn Bore reaches 15.0 m while amphidromic nodes exhibit zero amplitude.",
-    "citations": [
-      { "chunk_id": csv_chunk_id, "quote": "SevernBore | macrotidal_range_m: 15.0" },
-      { "chunk_id": docx_chunk_id, "quote": "zero-amplitude rotary tidal systems" },
-      { "chunk_id": "nonexistent:999", "quote": "Hallucinated evidence" }
-    ]
-  })
-  .to_string()]);
+  let mock_ask_reply = json!([
+    json!({
+      "answer": "Severn Bore reaches 15.0 m while amphidromic nodes exhibit zero amplitude.",
+      "citations": [
+        { "chunk_id": csv_chunk_id, "quote": "SevernBore | macrotidal_range_m: 15.0" },
+        { "chunk_id": docx_chunk_id, "quote": "zero-amplitude rotary tidal systems" },
+        { "chunk_id": "nonexistent:999", "quote": "Hallucinated evidence" }
+      ]
+    })
+    .to_string(),
+    json!({
+      "answer": "Those rotary systems have zero amplitude at their amphidromic anchor nodes.",
+      "citations": [
+        { "chunk_id": docx_chunk_id, "quote": "Amphidromic nodes anchor zero-amplitude rotary tidal systems." }
+      ]
+    })
+    .to_string()
+  ]);
   // SAFETY: single test function in this integration test binary.
   unsafe {
     std::env::set_var("YANSHI_MOCK_RESPONSES", mock_ask_reply.to_string());
@@ -455,6 +494,28 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   );
   assert_eq!(ask_cites[0]["chunk_id"], csv_chunk_id);
   assert_eq!(ask_cites[0]["source_id"], csv_src["id"]);
+
+  // Multi-turn follow-up `/ask` accepts bounded `history` and verifies citations.
+  let (code, followup_res) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/ask"),
+    &tenant,
+    Some(json!({
+      "question": "Where are those zero-amplitude systems anchored?",
+      "history": [
+        {
+          "question": "Tell me about amphidromic systems.",
+          "answer": "They are rotary tidal systems."
+        }
+      ],
+      "model": "mock-ask"
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{followup_res}");
+  assert_eq!(followup_res["citations"][0]["chunk_id"], docx_chunk_id);
+  assert_eq!(followup_res["citations"][0]["source_id"], docx_src["id"]);
 
   let (code, _) = call(
     &state,

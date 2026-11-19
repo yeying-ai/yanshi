@@ -212,7 +212,7 @@ fn compose_skill_prompt(
 /// route conflicts with no existing skill name. If the catalog has no
 /// entry for `name`, return 404. Otherwise persist a queued `runs` row
 /// with `workflow = "@skill:<name>"` (+ optional `\n---\n<input>`) via
-/// [`crate::runs::admit_and_dispatch`] so skill runs share the same
+/// `runs::admit_and_dispatch` so skill runs share the same
 /// per-tenant concurrency / submission-rate admission control, `run_dir`
 /// retention tracking, and `question_registry` as `/v1/runs`.
 pub async fn run_skill(

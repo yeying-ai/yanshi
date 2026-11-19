@@ -300,4 +300,54 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   )
   .await;
   assert_eq!(code, StatusCode::NOT_FOUND);
+
+  // DELETE /v1/notebooks/{id}/artifacts/{artifact_id} enforces tenant scope and detaches the artifact.
+  let md_artifact_id = md["id"].as_str().expect("md artifact id").to_string();
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{notebook}/artifacts/{md_artifact_id}"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant detach must 404");
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{notebook}/artifacts/{}", Uuid::new_v4()),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::NOT_FOUND,
+    "unknown artifact detach must 404"
+  );
+  let (code, _) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{notebook}/artifacts/{md_artifact_id}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::NO_CONTENT);
+  let (_, remaining_body) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{notebook}/artifacts"),
+    &tenant,
+    None,
+  )
+  .await;
+  let remaining = json_of(&remaining_body)["artifacts"]
+    .as_array()
+    .cloned()
+    .expect("remaining artifacts");
+  assert!(
+    remaining.iter().all(|a| a["id"] != md_artifact_id),
+    "detached artifact must no longer appear in notebook artifacts: {remaining:?}"
+  );
 }

@@ -684,7 +684,9 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route(
       "/v1/notebooks/:id",
-      get(notebooks::get_notebook).delete(notebooks::delete_notebook),
+      get(notebooks::get_notebook)
+        .patch(notebooks::update_notebook)
+        .delete(notebooks::delete_notebook),
     )
     .route(
       "/v1/notebooks/:id/sources",
@@ -704,6 +706,10 @@ pub fn create_router(state: AppState) -> Router {
     .route(
       "/v1/notebooks/:id/artifacts",
       get(notebooks::list_notebook_artifacts),
+    )
+    .route(
+      "/v1/notebooks/:id/artifacts/:artifact_id",
+      axum::routing::delete(notebooks::delete_notebook_artifact),
     )
     // Y1.3: what a run produced, and the bytes themselves.
     .route("/v1/runs/:id/artifacts", get(artifacts::list_run_artifacts))
@@ -831,10 +837,15 @@ fn cors_layer(defaults: &SecurityProfileDefaults) -> CorsLayer {
           Method::GET,
           Method::POST,
           Method::PUT,
+          Method::PATCH,
           Method::DELETE,
           Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+          header::AUTHORIZATION,
+          header::CONTENT_TYPE,
+          tenant::TENANT_HEADER,
+        ])
         .expose_headers(Any)
     }
   }
@@ -1017,5 +1028,69 @@ mod worker_control_plane_tests {
 
     let detached = attached.with_worker_control_plane(None);
     assert!(detached.worker_control_plane.is_none());
+  }
+}
+
+#[cfg(test)]
+mod cors_explicit_origins_tests {
+  use super::*;
+  use axum::body::Body;
+  use axum::http::{Request, StatusCode};
+  use tower::ServiceExt;
+
+  #[tokio::test]
+  async fn explicit_origins_cors_allows_patch_and_tenant_header_preflight() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+      .connect_lazy("postgres://postgres:postgres@localhost:5432/yanshi_test")
+      .expect("lazy pg");
+    let mut defaults = SecurityProfile::Production.defaults();
+    defaults.cors.mode = CorsMode::ExplicitOrigins;
+    defaults.cors.allowed_origins = vec!["https://studio.example.com".to_string()];
+    let state = AppState::new(yanshi_db::Database {
+      pool,
+      read_pool: None,
+    })
+    .with_security_defaults(defaults);
+
+    let req = Request::builder()
+      .method(Method::OPTIONS)
+      .uri("/v1/notebooks/00000000-0000-0000-0000-000000000001")
+      .header(header::ORIGIN, "https://studio.example.com")
+      .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+      .header(
+        header::ACCESS_CONTROL_REQUEST_HEADERS,
+        "authorization, content-type, x-yanshi-tenant",
+      )
+      .body(Body::empty())
+      .expect("preflight request");
+
+    let resp = create_router(state).oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let allow_origin = resp
+      .headers()
+      .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or_default();
+    assert_eq!(allow_origin, "https://studio.example.com");
+    let allow_methods = resp
+      .headers()
+      .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or_default()
+      .to_ascii_uppercase();
+    assert!(
+      allow_methods.contains("PATCH") && allow_methods.contains("DELETE"),
+      "expected PATCH and DELETE in allow_methods: {allow_methods}"
+    );
+    let allow_headers = resp
+      .headers()
+      .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+      .and_then(|v| v.to_str().ok())
+      .unwrap_or_default()
+      .to_ascii_lowercase();
+    assert!(
+      allow_headers.contains("x-yanshi-tenant"),
+      "expected x-yanshi-tenant in allow_headers: {allow_headers}"
+    );
   }
 }

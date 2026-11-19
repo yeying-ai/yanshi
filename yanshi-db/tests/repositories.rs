@@ -1175,6 +1175,23 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
     repos.notebooks.get(&other, notebook.id).await.expect("get"),
     None
   );
+  assert!(
+    repos
+      .notebooks
+      .rename(&other, notebook.id, "Intruder Title")
+      .await
+      .expect("cross-tenant rename")
+      .is_none()
+  );
+  let renamed = repos
+    .notebooks
+    .rename(&tenant, notebook.id, "Spring & Neap Tides")
+    .await
+    .expect("owner rename")
+    .expect("renamed notebook");
+  assert_eq!(renamed.title, "Spring & Neap Tides");
+  assert!(renamed.updated_at >= notebook.updated_at);
+  let notebook = renamed;
   let second = repos
     .notebooks
     .create(&tenant, "Moons")
@@ -1368,6 +1385,42 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
       .await
       .expect("list")
       .is_empty()
+  );
+  assert!(
+    !repos
+      .notebooks
+      .detach_artifact(&other, notebook.id, artifact.id)
+      .await
+      .expect("cross-tenant detach")
+  );
+  assert!(
+    !repos
+      .notebooks
+      .detach_artifact(&tenant, Uuid::new_v4(), artifact.id)
+      .await
+      .expect("wrong-notebook detach")
+  );
+  assert!(
+    repos
+      .notebooks
+      .detach_artifact(&tenant, notebook.id, artifact.id)
+      .await
+      .expect("owner detach")
+  );
+  assert!(
+    repos
+      .notebooks
+      .list_artifacts(&tenant, notebook.id)
+      .await
+      .expect("list after detach")
+      .is_empty()
+  );
+  assert!(
+    repos
+      .notebooks
+      .attach_artifact(&tenant, notebook.id, artifact.id, "report")
+      .await
+      .expect("re-attach before cascade test")
   );
 
   // Source-level delete is scoped to (tenant, notebook) and cascades chunks.
