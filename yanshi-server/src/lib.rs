@@ -702,12 +702,21 @@ pub fn create_router(state: AppState) -> Router {
       axum::routing::delete(notebooks::delete_source),
     )
     .route(
+      "/v1/notebooks/:id/sources/:source_id/chunks",
+      get(notebooks::list_source_chunks),
+    )
+    .route(
       "/v1/notebooks/:id/chunks/:chunk_id",
       get(notebooks::get_notebook_chunk),
     )
     .route("/v1/notebooks/:id/search", get(notebooks::search_notebook))
     .route("/v1/notebooks/:id/ask", post(notebooks::ask_notebook))
+    .route("/v1/notebooks/:id/plan", post(notebooks::plan_notebook))
     .route("/v1/notebooks/:id/generate", post(notebooks::generate))
+    .route(
+      "/v1/notebooks/:id/generate-batch",
+      post(notebooks::generate_batch),
+    )
     .route(
       "/v1/notebooks/:id/artifacts",
       get(notebooks::list_notebook_artifacts),

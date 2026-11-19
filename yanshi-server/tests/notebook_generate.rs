@@ -160,14 +160,60 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     "negative cost_limit_usd must 400"
   );
 
-  // The model's replies (outline, two sections) cite the real chunk id.
+  // The model's replies (outline, two sections, then AE1 studio plan + concurrent flashcards/quiz batch) cite the real chunk id.
   let section = |text: &str, quote: &str| {
     json!({"markdown": text, "quotes": [{"chunk_id": chunk, "quote": quote}]}).to_string()
   };
+  let plan_reply = json!({
+    "rationale": "Build active-recall flashcards and a self-check quiz on lunar tides.",
+    "items": [
+      {
+        "kind": "flashcards",
+        "reason": "Memorize core tidal mechanics",
+        "parameters": [
+          {"key": "count", "value": "5"},
+          {"key": "focus", "value": "lunar pull and daily high tides"},
+          {"key": "chunks", "value": "must_be_stripped"}
+        ]
+      },
+      {
+        "kind": "hallucinated_kind",
+        "reason": "Must be dropped by gateway sanitizer",
+        "parameters": []
+      },
+      {
+        "kind": "quiz",
+        "reason": "Check comprehension",
+        "parameters": [
+          {"key": "count", "value": "3"},
+          {"key": "focus", "value": "twice-daily tide frequency"}
+        ]
+      }
+    ]
+  })
+  .to_string();
+  let dual_study_reply = json!({
+    "title": "Lunar Tides Study Pack",
+    "items": [
+      {
+        "front": "What drives ocean tides?",
+        "back": "The gravitational pull of the moon.",
+        "question": "How often does high tide arrive?",
+        "options": ["Once weekly", "Twice daily", "Once yearly"],
+        "answer": 1,
+        "explanation": "High tide comes twice daily.",
+        "chunk_id": chunk
+      }
+    ]
+  })
+  .to_string();
   let replies = json!([
     json!({"title": "Tides", "sections": [{"heading": "Cause", "brief": "why"}, {"heading": "Rhythm", "brief": "how often"}]}).to_string(),
     section("The moon pulls the sea.", "Tides are caused by the gravitational pull of the moon."),
     section("Two highs a day.", "High tide comes twice daily."),
+    plan_reply,
+    dual_study_reply.clone(),
+    dual_study_reply,
   ]);
   // SAFETY: still before the first model call in this process.
   unsafe { std::env::set_var("YANSHI_MOCK_RESPONSES", replies.to_string()) };
@@ -441,5 +487,191 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   assert!(
     remaining.iter().all(|a| a["id"] != md_artifact_id),
     "detached artifact must no longer appear in notebook artifacts: {remaining:?}"
+  );
+
+  // AE1: `POST /v1/notebooks/{id}/plan` produces a sanitized Studio plan whose items feed
+  // directly into `POST /v1/notebooks/{id}/generate-batch` with all-or-nothing preflight
+  // and even `cost_limit_usd` splitting across dispatched runs.
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/plan"),
+    &other,
+    Some(json!({"goal": "Study pack", "model": "mock-model"})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant plan must 404");
+
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/plan"),
+    &tenant,
+    Some(json!({"goal": "   ", "model": "mock-model"})),
+  )
+  .await;
+  assert_eq!(code, StatusCode::BAD_REQUEST, "empty goal must 400");
+
+  // All-or-nothing preflight on `generate-batch`: if item #2 is invalid, zero runs are created.
+  let runs_before = state
+    .repos
+    .runs
+    .list(&tenant, 100)
+    .await
+    .expect("list runs")
+    .len();
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate-batch"),
+    &tenant,
+    Some(json!({
+      "model": "mock-model",
+      "items": [
+        {"kind": "flashcards", "params": {"count": 5}},
+        {"kind": "flashcards", "params": {"bogus_param": 123}}
+      ]
+    })),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::BAD_REQUEST,
+    "invalid 2nd item must fail preflight"
+  );
+  let runs_after_bad = state
+    .repos
+    .runs
+    .list(&tenant, 100)
+    .await
+    .expect("list runs")
+    .len();
+  assert_eq!(
+    runs_before, runs_after_bad,
+    "preflight failure must not leave partial runs behind"
+  );
+
+  let (code, plan_bytes) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/plan"),
+    &tenant,
+    Some(json!({
+      "goal": "Prepare study flashcards and a quiz on lunar tides",
+      "model": "mock-model",
+      "source_ids": [source],
+      "max_items": 4
+    })),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::OK,
+    "plan failed: {}",
+    String::from_utf8_lossy(&plan_bytes)
+  );
+  let plan_json = json_of(&plan_bytes);
+  let planned_items = plan_json["items"].as_array().expect("planned items");
+  assert_eq!(
+    planned_items.len(),
+    2,
+    "hallucinated kind stripped: {plan_json}"
+  );
+  assert_eq!(planned_items[0]["kind"], "flashcards");
+  assert_eq!(planned_items[0]["params"]["count"], 5);
+  assert!(planned_items[0]["params"].get("chunks").is_none());
+  assert_eq!(planned_items[1]["kind"], "quiz");
+  assert_eq!(planned_items[1]["params"]["count"], 3);
+
+  let (code, batch_bytes) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{notebook}/generate-batch"),
+    &tenant,
+    Some(json!({
+      "model": "mock-model",
+      "cost_limit_usd": 4.0,
+      "source_ids": [source],
+      "items": planned_items
+    })),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::OK,
+    "generate-batch failed: {}",
+    String::from_utf8_lossy(&batch_bytes)
+  );
+  let batch_json = json_of(&batch_bytes);
+  assert_eq!(batch_json["per_run_cost_limit_usd"], 2.0);
+  let batch_runs = batch_json["runs"].as_array().expect("batch runs");
+  assert_eq!(batch_runs.len(), 2);
+
+  for dispatched in batch_runs {
+    let rid: Uuid = dispatched["run_id"]
+      .as_str()
+      .expect("batch run_id")
+      .parse()
+      .expect("uuid");
+    let mut rstatus = String::new();
+    for _ in 0..400 {
+      rstatus = state
+        .repos
+        .runs
+        .get(rid)
+        .await
+        .expect("get batch run")
+        .expect("row")
+        .status;
+      if rstatus == "succeeded" || rstatus == "failed" {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let rrow = state
+      .repos
+      .runs
+      .get(rid)
+      .await
+      .expect("get batch run")
+      .expect("row");
+    assert_eq!(rstatus, "succeeded", "batch run error: {:?}", rrow.error);
+    let batch_ckpt_mgr = yanshi_core::checkpoint::CheckpointManager::new(
+      yanshi_core::checkpoint::CheckpointConfig::default().with_checkpoint_dir(
+        std::path::Path::new(rrow.run_dir.as_deref().expect("run_dir")).join("checkpoint"),
+      ),
+    )
+    .expect("checkpoint manager");
+    let batch_ckpt = batch_ckpt_mgr
+      .load_latest_checkpoint(&rid.to_string())
+      .await
+      .expect("load checkpoint")
+      .expect("latest checkpoint");
+    assert_eq!(
+      batch_ckpt.recorded_execution_config().cost_limit_usd,
+      Some(2.0),
+      "batch total 4.0 across 2 items must set 2.0 per-run cost_limit_usd"
+    );
+  }
+
+  let (_, final_art_bytes) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{notebook}/artifacts"),
+    &tenant,
+    None,
+  )
+  .await;
+  let final_arts = json_of(&final_art_bytes)["artifacts"]
+    .as_array()
+    .cloned()
+    .expect("final artifacts");
+  assert!(
+    final_arts.iter().any(|a| a["kind"] == "flashcards"),
+    "batch must attach flashcards deliverable: {final_arts:?}"
+  );
+  assert!(
+    final_arts.iter().any(|a| a["kind"] == "quiz"),
+    "batch must attach quiz deliverable: {final_arts:?}"
   );
 }

@@ -481,6 +481,13 @@ pub trait SourceChunkRepo: Send + Sync {
     tenant_id: &str,
     notebook_id: Uuid,
   ) -> Result<Vec<SourceChunk>, DbError>;
+  /// Chunks of a single owned `source`, ordered by `ordinal ASC`.
+  async fn list_for_source(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<Vec<SourceChunk>, DbError>;
   /// One chunk, if it is this tenant's (citation lookup, Y5.3).
   async fn get(&self, tenant_id: &str, chunk_id: &str) -> Result<Option<SourceChunk>, DbError>;
 }
@@ -543,6 +550,24 @@ impl SourceChunkRepo for PgSourceChunkRepo {
            ORDER BY s.created_at ASC, c.ordinal ASC"#,
       )
       .bind(notebook_id)
+      .bind(tenant_id)
+      .fetch_all(&self.read_pool)
+      .await?,
+    )
+  }
+
+  async fn list_for_source(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<Vec<SourceChunk>, DbError> {
+    Ok(
+      sqlx::query_as::<_, SourceChunk>(&format!(
+        "SELECT {CHUNK_COLUMNS} FROM source_chunks WHERE notebook_id = $1 AND source_id = $2 AND tenant_id = $3 ORDER BY ordinal ASC"
+      ))
+      .bind(notebook_id)
+      .bind(source_id)
       .bind(tenant_id)
       .fetch_all(&self.read_pool)
       .await?,

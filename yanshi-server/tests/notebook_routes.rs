@@ -690,6 +690,70 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
 
   // Deleting a source invalidates the in-memory BM25 cache immediately and cascades chunks.
   let pdf_source_id = pdf_src["id"].as_str().expect("pdf source id").to_string();
+
+  // AE1: `GET /v1/notebooks/{id}/sources/{source_id}/chunks` lists ordered passages for an owned source
+  // and returns 404 across tenants or wrong notebook IDs.
+  let (code, source_chunks_doc) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/sources/{pdf_source_id}/chunks"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{source_chunks_doc}");
+  assert_eq!(source_chunks_doc["notebook_id"], id);
+  assert_eq!(source_chunks_doc["source"]["id"], pdf_source_id);
+  let source_chunks_arr = source_chunks_doc["chunks"]
+    .as_array()
+    .expect("source chunks array");
+  assert!(
+    !source_chunks_arr.is_empty(),
+    "ready PDF source must list non-empty ordered chunks: {source_chunks_doc}"
+  );
+  assert_eq!(source_chunks_arr[0]["ordinal"], 0);
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/sources/{pdf_source_id}/chunks"),
+    &other,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::NOT_FOUND,
+    "cross-tenant source chunks must 404"
+  );
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!(
+      "/v1/notebooks/{}/sources/{pdf_source_id}/chunks",
+      Uuid::new_v4()
+    ),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::NOT_FOUND,
+    "wrong-notebook source chunks must 404"
+  );
+  let (code, _) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/sources/{}/chunks", Uuid::new_v4()),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::NOT_FOUND,
+    "unknown source_id chunks must 404"
+  );
   let (code, _) = call(
     &state,
     "DELETE",

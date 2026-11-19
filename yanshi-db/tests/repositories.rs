@@ -1286,6 +1286,53 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
       .is_empty()
   );
 
+  // Per-source ordered chunk listing is tenant- and notebook-scoped.
+  use yanshi_db::SourceChunkRepo;
+  let stored_count = repos
+    .chunks
+    .replace_for_source(
+      &ready,
+      vec![
+        (
+          "First tide passage.".into(),
+          serde_json::json!({"ordinal": 0}),
+        ),
+        (
+          "Second tide passage.".into(),
+          serde_json::json!({"ordinal": 1}),
+        ),
+      ],
+    )
+    .await
+    .expect("replace chunks");
+  assert_eq!(stored_count, 2);
+  let source_chunks = repos
+    .chunks
+    .list_for_source(&tenant, notebook.id, ready.id)
+    .await
+    .expect("list_for_source");
+  assert_eq!(source_chunks.len(), 2);
+  assert_eq!(source_chunks[0].ordinal, 0);
+  assert_eq!(source_chunks[0].content, "First tide passage.");
+  assert_eq!(source_chunks[1].ordinal, 1);
+  assert_eq!(source_chunks[1].content, "Second tide passage.");
+  assert!(
+    repos
+      .chunks
+      .list_for_source(&other, notebook.id, ready.id)
+      .await
+      .expect("cross-tenant list_for_source")
+      .is_empty()
+  );
+  assert!(
+    repos
+      .chunks
+      .list_for_source(&tenant, Uuid::new_v4(), ready.id)
+      .await
+      .expect("wrong-notebook list_for_source")
+      .is_empty()
+  );
+
   // Artifact links: only between the same tenant's notebook and artifact.
   let run_id = Uuid::new_v4();
   repos
