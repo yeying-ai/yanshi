@@ -135,7 +135,8 @@ struct PersistedRunMeta {
   cost_limit_usd: Option<f64>,
 }
 
-pub(crate) type RunCompletionHook = Arc<dyn Fn(Uuid, &str, &[LocalArtifactSummary]) + Send + Sync>;
+pub(crate) type RunCompletionHook =
+  Arc<dyn Fn(Uuid, &str, &[LocalArtifactSummary], Option<&serde_json::Value>) + Send + Sync>;
 
 struct RunEntry {
   record: LocalRunRecord,
@@ -1062,12 +1063,21 @@ async fn execute_local_flow(
       }
     }
   };
+  let extracted_deliverable = outcome
+    .as_ref()
+    .ok()
+    .and_then(yanshi_config::content::extract_deliverable_from_state);
   let completion_hook = state
     .lock_runs()
     .get(&run_id)
     .and_then(|entry| entry.on_complete.clone());
   if let Some(hook) = completion_hook {
-    hook(run_id, preview_status, &discovered_artifacts);
+    hook(
+      run_id,
+      preview_status,
+      &discovered_artifacts,
+      extracted_deliverable.as_ref(),
+    );
   }
 
   let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
@@ -1117,15 +1127,10 @@ async fn execute_local_flow(
 fn first_pool_error(
   pool: &HashMap<String, yanshi_core::async_node::AsyncNodeResult>,
 ) -> Option<String> {
-  for (node_id, res) in pool {
-    if let Err(err) = res {
-      if matches!(err, yanshi_core::error::YanshiError::NodeSkipped) {
-        continue;
-      }
-      return Some(format!("node '{node_id}' failed: {err}"));
-    }
-  }
-  None
+  use yanshi_core::FlowStateExt as _;
+  pool
+    .first_node_failure()
+    .map(|(node_id, err)| format!("node '{node_id}' failed: {err}"))
 }
 
 fn push_synthetic_terminal_event(
@@ -2550,7 +2555,11 @@ nodes:
       .await
       .expect("inspect flagship json");
     assert!(inspect_res.valid);
-    assert_eq!(inspect_res.nodes.len(), 19);
+    assert_eq!(inspect_res.nodes.len(), 20);
+    assert!(
+      inspect_res.nodes.iter().any(|n| n.id == "deliverable"),
+      "flagship tech_slides_video.yml must expose deliverable node"
+    );
     assert!(
       inspect_res
         .nodes
@@ -3382,5 +3391,36 @@ nodes:
     );
     assert!(table.models.contains_key("gemini-3.1-flash-image"));
     assert!(table.models.contains_key("qwen3-tts-flash"));
+  }
+
+  #[test]
+  fn first_pool_error_prefers_upstream_root_cause_over_dependency_cascade() {
+    let mut pool = HashMap::new();
+    for idx in 0..32 {
+      let node_id = format!("downstream_{idx}");
+      pool.insert(
+        node_id.clone(),
+        Err(yanshi_core::error::YanshiError::DependencyNotMet {
+          node_id,
+          dependency_id: "root_llm".to_string(),
+        }),
+      );
+    }
+    pool.insert(
+      "skipped_branch".to_string(),
+      Err(yanshi_core::error::YanshiError::NodeSkipped),
+    );
+    pool.insert(
+      "root_llm".to_string(),
+      Err(yanshi_core::error::YanshiError::NodeExecutionFailed {
+        message: "provider quota exhausted".to_string(),
+      }),
+    );
+
+    let msg = first_pool_error(&pool).expect("must extract error");
+    assert!(
+      msg.contains("root_llm") && msg.contains("provider quota exhausted"),
+      "must report upstream root cause rather than random DependencyNotMet cascade: {msg}"
+    );
   }
 }

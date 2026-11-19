@@ -1519,29 +1519,7 @@ fn first_state_error(state: &HashMap<String, AsyncNodeResult>) -> Option<String>
 /// generator's `deliverable` node (`outputs["deliverable"]` or wrapped
 /// `outputs["output"]["deliverable"]`).
 fn extract_run_deliverable(state: &HashMap<String, AsyncNodeResult>) -> Option<serde_json::Value> {
-  let outputs = state.get("deliverable")?.as_ref().ok()?;
-  let candidate = match outputs
-    .get("deliverable")
-    .or_else(|| outputs.get("output"))
-    .or_else(|| outputs.get("deliverable_output"))
-  {
-    Some(yanshi_core::value::FlowValue::Json(v)) => v.clone(),
-    _ => return None,
-  };
-  match candidate {
-    serde_json::Value::Object(mut map) => {
-      if let Some(inner) = map.remove("deliverable")
-        && inner.is_object()
-      {
-        Some(inner)
-      } else if map.contains_key("kind") && map.contains_key("title") {
-        Some(serde_json::Value::Object(map))
-      } else {
-        None
-      }
-    }
-    _ => None,
-  }
+  yanshi_config::content::extract_deliverable_from_state(state)
 }
 
 async fn stub_execute(ctx: &RunContext) -> Result<(), yanshi_db::DbError> {

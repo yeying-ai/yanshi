@@ -6,8 +6,11 @@
 //! template that drifts from the contract fails loudly instead of handing
 //! a client something it cannot read.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use yanshi_core::{async_node::AsyncNodeResult, value::FlowValue};
 
 /// What a generator produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +106,35 @@ impl Deliverable {
       return Err(format!("citation {empty} has an empty quote"));
     }
     Ok(deliverable)
+  }
+}
+
+/// Extract the structured `Deliverable` JSON object produced by a Studio
+/// generator's `deliverable` node (`outputs["deliverable"]` or wrapped
+/// `outputs["output"]["deliverable"]`) from a completed `Flow` state pool.
+pub fn extract_deliverable_from_state(state: &HashMap<String, AsyncNodeResult>) -> Option<Value> {
+  let outputs = state.get("deliverable")?.as_ref().ok()?;
+  let candidate = match outputs
+    .get("deliverable")
+    .or_else(|| outputs.get("output"))
+    .or_else(|| outputs.get("deliverable_output"))
+  {
+    Some(FlowValue::Json(v)) => v.clone(),
+    _ => return None,
+  };
+  match candidate {
+    Value::Object(mut map) => {
+      if let Some(inner) = map.remove("deliverable")
+        && inner.is_object()
+      {
+        Some(inner)
+      } else if map.contains_key("kind") && map.contains_key("title") {
+        Some(Value::Object(map))
+      } else {
+        None
+      }
+    }
+    _ => None,
   }
 }
 

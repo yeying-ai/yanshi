@@ -32,6 +32,7 @@ async-trait = "0.1"
 axum = "0.7"
 base64 = "0.21"
 chrono = { version = "0.4", features = ["serde"] }
+csv = "1.3"
 dirs = "5.0"
 dotenvy = "0.15"
 futures = "0.3"
@@ -42,6 +43,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7.11", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
+url = "2.5"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 yanshi-agent-spi = { path = "../../yanshi-agent-spi" }
@@ -51,7 +53,7 @@ yanshi-core = { path = "../../yanshi-core" }
 yanshi-harness = { path = "../../yanshi-harness" }
 yanshi-llm = { path = "../../yanshi-llm" }
 yanshi-memory = { path = "../../yanshi-memory" }
-yanshi-rag = { path = "../../yanshi-rag", default-features = false, features = ["html"] }
+yanshi-rag = { path = "../../yanshi-rag", default-features = false, features = ["html", "pdf"] }
 yanshi-skills = { path = "../../yanshi-skills" }
 yanshi-tools = { path = "../../yanshi-tools" }
 
