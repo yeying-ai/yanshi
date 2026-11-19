@@ -1264,6 +1264,8 @@ pub struct Repositories {
   pub sources: crate::notebooks::PgSourceRepo,
   /// Y5.2: chunks of ingested sources.
   pub chunks: crate::notebooks::PgSourceChunkRepo,
+  /// AF2: persisted grounded `/ask` Q&A turns.
+  pub notebook_messages: crate::notebooks::PgNotebookMessageRepo,
 }
 
 impl Repositories {
@@ -1325,6 +1327,10 @@ impl Repositories {
         read_pool: read_pool.clone(),
       },
       chunks: crate::notebooks::PgSourceChunkRepo {
+        pool: write_pool.clone(),
+        read_pool: read_pool.clone(),
+      },
+      notebook_messages: crate::notebooks::PgNotebookMessageRepo {
         pool: write_pool.clone(),
         read_pool,
       },

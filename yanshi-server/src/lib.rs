@@ -699,7 +699,13 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route(
       "/v1/notebooks/:id/sources/:source_id",
-      axum::routing::delete(notebooks::delete_source),
+      axum::routing::patch(notebooks::update_source)
+        .delete(notebooks::delete_source)
+        .post(notebooks::post_source_action),
+    )
+    .route(
+      "/v1/notebooks/:id/sources/:source_id/retry",
+      post(notebooks::retry_source),
     )
     .route(
       "/v1/notebooks/:id/sources/:source_id/chunks",
@@ -711,6 +717,10 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route("/v1/notebooks/:id/search", get(notebooks::search_notebook))
     .route("/v1/notebooks/:id/ask", post(notebooks::ask_notebook))
+    .route(
+      "/v1/notebooks/:id/messages",
+      get(notebooks::list_notebook_messages).delete(notebooks::clear_notebook_messages),
+    )
     .route("/v1/notebooks/:id/plan", post(notebooks::plan_notebook))
     .route("/v1/notebooks/:id/generate", post(notebooks::generate))
     .route(

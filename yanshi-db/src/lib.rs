@@ -15,8 +15,9 @@ pub use models::{
   NewUserPreference, Run, RunStatus, SkillInstall, Step, UserPreference,
 };
 pub use notebooks::{
-  NewSource, Notebook, NotebookArtifact, NotebookRepo, PgNotebookRepo, PgSourceChunkRepo,
-  PgSourceRepo, Source, SourceChunk, SourceChunkRepo, SourceKind, SourceRepo, SourceStatus,
+  NewNotebookMessage, NewSource, Notebook, NotebookArtifact, NotebookMessage, NotebookMessageRepo,
+  NotebookRepo, PgNotebookMessageRepo, PgNotebookRepo, PgSourceChunkRepo, PgSourceRepo, Source,
+  SourceChunk, SourceChunkRepo, SourceKind, SourceRepo, SourceStatus,
 };
 pub use notify::{Notice, NotifyListener, notify};
 pub use repo::{

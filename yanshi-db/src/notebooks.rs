@@ -176,6 +176,22 @@ pub trait SourceRepo: Send + Sync {
     error: Option<&str>,
     sha256: Option<&str>,
   ) -> Result<(), DbError>;
+  /// Rename an owned source within `(tenant_id, notebook_id)` and bump `updated_at`.
+  async fn rename(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+    title: &str,
+  ) -> Result<Option<Source>, DbError>;
+  /// Atomically transition a `failed` source back to `pending` (clearing `error`)
+  /// so a single `:retry` caller wins when retrying URL ingestion.
+  async fn reset_for_retry(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<Option<Source>, DbError>;
   /// Delete a single source (and its `source_chunks` via `ON DELETE CASCADE`)
   /// belonging to `(tenant_id, notebook_id)`. Returns `false` when missing or
   /// owned by another tenant / notebook.
@@ -435,6 +451,50 @@ impl SourceRepo for PgSourceRepo {
     Ok(())
   }
 
+  async fn rename(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+    title: &str,
+  ) -> Result<Option<Source>, DbError> {
+    Ok(
+      sqlx::query_as::<_, Source>(&format!(
+        r#"UPDATE sources
+           SET title = $4, updated_at = NOW()
+           WHERE id = $1 AND notebook_id = $2 AND tenant_id = $3
+           RETURNING {SOURCE_COLUMNS}"#
+      ))
+      .bind(source_id)
+      .bind(notebook_id)
+      .bind(tenant_id)
+      .bind(title)
+      .fetch_optional(&self.pool)
+      .await?,
+    )
+  }
+
+  async fn reset_for_retry(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+  ) -> Result<Option<Source>, DbError> {
+    Ok(
+      sqlx::query_as::<_, Source>(&format!(
+        r#"UPDATE sources
+           SET status = 'pending', error = NULL, updated_at = NOW()
+           WHERE id = $1 AND notebook_id = $2 AND tenant_id = $3 AND status = 'failed'
+           RETURNING {SOURCE_COLUMNS}"#
+      ))
+      .bind(source_id)
+      .bind(notebook_id)
+      .bind(tenant_id)
+      .fetch_optional(&self.pool)
+      .await?,
+    )
+  }
+
   async fn delete(
     &self,
     tenant_id: &str,
@@ -584,5 +644,114 @@ impl SourceChunkRepo for PgSourceChunkRepo {
       .fetch_optional(&self.read_pool)
       .await?,
     )
+  }
+}
+
+/// Persisted grounded `/ask` Q&A turn belonging to a notebook (`0016_notebook_messages.sql`).
+#[derive(Debug, Clone, PartialEq, FromRow, Serialize, Deserialize)]
+pub struct NotebookMessage {
+  pub id: Uuid,
+  pub notebook_id: Uuid,
+  pub tenant_id: String,
+  pub question: String,
+  pub answer: String,
+  pub model: String,
+  pub citations: serde_json::Value,
+  pub used_chunk_count: i32,
+  pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewNotebookMessage {
+  pub notebook_id: Uuid,
+  pub tenant_id: String,
+  pub question: String,
+  pub answer: String,
+  pub model: String,
+  pub citations: serde_json::Value,
+  pub used_chunk_count: i32,
+}
+
+#[async_trait]
+pub trait NotebookMessageRepo: Send + Sync {
+  /// Append one Q&A turn to an owned notebook. Returns `None` when the
+  /// notebook does not exist or belongs to another tenant.
+  async fn append(&self, message: NewNotebookMessage) -> Result<Option<NotebookMessage>, DbError>;
+  /// List Q&A turns in chronological order (`created_at ASC, id ASC`).
+  async fn list_for_notebook(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    limit: i64,
+  ) -> Result<Vec<NotebookMessage>, DbError>;
+  /// Clear all Q&A turns for an owned notebook, returning deleted row count.
+  async fn clear_for_notebook(&self, tenant_id: &str, notebook_id: Uuid) -> Result<u64, DbError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct PgNotebookMessageRepo {
+  pub(crate) pool: PgPool,
+  pub(crate) read_pool: PgPool,
+}
+
+const MESSAGE_COLUMNS: &str =
+  "id, notebook_id, tenant_id, question, answer, model, citations, used_chunk_count, created_at";
+
+#[async_trait]
+impl NotebookMessageRepo for PgNotebookMessageRepo {
+  async fn append(&self, message: NewNotebookMessage) -> Result<Option<NotebookMessage>, DbError> {
+    Ok(
+      sqlx::query_as::<_, NotebookMessage>(&format!(
+        r#"INSERT INTO notebook_messages
+             (id, notebook_id, tenant_id, question, answer, model, citations, used_chunk_count)
+           SELECT $1, n.id, n.tenant_id, $4, $5, $6, $7, $8
+           FROM notebooks n
+           WHERE n.id = $2 AND n.tenant_id = $3
+           RETURNING {MESSAGE_COLUMNS}"#
+      ))
+      .bind(Uuid::new_v4())
+      .bind(message.notebook_id)
+      .bind(&message.tenant_id)
+      .bind(&message.question)
+      .bind(&message.answer)
+      .bind(&message.model)
+      .bind(&message.citations)
+      .bind(message.used_chunk_count)
+      .fetch_optional(&self.pool)
+      .await?,
+    )
+  }
+
+  async fn list_for_notebook(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    limit: i64,
+  ) -> Result<Vec<NotebookMessage>, DbError> {
+    Ok(
+      sqlx::query_as::<_, NotebookMessage>(&format!(
+        r#"SELECT {MESSAGE_COLUMNS}
+           FROM notebook_messages
+           WHERE notebook_id = $1 AND tenant_id = $2
+           ORDER BY created_at ASC, id ASC
+           LIMIT $3"#
+      ))
+      .bind(notebook_id)
+      .bind(tenant_id)
+      .bind(limit)
+      .fetch_all(&self.read_pool)
+      .await?,
+    )
+  }
+
+  async fn clear_for_notebook(&self, tenant_id: &str, notebook_id: Uuid) -> Result<u64, DbError> {
+    let affected =
+      sqlx::query("DELETE FROM notebook_messages WHERE notebook_id = $1 AND tenant_id = $2")
+        .bind(notebook_id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+    Ok(affected)
   }
 }

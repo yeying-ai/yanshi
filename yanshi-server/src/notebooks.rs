@@ -9,11 +9,15 @@
 //! PATCH  /v1/notebooks/{id}                         {title}              → notebook
 //! DELETE /v1/notebooks/{id}                                              → 204 No Content
 //! POST   /v1/notebooks/{id}/sources                 {kind, ...}          → source (pending; ingests in the background)
+//! PATCH  /v1/notebooks/{id}/sources/{source_id}     {title?, text?}      → source (renames or re-chunks text note)
+//! POST   /v1/notebooks/{id}/sources/{source_id}:retry                    → source (re-ingests failed URL source)
 //! GET    /v1/notebooks/{id}/sources/{source_id}/chunks                   → {notebook_id, source, chunks}
 //! DELETE /v1/notebooks/{id}/sources/{source_id}                          → 204 No Content
 //! GET    /v1/notebooks/{id}/chunks/{chunk_id}                            → chunk
 //! GET    /v1/notebooks/{id}/search?q=&top_k=&source_ids=                 → {chunks}
 //! POST   /v1/notebooks/{id}/ask                     {question, ...}      → {answer, citations, ...}
+//! GET    /v1/notebooks/{id}/messages                                     → {notebook_id, messages}
+//! DELETE /v1/notebooks/{id}/messages                                     → {notebook_id, deleted}
 //! POST   /v1/notebooks/{id}/plan                    {goal, ...}          → {rationale, items, ...}
 //! POST   /v1/notebooks/{id}/generate                {kind, params, ...}  → {run_id, kind}
 //! POST   /v1/notebooks/{id}/generate-batch          {items, ...}         → {notebook_id, runs, ...}
@@ -54,8 +58,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use yanshi_db::{
-  NewSource, Notebook, NotebookArtifact, NotebookRepo, Source, SourceChunk, SourceChunkRepo,
-  SourceKind, SourceRepo, SourceStatus,
+  NewNotebookMessage, NewSource, Notebook, NotebookArtifact, NotebookMessage, NotebookMessageRepo,
+  NotebookRepo, Source, SourceChunk, SourceChunkRepo, SourceKind, SourceRepo, SourceStatus,
 };
 use yanshi_rag::{Bm25KnowledgeBackend, KnowledgeBackend};
 
@@ -199,6 +203,170 @@ pub async fn delete_notebook(
   }
   state.notebook_indexes.invalidate(id);
   Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSourceRequest {
+  #[serde(default)]
+  pub title: Option<String>,
+  #[serde(default)]
+  pub text: Option<String>,
+}
+
+pub async fn update_source(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path((notebook_id, source_id)): Path<(Uuid, Uuid)>,
+  crate::error::JsonReq(req): crate::error::JsonReq<UpdateSourceRequest>,
+) -> Result<Json<Source>, ApiError> {
+  own_notebook(&state, &tenant, notebook_id).await?;
+  if req.title.is_none() && req.text.is_none() {
+    return Err(ApiError::BadRequest(
+      "update requires at least one of `title` or `text`".into(),
+    ));
+  }
+  let mut source = state
+    .repos
+    .sources
+    .get(tenant.as_str(), source_id)
+    .await?
+    .filter(|s| s.notebook_id == notebook_id)
+    .ok_or_else(|| {
+      ApiError::NotFound(format!(
+        "source {source_id} in notebook {notebook_id} not found"
+      ))
+    })?;
+
+  if source.status == "pending" || source.status == "ingesting" {
+    return Err(ApiError::BadRequest(format!(
+      "source {source_id} is currently '{}'; wait for ingestion to finish before editing",
+      source.status
+    )));
+  }
+
+  if let Some(raw_text) = req.text {
+    if source.kind != "text" {
+      return Err(ApiError::BadRequest(format!(
+        "only `text` note sources support inline `text` updates (source is `{}`)",
+        source.kind
+      )));
+    }
+    if raw_text.trim().is_empty() {
+      return Err(ApiError::BadRequest("text must not be empty".into()));
+    }
+    if raw_text.len() > MAX_SOURCE_BYTES {
+      return Err(ApiError::PayloadTooLarge(format!(
+        "text exceeds {MAX_SOURCE_BYTES} bytes"
+      )));
+    }
+    let chunks = chunk(&raw_text).map_err(ApiError::BadRequest)?;
+    if chunks.is_empty() {
+      return Err(ApiError::BadRequest("text produced no chunks".into()));
+    }
+    let digest = format!("{:x}", Sha256::digest(raw_text.as_bytes()));
+    state
+      .repos
+      .chunks
+      .replace_for_source(&source, chunks)
+      .await?;
+    state
+      .repos
+      .sources
+      .update_status(source.id, SourceStatus::Ready, None, Some(&digest))
+      .await?;
+    state.notebook_indexes.invalidate(notebook_id);
+    if let Some(refreshed) = state.repos.sources.get(tenant.as_str(), source_id).await? {
+      source = refreshed;
+    }
+  }
+
+  if let Some(raw_title) = req.title {
+    let trimmed = raw_title.trim();
+    if trimmed.is_empty() {
+      return Err(ApiError::BadRequest("title must not be empty".into()));
+    }
+    source = state
+      .repos
+      .sources
+      .rename(tenant.as_str(), notebook_id, source_id, trimmed)
+      .await?
+      .ok_or_else(|| {
+        ApiError::NotFound(format!(
+          "source {source_id} in notebook {notebook_id} not found"
+        ))
+      })?;
+  }
+
+  Ok(Json(source))
+}
+
+pub async fn post_source_action(
+  state: State<AppState>,
+  tenant: Extension<TenantId>,
+  Path((notebook_id, raw_segment)): Path<(Uuid, String)>,
+) -> Result<Json<Source>, ApiError> {
+  let Some(raw_id) = raw_segment.strip_suffix(":retry") else {
+    return Err(ApiError::BadRequest(
+      "source action route must end with :retry".into(),
+    ));
+  };
+  let source_id = Uuid::parse_str(raw_id)
+    .map_err(|_| ApiError::BadRequest(format!("invalid source id '{raw_id}'")))?;
+  retry_source(state, tenant, Path((notebook_id, source_id))).await
+}
+
+pub async fn retry_source(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path((notebook_id, source_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Source>, ApiError> {
+  own_notebook(&state, &tenant, notebook_id).await?;
+  let existing = state
+    .repos
+    .sources
+    .get(tenant.as_str(), source_id)
+    .await?
+    .filter(|s| s.notebook_id == notebook_id)
+    .ok_or_else(|| {
+      ApiError::NotFound(format!(
+        "source {source_id} in notebook {notebook_id} not found"
+      ))
+    })?;
+  if existing.status != "failed" {
+    return Err(ApiError::BadRequest(format!(
+      "source {source_id} is '{}'; only failed sources can be retried",
+      existing.status
+    )));
+  }
+  let Some(uri) = existing
+    .uri
+    .as_deref()
+    .map(str::trim)
+    .filter(|u| !u.is_empty())
+    .map(str::to_string)
+  else {
+    return Err(ApiError::BadRequest(
+      "only failed URL sources with a stored URI can be retried; re-upload file or recording sources"
+        .into(),
+    ));
+  };
+  if existing.kind != "url" {
+    return Err(ApiError::BadRequest(format!(
+      "only `url` sources can be retried without re-uploading bytes (source is `{}`)",
+      existing.kind
+    )));
+  }
+
+  let reopened = state
+    .repos
+    .sources
+    .reset_for_retry(tenant.as_str(), notebook_id, source_id)
+    .await?
+    .ok_or_else(|| {
+      ApiError::BadRequest(format!("source {source_id} is no longer in failed status"))
+    })?;
+  tokio::spawn(ingest(state.clone(), reopened.clone(), Payload::Url(uri)));
+  Ok(Json(reopened))
 }
 
 pub async fn delete_source(
@@ -541,12 +709,7 @@ async fn ingest(state: AppState, source: Source, payload: Payload) {
     .await;
   let outcome = async {
     let (digest, text) = match payload {
-      Payload::Url(url) => {
-        let (bytes, format) = fetch(&url).await?;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        let text = extract_bytes_text(bytes, format).await?;
-        (digest, text)
-      }
+      Payload::Url(url) => ingest_url(&url).await?,
       Payload::Bytes { bytes, format } => {
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let text = extract_bytes_text(bytes, format).await?;
@@ -652,6 +815,337 @@ fn url_path_extension(raw_url: &str) -> Option<String> {
     .extension()
     .and_then(|e| e.to_str())
     .map(str::to_ascii_lowercase)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SmartUrlTarget {
+  Direct,
+  RewriteUrl(String),
+  GitHubRepo {
+    owner: String,
+    repo: String,
+    git_ref: Option<String>,
+    subpath: Option<String>,
+  },
+}
+
+pub(crate) fn classify_smart_source_url(raw_url: &str) -> SmartUrlTarget {
+  let Ok(parsed) = url::Url::parse(raw_url.trim()) else {
+    return SmartUrlTarget::Direct;
+  };
+  let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+    return SmartUrlTarget::Direct;
+  };
+  let segments: Vec<&str> = parsed
+    .path_segments()
+    .map(|it| it.filter(|s| !s.is_empty()).collect())
+    .unwrap_or_default();
+
+  if matches!(
+    host.as_str(),
+    "arxiv.org" | "www.arxiv.org" | "export.arxiv.org"
+  ) && segments.len() >= 2
+    && matches!(segments[0], "abs" | "e-print")
+  {
+    let paper_id = segments[1..].join("/");
+    let paper_id = paper_id.strip_suffix(".pdf").unwrap_or(&paper_id);
+    if !paper_id.is_empty() {
+      return SmartUrlTarget::RewriteUrl(format!("https://arxiv.org/pdf/{paper_id}.pdf"));
+    }
+  }
+
+  if matches!(host.as_str(), "github.com" | "www.github.com") && segments.len() >= 2 {
+    let owner = segments[0];
+    let repo = segments[1].strip_suffix(".git").unwrap_or(segments[1]);
+    if !owner.is_empty() && !repo.is_empty() {
+      if segments.len() == 2 {
+        return SmartUrlTarget::GitHubRepo {
+          owner: owner.to_string(),
+          repo: repo.to_string(),
+          git_ref: None,
+          subpath: None,
+        };
+      }
+      if segments[2] == "tree" && segments.len() >= 4 {
+        let git_ref = segments[3].to_string();
+        let subpath = (segments.len() > 4).then(|| segments[4..].join("/"));
+        return SmartUrlTarget::GitHubRepo {
+          owner: owner.to_string(),
+          repo: repo.to_string(),
+          git_ref: Some(git_ref),
+          subpath,
+        };
+      }
+      if segments[2] == "blob" && segments.len() >= 5 {
+        let git_ref = segments[3];
+        let file_path = segments[4..].join("/");
+        return SmartUrlTarget::RewriteUrl(format!(
+          "https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{file_path}"
+        ));
+      }
+    }
+  }
+
+  SmartUrlTarget::Direct
+}
+
+pub(crate) fn select_github_snapshot_paths(
+  tree_paths: &[String],
+  subpath: Option<&str>,
+  max_files: usize,
+) -> Vec<String> {
+  const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    "__pycache__",
+    ".next",
+    "coverage",
+  ];
+  const SKIP_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "tar", "gz", "xz", "woff", "woff2",
+    "ttf", "otf", "mp3", "mp4", "mov", "wav", "wasm", "pyc", "so", "dylib", "dll", "exe", "bin",
+    "lock",
+  ];
+  const SKIP_NAMES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "poetry.lock",
+    "uv.lock",
+    "go.sum",
+  ];
+
+  let prefix = subpath
+    .map(|s| s.trim_matches('/'))
+    .filter(|s| !s.is_empty());
+
+  let mut scored: Vec<(u8, usize, String)> = Vec::new();
+  for path in tree_paths {
+    if let Some(pfx) = prefix
+      && path != pfx
+      && !path.starts_with(&format!("{pfx}/"))
+    {
+      continue;
+    }
+    if path
+      .split('/')
+      .any(|seg| SKIP_DIRS.contains(&seg) || seg.starts_with('.'))
+    {
+      continue;
+    }
+    let file_name = path.rsplit('/').next().unwrap_or(path.as_str());
+    if SKIP_NAMES.contains(&file_name) {
+      continue;
+    }
+    let ext = FsPath::new(file_name)
+      .extension()
+      .and_then(|e| e.to_str())
+      .map(str::to_ascii_lowercase);
+    if let Some(ref e) = ext
+      && SKIP_EXTS.contains(&e.as_str())
+    {
+      continue;
+    }
+    let lower_name = file_name.to_ascii_lowercase();
+    let priority = if lower_name.starts_with("readme") {
+      0
+    } else if matches!(
+      file_name,
+      "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "pom.xml"
+    ) {
+      1
+    } else if matches!(
+      lower_name.as_str(),
+      "lib.rs"
+        | "main.rs"
+        | "mod.rs"
+        | "index.ts"
+        | "index.tsx"
+        | "app.tsx"
+        | "main.py"
+        | "main.go"
+    ) {
+      2
+    } else if matches!(ext.as_deref(), Some("md" | "toml" | "yaml" | "yml")) {
+      3
+    } else {
+      4
+    };
+    let depth = path.matches('/').count();
+    scored.push((priority, depth, path.clone()));
+  }
+  scored.sort_by(|a, b| {
+    a.0
+      .cmp(&b.0)
+      .then_with(|| a.1.cmp(&b.1))
+      .then_with(|| a.2.cmp(&b.2))
+  });
+  scored
+    .into_iter()
+    .take(max_files)
+    .map(|(_, _, p)| p)
+    .collect()
+}
+
+async fn ingest_github_repo_snapshot(
+  owner: &str,
+  repo: &str,
+  git_ref: Option<&str>,
+  subpath: Option<&str>,
+) -> Result<(String, String), String> {
+  const MAX_SNAPSHOT_FILES: usize = 16;
+  const MAX_SNAPSHOT_TOTAL_CHARS: usize = 96_000;
+  const MAX_SINGLE_FILE_CHARS: usize = 10_000;
+
+  let tool = yanshi_tools::builtin::HttpTool::new(Arc::new(yanshi_tools::SandboxPolicy::default()))
+    .map_err(|e| format!("http client: {e}"))?;
+  let gh_headers = json!({
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "yanshi-notebook/0.2",
+  });
+
+  let repo_api = format!("https://api.github.com/repos/{owner}/{repo}");
+  let meta_res = tool
+    .send_bytes(
+      &json!({ "url": repo_api, "method": "GET", "headers": gh_headers }),
+      Some(512 * 1024),
+    )
+    .await
+    .map_err(|e| format!("fetching GitHub repo metadata failed: {e}"))?;
+  if !meta_res.status.is_success() {
+    return Err(format!(
+      "GitHub repo metadata returned HTTP {}",
+      meta_res.status
+    ));
+  }
+  let meta_json: Value =
+    serde_json::from_slice(&meta_res.body).map_err(|e| format!("invalid GitHub repo JSON: {e}"))?;
+  let resolved_ref = git_ref
+    .filter(|r| !r.is_empty())
+    .or_else(|| meta_json.get("default_branch").and_then(Value::as_str))
+    .unwrap_or("main")
+    .to_string();
+  let description = meta_json
+    .get("description")
+    .and_then(Value::as_str)
+    .unwrap_or_default()
+    .trim();
+
+  let tree_api =
+    format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{resolved_ref}?recursive=1");
+  let tree_res = tool
+    .send_bytes(
+      &json!({ "url": tree_api, "method": "GET", "headers": gh_headers }),
+      Some(4 * 1024 * 1024),
+    )
+    .await
+    .map_err(|e| format!("fetching GitHub tree failed: {e}"))?;
+  if !tree_res.status.is_success() {
+    return Err(format!("GitHub tree returned HTTP {}", tree_res.status));
+  }
+  let tree_json: Value =
+    serde_json::from_slice(&tree_res.body).map_err(|e| format!("invalid GitHub tree JSON: {e}"))?;
+  let blob_paths: Vec<String> = tree_json
+    .get("tree")
+    .and_then(Value::as_array)
+    .map(|items| {
+      items
+        .iter()
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("blob"))
+        .filter_map(|entry| {
+          entry
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        })
+        .collect()
+    })
+    .unwrap_or_default();
+
+  let chosen = select_github_snapshot_paths(&blob_paths, subpath, MAX_SNAPSHOT_FILES);
+  let mut md = format!("# GitHub Repository: {owner}/{repo} (`{resolved_ref}`)\n\n");
+  if !description.is_empty() {
+    md.push_str(&format!("{description}\n\n"));
+  }
+  if let Some(sub) = subpath.filter(|s| !s.is_empty()) {
+    md.push_str(&format!("Subpath filter: `{sub}`\n\n"));
+  }
+  md.push_str("## Repository File Tree\n\n```text\n");
+  for path in blob_paths.iter().take(250) {
+    md.push_str(path);
+    md.push('\n');
+  }
+  if blob_paths.len() > 250 {
+    md.push_str(&format!("... ({} more files)\n", blob_paths.len() - 250));
+  }
+  md.push_str("```\n\n");
+
+  let mut used_chars = 0usize;
+  for rel_path in chosen {
+    if used_chars >= MAX_SNAPSHOT_TOTAL_CHARS {
+      break;
+    }
+    let raw_url =
+      format!("https://raw.githubusercontent.com/{owner}/{repo}/{resolved_ref}/{rel_path}");
+    let Ok(raw_res) = tool
+      .send_bytes(
+        &json!({ "url": raw_url, "method": "GET" }),
+        Some(256 * 1024),
+      )
+      .await
+    else {
+      continue;
+    };
+    if !raw_res.status.is_success() {
+      continue;
+    }
+    let Ok(content) = String::from_utf8(raw_res.body) else {
+      continue;
+    };
+    let trimmed: String = content.chars().take(MAX_SINGLE_FILE_CHARS).collect();
+    used_chars += trimmed.len();
+    md.push_str(&format!("## File: `{rel_path}`\n\n```\n{trimmed}\n```\n\n"));
+  }
+
+  let digest = format!("{:x}", Sha256::digest(md.as_bytes()));
+  Ok((digest, md))
+}
+
+async fn ingest_url(url: &str) -> Result<(String, String), String> {
+  match classify_smart_source_url(url) {
+    SmartUrlTarget::GitHubRepo {
+      owner,
+      repo,
+      git_ref,
+      subpath,
+    } => {
+      if let Ok(snapshot) =
+        ingest_github_repo_snapshot(&owner, &repo, git_ref.as_deref(), subpath.as_deref()).await
+      {
+        return Ok(snapshot);
+      }
+    }
+    SmartUrlTarget::RewriteUrl(rewritten) => {
+      if let Ok((bytes, format)) = fetch(&rewritten).await
+        && let Ok(text) = extract_bytes_text(bytes.clone(), format).await
+        && !text.trim().is_empty()
+      {
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        return Ok((digest, text));
+      }
+    }
+    SmartUrlTarget::Direct => {}
+  }
+
+  let (bytes, format) = fetch(url).await?;
+  let digest = format!("{:x}", Sha256::digest(&bytes));
+  let text = extract_bytes_text(bytes, format).await?;
+  Ok((digest, text))
 }
 
 /// GET `url` through the http tool's default policy, which refuses
@@ -1729,6 +2223,8 @@ pub struct GroundedAnswerCitation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskNotebookResponse {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub message_id: Option<Uuid>,
   pub notebook_id: Uuid,
   pub question: String,
   pub answer: String,
@@ -2006,7 +2502,23 @@ pub async fn ask_notebook(
   let (answer, citations) = parse_grounded_answer_reply(&response.content, &chunk_sources)
     .map_err(|e| ApiError::Internal(format!("parsing grounded answer: {e}")))?;
 
+  let citations_json = serde_json::to_value(&citations).unwrap_or_else(|_| json!([]));
+  let persisted = state
+    .repos
+    .notebook_messages
+    .append(NewNotebookMessage {
+      notebook_id: id,
+      tenant_id: tenant.as_str().to_string(),
+      question: question.clone(),
+      answer: answer.clone(),
+      model: model.clone(),
+      citations: citations_json,
+      used_chunk_count: i32::try_from(used_chunk_count).unwrap_or(i32::MAX),
+    })
+    .await?;
+
   Ok(Json(AskNotebookResponse {
+    message_id: persisted.map(|m| m.id),
     notebook_id: id,
     question,
     answer,
@@ -2014,6 +2526,48 @@ pub async fn ask_notebook(
     citations,
     used_chunk_count,
   }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListMessagesQuery {
+  #[serde(default)]
+  pub limit: Option<usize>,
+}
+
+pub async fn list_notebook_messages(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+  Query(query): Query<ListMessagesQuery>,
+) -> Result<Json<Value>, ApiError> {
+  own_notebook(&state, &tenant, id).await?;
+  let limit = query.limit.unwrap_or(200).clamp(1, 500) as i64;
+  let messages = state
+    .repos
+    .notebook_messages
+    .list_for_notebook(tenant.as_str(), id, limit)
+    .await?;
+  Ok(Json(json!({
+    "notebook_id": id,
+    "messages": messages,
+  })))
+}
+
+pub async fn clear_notebook_messages(
+  State(state): State<AppState>,
+  Extension(tenant): Extension<TenantId>,
+  Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+  own_notebook(&state, &tenant, id).await?;
+  let deleted = state
+    .repos
+    .notebook_messages
+    .clear_for_notebook(tenant.as_str(), id)
+    .await?;
+  Ok(Json(json!({
+    "notebook_id": id,
+    "deleted": deleted,
+  })))
 }
 
 // ── generate (Y5.4) ─────────────────────────────────────────────────────
@@ -3002,6 +3556,22 @@ pub struct ExportedNotebookDeliverable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedNotebookMessage {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub id: Option<Uuid>,
+  pub question: String,
+  pub answer: String,
+  #[serde(default)]
+  pub model: String,
+  #[serde(default)]
+  pub citations: Value,
+  #[serde(default)]
+  pub used_chunk_count: i32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotebookExportBundle {
   pub version: u32,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3011,6 +3581,8 @@ pub struct NotebookExportBundle {
   pub sources: Vec<ExportedNotebookSource>,
   #[serde(default)]
   pub deliverables: Vec<ExportedNotebookDeliverable>,
+  #[serde(default)]
+  pub messages: Vec<ExportedNotebookMessage>,
   #[serde(default)]
   pub markdown_brief: String,
 }
@@ -3031,6 +3603,7 @@ pub struct ImportNotebookResponse {
   pub notebook: Notebook,
   pub imported_sources: usize,
   pub imported_chunks: usize,
+  pub imported_messages: usize,
 }
 
 #[derive(Debug)]
@@ -3050,6 +3623,7 @@ impl From<ImportValidationError> for ApiError {
 
 #[derive(Debug)]
 struct ValidatedImportSource {
+  original_id: Option<Uuid>,
   kind: SourceKind,
   title: String,
   uri: Option<String>,
@@ -3060,9 +3634,19 @@ struct ValidatedImportSource {
 }
 
 #[derive(Debug)]
+struct ValidatedImportMessage {
+  question: String,
+  answer: String,
+  model: String,
+  citations: Value,
+  used_chunk_count: i32,
+}
+
+#[derive(Debug)]
 struct ValidatedImportBundle {
   title: String,
   sources: Vec<ValidatedImportSource>,
+  messages: Vec<ValidatedImportMessage>,
 }
 
 fn parse_source_kind(raw: &str) -> Option<SourceKind> {
@@ -3154,6 +3738,7 @@ fn validate_notebook_import_bundle(
       .collect();
 
     validated_sources.push(ValidatedImportSource {
+      original_id: src.id,
       kind,
       title: source_title,
       uri: src
@@ -3179,10 +3764,72 @@ fn validate_notebook_import_bundle(
     });
   }
 
+  let mut validated_messages = Vec::new();
+  for msg in bundle.messages.iter().take(200) {
+    let q = msg.question.trim();
+    let a = msg.answer.trim();
+    if q.is_empty() || a.is_empty() {
+      continue;
+    }
+    let model = if msg.model.trim().is_empty() {
+      "imported".to_string()
+    } else {
+      msg.model.trim().to_string()
+    };
+    let citations = if msg.citations.is_array() {
+      msg.citations.clone()
+    } else {
+      json!([])
+    };
+    validated_messages.push(ValidatedImportMessage {
+      question: q.to_string(),
+      answer: a.to_string(),
+      model,
+      citations,
+      used_chunk_count: msg.used_chunk_count.max(0),
+    });
+  }
+
   Ok(ValidatedImportBundle {
     title: resolved_title.to_string(),
     sources: validated_sources,
+    messages: validated_messages,
   })
+}
+
+pub(crate) fn remap_imported_citations(raw: &Value, source_id_map: &HashMap<Uuid, Uuid>) -> Value {
+  let Some(arr) = raw.as_array() else {
+    return json!([]);
+  };
+  let remapped: Vec<Value> = arr
+    .iter()
+    .map(|item| {
+      let Some(obj) = item.as_object() else {
+        return item.clone();
+      };
+      let mut next = obj.clone();
+      if let Some(old_src) = obj
+        .get("source_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+        && let Some(new_src) = source_id_map.get(&old_src)
+      {
+        next.insert("source_id".to_string(), json!(new_src.to_string()));
+      }
+      if let Some(cid) = obj.get("chunk_id").and_then(Value::as_str)
+        && let Some((prefix, ordinal)) = cid.split_once(':')
+        && let Ok(old_src) = Uuid::parse_str(prefix)
+        && let Some(new_src) = source_id_map.get(&old_src)
+      {
+        next.insert(
+          "chunk_id".to_string(),
+          json!(format!("{new_src}:{ordinal}")),
+        );
+      }
+      Value::Object(next)
+    })
+    .collect();
+  Value::Array(remapped)
 }
 
 /// Render a human-readable Markdown research dossier summarizing a notebook's
@@ -3192,6 +3839,16 @@ pub fn render_notebook_markdown_brief(
   sources: &[Source],
   chunks: &[SourceChunk],
   artifacts: &[NotebookArtifact],
+) -> String {
+  render_notebook_markdown_brief_with_messages(title, sources, chunks, artifacts, &[])
+}
+
+pub fn render_notebook_markdown_brief_with_messages(
+  title: &str,
+  sources: &[Source],
+  chunks: &[SourceChunk],
+  artifacts: &[NotebookArtifact],
+  messages: &[NotebookMessage],
 ) -> String {
   let mut chunk_counts: HashMap<Uuid, usize> = HashMap::new();
   let mut chunk_lookup: HashMap<&str, (Uuid, i32)> = HashMap::with_capacity(chunks.len());
@@ -3301,6 +3958,15 @@ pub fn render_notebook_markdown_brief(
       }
     }
   }
+  if !messages.is_empty() {
+    lines.push(String::new());
+    lines.push(format!("## Grounded Q&A ({})", messages.len()));
+    for (idx, msg) in messages.iter().enumerate() {
+      lines.push(String::new());
+      lines.push(format!("### Q{}: {}", idx + 1, msg.question));
+      lines.push(msg.answer.clone());
+    }
+  }
   lines.push(String::new());
   lines.join("\n")
 }
@@ -3310,6 +3976,7 @@ fn build_notebook_export_bundle(
   sources: &[Source],
   ready_chunks: &[SourceChunk],
   artifacts: &[NotebookArtifact],
+  messages: &[NotebookMessage],
 ) -> NotebookExportBundle {
   let mut chunks_by_source: HashMap<Uuid, Vec<ExportedSourceChunk>> = HashMap::new();
   for chunk in ready_chunks {
@@ -3356,8 +4023,26 @@ fn build_notebook_export_bundle(
     })
     .collect();
 
-  let markdown_brief =
-    render_notebook_markdown_brief(&notebook.title, sources, ready_chunks, artifacts);
+  let exported_messages: Vec<ExportedNotebookMessage> = messages
+    .iter()
+    .map(|msg| ExportedNotebookMessage {
+      id: Some(msg.id),
+      question: msg.question.clone(),
+      answer: msg.answer.clone(),
+      model: msg.model.clone(),
+      citations: msg.citations.clone(),
+      used_chunk_count: msg.used_chunk_count,
+      created_at: Some(msg.created_at),
+    })
+    .collect();
+
+  let markdown_brief = render_notebook_markdown_brief_with_messages(
+    &notebook.title,
+    sources,
+    ready_chunks,
+    artifacts,
+    messages,
+  );
 
   NotebookExportBundle {
     version: NOTEBOOK_BUNDLE_VERSION,
@@ -3370,13 +4055,14 @@ fn build_notebook_export_bundle(
     },
     sources: exported_sources,
     deliverables: exported_deliverables,
+    messages: exported_messages,
     markdown_brief,
   }
 }
 
 /// `GET /v1/notebooks/{id}/export` — export a portable `NotebookExportBundle`
 /// containing notebook metadata, sources + ready chunks, deliverable metadata
-/// with citations, and a human-readable `markdown_brief` research dossier.
+/// with citations, grounded Q&A turns, and a `markdown_brief` research dossier.
 pub async fn export_notebook(
   State(state): State<AppState>,
   Extension(tenant): Extension<TenantId>,
@@ -3398,11 +4084,17 @@ pub async fn export_notebook(
     .notebooks
     .list_artifacts(tenant.as_str(), id)
     .await?;
+  let messages = state
+    .repos
+    .notebook_messages
+    .list_for_notebook(tenant.as_str(), id, 200)
+    .await?;
   Ok(Json(build_notebook_export_bundle(
     &notebook,
     &sources,
     &ready_chunks,
     &artifacts,
+    &messages,
   )))
 }
 
@@ -3429,8 +4121,10 @@ pub async fn import_notebook(
 
   let mut imported_sources = 0usize;
   let mut imported_chunks = 0usize;
+  let mut source_id_map: HashMap<Uuid, Uuid> = HashMap::new();
 
   for src in validated.sources {
+    let original_id = src.original_id;
     let Some(created_source) = state
       .repos
       .sources
@@ -3445,6 +4139,9 @@ pub async fn import_notebook(
     else {
       continue;
     };
+    if let Some(old_id) = original_id {
+      source_id_map.insert(old_id, created_source.id);
+    }
     imported_sources += 1;
 
     if !src.chunks.is_empty() {
@@ -3483,11 +4180,34 @@ pub async fn import_notebook(
     }
   }
 
+  let mut imported_messages = 0usize;
+  for msg in validated.messages {
+    let citations = remap_imported_citations(&msg.citations, &source_id_map);
+    if state
+      .repos
+      .notebook_messages
+      .append(NewNotebookMessage {
+        notebook_id: notebook.id,
+        tenant_id: tenant.as_str().to_string(),
+        question: msg.question,
+        answer: msg.answer,
+        model: msg.model,
+        citations,
+        used_chunk_count: msg.used_chunk_count,
+      })
+      .await?
+      .is_some()
+    {
+      imported_messages += 1;
+    }
+  }
+
   state.notebook_indexes.invalidate(notebook.id);
   Ok(Json(ImportNotebookResponse {
     notebook,
     imported_sources,
     imported_chunks,
+    imported_messages,
   }))
 }
 
@@ -3605,8 +4325,18 @@ pub async fn download_notebook_artifacts_zip(
     .chunks
     .list_ready_for_notebook(tenant.as_str(), id)
     .await?;
-  let brief_md =
-    render_notebook_markdown_brief(&notebook.title, &sources, &ready_chunks, &artifacts);
+  let messages = state
+    .repos
+    .notebook_messages
+    .list_for_notebook(tenant.as_str(), id, 200)
+    .await?;
+  let brief_md = render_notebook_markdown_brief_with_messages(
+    &notebook.title,
+    &sources,
+    &ready_chunks,
+    &artifacts,
+    &messages,
+  );
   let title = notebook.title.clone();
 
   let packed = tokio::task::spawn_blocking(move || {
@@ -4252,7 +4982,7 @@ mod tests {
       },
     ];
 
-    let bundle = build_notebook_export_bundle(&notebook, &sources, &chunks, &artifacts);
+    let bundle = build_notebook_export_bundle(&notebook, &sources, &chunks, &artifacts, &[]);
     assert_eq!(bundle.version, NOTEBOOK_BUNDLE_VERSION);
     assert!(
       bundle.markdown_brief.contains("# Estuarine Dynamics")
@@ -4408,5 +5138,68 @@ mod tests {
     );
     assert!(split_batch_cost_limit(Some(0.0), 2).is_err());
     assert!(split_batch_cost_limit(Some(-3.0), 2).is_err());
+  }
+
+  #[test]
+  fn smart_url_classifier_and_citation_remap_handle_arxiv_github_and_imports() {
+    assert_eq!(
+      classify_smart_source_url("https://arxiv.org/abs/1706.03762v7"),
+      SmartUrlTarget::RewriteUrl("https://arxiv.org/pdf/1706.03762v7.pdf".to_string())
+    );
+    assert_eq!(
+      classify_smart_source_url("https://github.com/tokio-rs/axum.git"),
+      SmartUrlTarget::GitHubRepo {
+        owner: "tokio-rs".to_string(),
+        repo: "axum".to_string(),
+        git_ref: None,
+        subpath: None,
+      }
+    );
+    assert_eq!(
+      classify_smart_source_url("https://github.com/tokio-rs/axum/tree/main/axum/src"),
+      SmartUrlTarget::GitHubRepo {
+        owner: "tokio-rs".to_string(),
+        repo: "axum".to_string(),
+        git_ref: Some("main".to_string()),
+        subpath: Some("axum/src".to_string()),
+      }
+    );
+    assert_eq!(
+      classify_smart_source_url("https://github.com/tokio-rs/axum/blob/main/README.md"),
+      SmartUrlTarget::RewriteUrl(
+        "https://raw.githubusercontent.com/tokio-rs/axum/main/README.md".to_string()
+      )
+    );
+    assert_eq!(
+      classify_smart_source_url("https://example.com/docs/guide.html"),
+      SmartUrlTarget::Direct
+    );
+
+    let chosen = select_github_snapshot_paths(
+      &[
+        "node_modules/pkg/index.js".to_string(),
+        "Cargo.lock".to_string(),
+        "src/lib.rs".to_string(),
+        "Cargo.toml".to_string(),
+        "README.md".to_string(),
+        "assets/logo.png".to_string(),
+      ],
+      None,
+      10,
+    );
+    assert_eq!(chosen, vec!["README.md", "Cargo.toml", "src/lib.rs"]);
+
+    let old_src = Uuid::new_v4();
+    let new_src = Uuid::new_v4();
+    let remapped = remap_imported_citations(
+      &json!([{
+        "source_id": old_src.to_string(),
+        "chunk_id": format!("{old_src}:2"),
+        "quote": "verbatim passage"
+      }]),
+      &HashMap::from([(old_src, new_src)]),
+    );
+    assert_eq!(remapped[0]["source_id"], new_src.to_string());
+    assert_eq!(remapped[0]["chunk_id"], format!("{new_src}:2"));
   }
 }

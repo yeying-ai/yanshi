@@ -789,6 +789,58 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   .await;
   assert_eq!(code, StatusCode::NOT_FOUND, "source_chunks cascaded");
 
+  // AF2: `/ask` turns are persisted in `GET /v1/notebooks/{id}/messages`,
+  // sources support `PATCH` rename + inline text re-chunking and `:retry`,
+  // and `export`/`import` preserves Q&A turns with remapped `chunk_id`s.
+  let (code, listed_msgs) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/messages"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{listed_msgs}");
+  assert_eq!(
+    listed_msgs["messages"].as_array().map(Vec::len),
+    Some(2),
+    "both `/ask` turns must be persisted chronologically: {listed_msgs}"
+  );
+
+  let text_source_id = by_kind("text")["id"].as_str().expect("text id").to_string();
+  let (code, patched_src) = call(
+    &state,
+    "PATCH",
+    &format!("/v1/notebooks/{id}/sources/{text_source_id}"),
+    &tenant,
+    Some(json!({
+      "title": "Updated Syzygy Field Note",
+      "text": "KingTideSyzygy alignment amplifies gravitational tidal range along continental shelves."
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{patched_src}");
+  assert_eq!(patched_src["title"], "Updated Syzygy Field Note");
+  let (code, syzygy_hits) = search(state.clone(), "KingTideSyzygy").await;
+  assert_eq!(code, StatusCode::OK, "{syzygy_hits}");
+  assert_eq!(
+    syzygy_hits["chunks"][0]["source_id"],
+    json!(text_source_id),
+    "edited text source must be re-chunked and immediately searchable: {syzygy_hits}"
+  );
+
+  let failed_url_id = url["id"].as_str().expect("failed url id").to_string();
+  let (code, retried_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources/{failed_url_id}:retry"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{retried_src}");
+  let _ = settled_sources(&state, &tenant, &id).await;
+
   // AD1: Export portable NotebookExportBundle and re-import twice in the same tenant
   // + once in another tenant without `source_chunks` PK collision, immediately searchable.
   let (code, _) = call(
@@ -812,11 +864,16 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(code, StatusCode::OK, "{exported_bundle}");
   assert_eq!(exported_bundle["version"], 1);
   assert_eq!(exported_bundle["sources"].as_array().map(Vec::len), Some(8));
+  assert_eq!(
+    exported_bundle["messages"].as_array().map(Vec::len),
+    Some(2),
+    "exported bundle must include persisted Q&A turns: {exported_bundle}"
+  );
   assert!(
     exported_bundle["markdown_brief"]
       .as_str()
-      .is_some_and(|md| md.contains("## Sources (8)")),
-    "export must include markdown_brief: {exported_bundle}"
+      .is_some_and(|md| md.contains("## Sources (8)") && md.contains("## Grounded Q&A (2)")),
+    "export must include markdown_brief with Q&A history: {exported_bundle}"
   );
 
   // Invalid bundle version is rejected before creating a notebook.
@@ -850,6 +907,42 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     .as_str()
     .expect("imported id 1")
     .to_string();
+  assert_eq!(imported_1["imported_messages"], 2);
+  let (code, imported_msgs) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_id_1}/messages"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_msgs}");
+  let remapped_cid = imported_msgs["messages"][0]["citations"][0]["chunk_id"]
+    .as_str()
+    .expect("remapped chunk_id");
+  let (code, resolved_chunk) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_id_1}/chunks/{remapped_cid}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::OK,
+    "imported message citation chunk_id must resolve in imported notebook: {resolved_chunk}"
+  );
+  let (code, cleared_msgs) = call(
+    &state,
+    "DELETE",
+    &format!("/v1/notebooks/{imported_id_1}/messages"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{cleared_msgs}");
+  assert_eq!(cleared_msgs["deleted"], 2);
 
   // Wrapped bundle import (#2 in same `tenant` with title override) — proves zero PK collision.
   let (code, imported_2) = call(

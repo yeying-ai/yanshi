@@ -1145,7 +1145,10 @@ async fn expired_run_lease_is_reclaimed_and_frees_the_tenant_slot() {
 /// Y5.1: notebooks, sources and artifact links, all scoped to a tenant.
 #[tokio::test]
 async fn notebook_and_source_repos_are_tenant_scoped() {
-  use yanshi_db::{NewSource, NotebookRepo, SourceKind, SourceRepo, SourceStatus};
+  use yanshi_db::{
+    NewNotebookMessage, NewSource, NotebookMessageRepo, NotebookRepo, SourceKind, SourceRepo,
+    SourceStatus,
+  };
   let Some(db) = fresh_db().await else {
     eprintln!(
       "skipping notebook_and_source_repos_are_tenant_scoped — set YANSHI_DATABASE_TEST_URL"
@@ -1460,6 +1463,124 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
       .list_artifacts(&tenant, notebook.id)
       .await
       .expect("list after detach")
+      .is_empty()
+  );
+
+  // AF2: source rename / retry reset and persisted `/ask` messages are tenant-scoped.
+  assert!(
+    repos
+      .sources
+      .rename(&other, notebook.id, source.id, "Intruder Source")
+      .await
+      .expect("cross-tenant source rename")
+      .is_none()
+  );
+  let renamed_src = repos
+    .sources
+    .rename(&tenant, notebook.id, source.id, "Renamed Tidal Notes")
+    .await
+    .expect("owner source rename")
+    .expect("renamed source");
+  assert_eq!(renamed_src.title, "Renamed Tidal Notes");
+
+  repos
+    .sources
+    .update_status(source.id, SourceStatus::Failed, Some("dns timeout"), None)
+    .await
+    .expect("mark failed");
+  assert!(
+    repos
+      .sources
+      .reset_for_retry(&other, notebook.id, source.id)
+      .await
+      .expect("cross-tenant retry")
+      .is_none()
+  );
+  let retried = repos
+    .sources
+    .reset_for_retry(&tenant, notebook.id, source.id)
+    .await
+    .expect("owner retry")
+    .expect("retried source");
+  assert_eq!(retried.status, "pending");
+  assert_eq!(retried.error, None);
+  assert!(
+    repos
+      .sources
+      .reset_for_retry(&tenant, notebook.id, source.id)
+      .await
+      .expect("second retry while pending")
+      .is_none(),
+    "only failed sources transition via reset_for_retry"
+  );
+
+  assert!(
+    repos
+      .notebook_messages
+      .append(NewNotebookMessage {
+        notebook_id: notebook.id,
+        tenant_id: other.clone(),
+        question: "Intruder?".into(),
+        answer: "No".into(),
+        model: "mock".into(),
+        citations: serde_json::json!([]),
+        used_chunk_count: 0,
+      })
+      .await
+      .expect("cross-tenant message append")
+      .is_none()
+  );
+  let msg = repos
+    .notebook_messages
+    .append(NewNotebookMessage {
+      notebook_id: notebook.id,
+      tenant_id: tenant.clone(),
+      question: "What drives tides?".into(),
+      answer: "Lunar gravity.".into(),
+      model: "mock-ask".into(),
+      citations: serde_json::json!([{"source_id": source.id, "chunk_id": format!("{}:0", source.id), "quote": "moon"}]),
+      used_chunk_count: 1,
+    })
+    .await
+    .expect("append message")
+    .expect("persisted message");
+  assert_eq!(msg.question, "What drives tides?");
+  assert!(
+    repos
+      .notebook_messages
+      .list_for_notebook(&other, notebook.id, 50)
+      .await
+      .expect("other list messages")
+      .is_empty()
+  );
+  let listed_msgs = repos
+    .notebook_messages
+    .list_for_notebook(&tenant, notebook.id, 50)
+    .await
+    .expect("owner list messages");
+  assert_eq!(listed_msgs.len(), 1);
+  assert_eq!(
+    repos
+      .notebook_messages
+      .clear_for_notebook(&other, notebook.id)
+      .await
+      .expect("other clear"),
+    0
+  );
+  assert_eq!(
+    repos
+      .notebook_messages
+      .clear_for_notebook(&tenant, notebook.id)
+      .await
+      .expect("owner clear"),
+    1
+  );
+  assert!(
+    repos
+      .notebook_messages
+      .list_for_notebook(&tenant, notebook.id, 50)
+      .await
+      .expect("list after clear")
       .is_empty()
   );
   assert!(
