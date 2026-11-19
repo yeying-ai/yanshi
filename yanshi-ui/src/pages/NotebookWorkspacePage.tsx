@@ -13,6 +13,7 @@ import {
 import {
   ListNotebooksEnvelopeSchema,
   NotebookArtifactsEnvelopeSchema,
+  NotebookAskResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookGenerateResponseSchema,
@@ -25,6 +26,7 @@ import {
   type DeliverableCitation,
   type Notebook,
   type NotebookArtifact,
+  type NotebookAskResponse,
   type NotebookChunk,
   type NotebookDeliverable,
   type NotebookSearchHit,
@@ -551,6 +553,89 @@ export function NotebookDeliverableCitationBar({
   );
 }
 
+/**
+ * Compute the explicit `source_ids` filter for search / ask / generate.
+ * Returns `undefined` when every ready source is checked so newly-ingested
+ * sources participate automatically without sending redundant filters.
+ */
+export function resolveScopedSourceIds(
+  sources: ReadonlyArray<Pick<NotebookSource, 'id' | 'status'>>,
+  excludedIds: ReadonlySet<string>,
+): string[] | undefined {
+  if (excludedIds.size === 0) {
+    return undefined;
+  }
+  const readySources = sources.filter((s) => s.status === 'ready');
+  const selectedIds = readySources.filter((s) => !excludedIds.has(s.id)).map((s) => s.id);
+  if (selectedIds.length === readySources.length) {
+    return undefined;
+  }
+  return selectedIds;
+}
+
+export interface NotebookAskResultCardProps {
+  result: NotebookAskResponse;
+  sourceTitleById: ReadonlyMap<string, string>;
+  onInspectChunk: (chunkId: string) => void;
+  onUseAsFocus?: (answerText: string) => void;
+  onSaveAsSource?: (result: NotebookAskResponse) => void;
+  saveBusy?: boolean;
+}
+
+export function NotebookAskResultCard({
+  result,
+  sourceTitleById,
+  onInspectChunk,
+  onUseAsFocus,
+  onSaveAsSource,
+  saveBusy = false,
+}: NotebookAskResultCardProps): React.ReactElement {
+  return (
+    <div className="nb-ask-answer" data-testid="notebook-ask-result">
+      <div className="nb-ask-answer__meta">
+        <strong>Q: {result.question}</strong>
+        <span>
+          {result.model} · 检索 {result.used_chunk_count} 段原文
+        </span>
+      </div>
+      <p className="nb-ask-answer__body">{result.answer}</p>
+      {result.citations.length > 0 && (
+        <NotebookDeliverableCitationBar
+          deliverable={{
+            kind: 'ask',
+            title: '',
+            citations: result.citations,
+          }}
+          sourceTitleById={sourceTitleById}
+          onInspectChunk={onInspectChunk}
+        />
+      )}
+      <div className="nb-ask-answer__actions">
+        {onUseAsFocus && (
+          <button
+            type="button"
+            className="studio-link-btn"
+            onClick={() => onUseAsFocus(result.answer)}
+          >
+            设为当前生成器焦点
+          </button>
+        )}
+        {onSaveAsSource && (
+          <button
+            type="button"
+            className="studio-link-btn"
+            data-testid="save-ask-as-source-btn"
+            disabled={saveBusy}
+            onClick={() => onSaveAsSource(result)}
+          >
+            {saveBusy ? '保存中…' : '存为笔记来源'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function buildInitialGeneratorDrafts(): Record<GeneratorKind, Record<string, string | boolean>> {
   const out = {} as Record<GeneratorKind, Record<string, string | boolean>>;
   for (const spec of STUDIO_GENERATORS) {
@@ -617,7 +702,12 @@ export function NotebookWorkspacePage({
     recording: null,
   });
 
-  // BM25 search & citation chunk lookup state
+  // BM25 search, source scoping, grounded Q&A & citation chunk lookup state
+  const [excludedSourceIds, setExcludedSourceIds] = useState<string[]>([]);
+  const [askQuestionDraft, setAskQuestionDraft] = useState<string>('');
+  const [askBusy, setAskBusy] = useState<boolean>(false);
+  const [askResult, setAskResult] = useState<NotebookAskResponse | null>(null);
+  const [saveAskSourceBusy, setSaveAskSourceBusy] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchBusy, setSearchBusy] = useState<boolean>(false);
   const [searchHits, setSearchHits] = useState<NotebookSearchHit[] | null>(null);
@@ -753,6 +843,8 @@ export function NotebookWorkspacePage({
   }, [loadNotebooksList, initialNotebookId]);
 
   useEffect(() => {
+    setExcludedSourceIds([]);
+    setAskResult(null);
     setSearchHits(null);
     setInspectedChunk(null);
     void loadNotebookDetailAndArtifacts(selectedNotebookId);
@@ -856,6 +948,18 @@ export function NotebookWorkspacePage({
     [sources],
   );
 
+  const excludedSourceSet = useMemo(() => new Set(excludedSourceIds), [excludedSourceIds]);
+
+  const selectedReadyCount = useMemo(
+    () => sources.filter((s) => s.status === 'ready' && !excludedSourceSet.has(s.id)).length,
+    [sources, excludedSourceSet],
+  );
+
+  const scopedSourceIds = useMemo(
+    () => resolveScopedSourceIds(sources, excludedSourceSet),
+    [sources, excludedSourceSet],
+  );
+
   const sourceTitleById = useMemo(() => {
     const map = new Map<string, string>();
     for (const s of sources) {
@@ -954,6 +1058,7 @@ export function NotebookWorkspacePage({
         throw new Error(`移除来源失败 (${res.status}): ${text}`);
       }
       setSources((prev) => prev.filter((item) => item.id !== source.id));
+      setExcludedSourceIds((prev) => prev.filter((id) => id !== source.id));
       setSearchHits((prev) =>
         prev ? prev.filter((hit) => hit.source_id !== source.id) : null,
       );
@@ -1131,6 +1236,15 @@ export function NotebookWorkspacePage({
     }
   };
 
+  const toggleSourceIncluded = (sourceId: string, included: boolean) => {
+    setExcludedSourceIds((prev) => {
+      if (included) {
+        return prev.filter((id) => id !== sourceId);
+      }
+      return prev.includes(sourceId) ? prev : [...prev, sourceId];
+    });
+  };
+
   const handleSearchNotebook = async (ev: React.FormEvent<HTMLFormElement>) => {
     ev.preventDefault();
     if (!selectedNotebookId) return;
@@ -1139,13 +1253,21 @@ export function NotebookWorkspacePage({
       setSearchHits(null);
       return;
     }
+    if (scopedSourceIds && scopedSourceIds.length === 0) {
+      setErrorBanner('请至少勾选一份「已就绪」资料来源后再执行检索。');
+      return;
+    }
     setSearchBusy(true);
     setErrorBanner(null);
     try {
+      const scopeParam =
+        scopedSourceIds && scopedSourceIds.length > 0
+          ? `&source_ids=${encodeURIComponent(scopedSourceIds.join(','))}`
+          : '';
       const res = await apiFetch(
         `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/search?q=${encodeURIComponent(
           q,
-        )}&top_k=6`,
+        )}&top_k=6${scopeParam}`,
         apiToken,
         {},
         tenantId,
@@ -1164,6 +1286,96 @@ export function NotebookWorkspacePage({
       setErrorBanner(formatApiError(err));
     } finally {
       setSearchBusy(false);
+    }
+  };
+
+  const handleAskNotebook = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    if (!selectedNotebookId) {
+      setErrorBanner('请先创建或选择一个笔记本。');
+      return;
+    }
+    const question = askQuestionDraft.trim();
+    if (!question) {
+      setErrorBanner('请输入要向当前笔记本提问的问题。');
+      return;
+    }
+    if (selectedReadyCount === 0) {
+      setErrorBanner('请至少勾选一份「已就绪」资料来源参与源接地问答。');
+      return;
+    }
+    setAskBusy(true);
+    setErrorBanner(null);
+    try {
+      const body: Record<string, unknown> = { question };
+      if (modelName.trim()) {
+        body.model = modelName.trim();
+      }
+      if (scopedSourceIds) {
+        body.source_ids = scopedSourceIds;
+      }
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/ask`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`笔记本问答失败 (${res.status}): ${text}`);
+      }
+      const parsed = await parseJsonResponse(
+        NotebookAskResponseSchema,
+        res,
+        'POST /v1/notebooks/:id/ask',
+      );
+      setAskResult(parsed);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setAskBusy(false);
+    }
+  };
+
+  const handleSaveAnswerAsSource = async (result: NotebookAskResponse) => {
+    if (!selectedNotebookId) return;
+    setSaveAskSourceBusy(true);
+    setErrorBanner(null);
+    try {
+      const shortQ = result.question.trim().slice(0, 40);
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/sources`,
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind: 'text',
+            title: `问答摘录：${shortQ}`,
+            text: `问题：${result.question}\n\n回答：\n${result.answer}`,
+          }),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`保存问答为笔记失败 (${res.status}): ${text}`);
+      }
+      const created = await parseJsonResponse(
+        NotebookSourceSchema,
+        res,
+        'POST /v1/notebooks/:id/sources',
+      );
+      setSources((prev) => [...prev, created]);
+      setNoticeBanner(`已将回答保存为笔记来源「${created.title}」。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setSaveAskSourceBusy(false);
     }
   };
 
@@ -1202,6 +1414,10 @@ export function NotebookWorkspacePage({
       setErrorBanner('当前笔记本尚无「已就绪」资料分块，请先添加并等待资料入库完成。');
       return;
     }
+    if (selectedReadyCount === 0) {
+      setErrorBanner('请至少在左侧勾选一份「已就绪」资料来源参与生成。');
+      return;
+    }
     const rawDraft = paramDrafts[spec.kind] ?? {};
     const params: Record<string, unknown> = {};
     for (const field of spec.fields) {
@@ -1233,6 +1449,9 @@ export function NotebookWorkspacePage({
       };
       if (modelName.trim()) {
         body.model = modelName.trim();
+      }
+      if (scopedSourceIds) {
+        body.source_ids = scopedSourceIds;
       }
       const res = await apiFetch(
         `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/generate`,
@@ -1283,7 +1502,7 @@ export function NotebookWorkspacePage({
       <StudioSubpageHeader
         eyebrow="Yanshi Content Studio"
         title="多源内容笔记本工作台"
-        subtitle="汇集网页、PDF 文档、笔记与语音录音构建本地 BM25 知识索引，一键驱动 11 套溯源多模态生成器"
+        subtitle="汇集网页、PDF/DOCX/CSV 文档、笔记与语音录音构建本地 BM25 知识索引，支持勾选来源问答溯源与 12 套多模态生成器"
         activeSection="notebooks"
         actions={
           <div className="nb-header-controls">
@@ -1610,50 +1829,96 @@ export function NotebookWorkspacePage({
               {sources.length === 0 ? (
                 <p className="nb-empty-hint">
                   {activeNotebook
-                    ? '尚未添加资料。导入文本、网页或 Markdown/HTML 文件后即可检索和生成成品。'
+                    ? '尚未添加资料。导入文本、网页或文档/录音文件后即可检索、问答和生成成品。'
                     : '请先在上方新建一个主题笔记本。'}
                 </p>
               ) : (
-                <ul className="nb-source-list" role="list" aria-label="已添加的资料来源">
-                  {sources.map((src) => (
-                    <li key={src.id} className="nb-source-item">
-                      <div className="nb-source-item__top">
-                        <strong>{src.title}</strong>
-                        <div className="nb-source-item__actions">
-                          <span className="nb-source-status" data-status={src.status}>
-                            {sourceStatusLabel(src.status)}
-                          </span>
-                          <button
-                            type="button"
-                            className="studio-link-btn nb-danger-link"
-                            data-testid={`delete-source-${src.id}`}
-                            aria-label={`移除 ${src.title}`}
-                            disabled={deletingSourceId === src.id}
-                            onClick={() => void handleDeleteSource(src)}
-                          >
-                            {deletingSourceId === src.id ? '移除中…' : '移除'}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="nb-source-item__meta">
-                        <span>{src.kind.toUpperCase()}</span>
-                        <span>{formatTime(src.created_at)}</span>
-                        {src.sha256 ? <code>#{src.sha256.slice(0, 8)}</code> : null}
-                        {src.status === 'ready' && (
+                <>
+                  <div className="nb-source-scope-bar" data-testid="source-scope-bar">
+                    <span>
+                      参与范围：已选 {selectedReadyCount}/{readySourceCount} 份就绪资料
+                    </span>
+                    <div className="nb-source-scope-bar__actions">
+                      {excludedSourceIds.length > 0 ? (
+                        <button
+                          type="button"
+                          className="studio-link-btn"
+                          onClick={() => setExcludedSourceIds([])}
+                        >
+                          全选来源
+                        </button>
+                      ) : (
+                        sources.length > 1 && (
                           <button
                             type="button"
                             className="studio-link-btn"
-                            aria-label={`查看首段 ${src.title}`}
-                            onClick={() => void handleInspectChunk(`${src.id}:0`)}
+                            onClick={() => setExcludedSourceIds(sources.map((s) => s.id))}
                           >
-                            查看首段
+                            取消全选
                           </button>
-                        )}
-                      </div>
-                      {src.error ? <p className="nb-source-item__error">{src.error}</p> : null}
-                    </li>
-                  ))}
-                </ul>
+                        )
+                      )}
+                    </div>
+                  </div>
+                  <ul className="nb-source-list" role="list" aria-label="已添加的资料来源">
+                    {sources.map((src) => {
+                      const included = !excludedSourceSet.has(src.id);
+                      const checkId = `nb-src-check-${src.id}`;
+                      return (
+                        <li
+                          key={src.id}
+                          className={`nb-source-item ${included ? '' : 'nb-source-item--excluded'}`}
+                        >
+                          <div className="nb-source-item__top">
+                            <label htmlFor={checkId} className="nb-source-check-label">
+                              <input
+                                id={checkId}
+                                name={`source_scope_${src.id}`}
+                                type="checkbox"
+                                className="nb-source-checkbox"
+                                data-testid={`source-scope-checkbox-${src.id}`}
+                                checked={included}
+                                onChange={(ev) => toggleSourceIncluded(src.id, ev.target.checked)}
+                              />
+                              <span>{src.title}</span>
+                            </label>
+                            <div className="nb-source-item__actions">
+                              <span className="nb-source-status" data-status={src.status}>
+                                {sourceStatusLabel(src.status)}
+                              </span>
+                              <button
+                                type="button"
+                                className="studio-link-btn nb-danger-link"
+                                data-testid={`delete-source-${src.id}`}
+                                aria-label={`移除 ${src.title}`}
+                                disabled={deletingSourceId === src.id}
+                                onClick={() => void handleDeleteSource(src)}
+                              >
+                                {deletingSourceId === src.id ? '移除中…' : '移除'}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="nb-source-item__meta">
+                            <span>{src.kind.toUpperCase()}</span>
+                            <span>{formatTime(src.created_at)}</span>
+                            {src.sha256 ? <code>#{src.sha256.slice(0, 8)}</code> : null}
+                            {src.status === 'ready' && (
+                              <button
+                                type="button"
+                                className="studio-link-btn"
+                                aria-label={`查看首段 ${src.title}`}
+                                onClick={() => void handleInspectChunk(`${src.id}:0`)}
+                              >
+                                查看首段
+                              </button>
+                            )}
+                          </div>
+                          {src.error ? <p className="nb-source-item__error">{src.error}</p> : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
               )}
             </div>
           </section>
@@ -1766,15 +2031,15 @@ export function NotebookWorkspacePage({
           </section>
         </aside>
 
-        {/* Column 2: 8 Content Studio Generators & Live Run Tracker */}
+        {/* Column 2: Grounded Q&A, 12 Content Studio Generators & Live Run Tracker */}
         <section className="nb-column nb-column--studio" aria-label="Content Studio 生成器矩阵">
           <div className="nb-studio-bar">
             <div>
               <h2>Content Studio 生成器工作台</h2>
               <p>
                 {activeNotebook
-                  ? `基于「${activeNotebook.title}」的 ${readySourceCount} 份就绪资料原文，生成带分块引用的结构化交付物`
-                  : '创建并选择笔记本后即可一键生成多模态成品'}
+                  ? `基于「${activeNotebook.title}」已勾选的 ${selectedReadyCount}/${readySourceCount} 份就绪资料，提问溯源或生成结构化交付物`
+                  : '创建并选择笔记本后即可向资料提问或一键生成多模态成品'}
               </p>
             </div>
             <div className="nb-model-box">
@@ -1793,6 +2058,59 @@ export function NotebookWorkspacePage({
               />
             </div>
           </div>
+
+          <section
+            className="nb-card nb-ask-card"
+            data-testid="notebook-ask-card"
+            aria-labelledby="nb-ask-heading"
+          >
+            <div className="nb-card__head">
+              <h3 id="nb-ask-heading">向笔记本提问（源接地引用问答）</h3>
+              <span>
+                {scopedSourceIds
+                  ? `限定 ${selectedReadyCount} 份已选来源`
+                  : `覆盖全部 ${readySourceCount} 份就绪来源`}
+              </span>
+            </div>
+            <form
+              className="nb-ask-form"
+              method="POST"
+              action="/v1/notebooks/ask"
+              aria-labelledby="nb-ask-heading"
+              onSubmit={(ev) => void handleAskNotebook(ev)}
+            >
+              <label htmlFor="nb-ask-input" className="nb-sr-only">
+                针对已勾选笔记本资料输入问题
+              </label>
+              <input
+                id="nb-ask-input"
+                name="question"
+                type="text"
+                data-testid="notebook-ask-input"
+                placeholder="针对已选资料提问（例如：各方案的核心指标与权衡差异是什么？）…"
+                value={askQuestionDraft}
+                onChange={(ev) => setAskQuestionDraft(ev.target.value)}
+              />
+              <button
+                type="submit"
+                className="studio-btn-primary studio-btn-sm"
+                data-testid="notebook-ask-submit"
+                disabled={askBusy || !selectedNotebookId || selectedReadyCount === 0}
+              >
+                {askBusy ? '溯源推理中…' : '提问溯源'}
+              </button>
+            </form>
+            {askResult && (
+              <NotebookAskResultCard
+                result={askResult}
+                sourceTitleById={sourceTitleById}
+                onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+                onUseAsFocus={(answerText) => applyHitAsGeneratorFocus(answerText)}
+                onSaveAsSource={(res) => void handleSaveAnswerAsSource(res)}
+                saveBusy={saveAskSourceBusy}
+              />
+            )}
+          </section>
 
           {activeGenRunId && (
             <div className="nb-live-run-ribbon" role="status" data-testid="notebook-live-run">
@@ -1907,7 +2225,7 @@ export function NotebookWorkspacePage({
                       type="button"
                       className="studio-btn-primary studio-btn-sm"
                       data-testid={`launch-generator-${spec.kind}`}
-                      disabled={isBusy || !selectedNotebookId || readySourceCount === 0}
+                      disabled={isBusy || !selectedNotebookId || selectedReadyCount === 0}
                       onClick={() => void handleLaunchGenerator(spec)}
                     >
                       {isBusy ? '提交中…' : '✨ 生成成品'}

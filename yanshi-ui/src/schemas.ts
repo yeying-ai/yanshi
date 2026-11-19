@@ -547,6 +547,18 @@ export const NotebookDeliverableSchema = z
   .loose();
 export type NotebookDeliverable = z.infer<typeof NotebookDeliverableSchema>;
 
+export const NotebookAskResponseSchema = z
+  .object({
+    notebook_id: z.string(),
+    question: z.string(),
+    answer: z.string(),
+    model: z.string(),
+    citations: z.array(DeliverableCitationSchema).optional().default([]),
+    used_chunk_count: z.number(),
+  })
+  .loose();
+export type NotebookAskResponse = z.infer<typeof NotebookAskResponseSchema>;
+
 export const NotebookArtifactSchema = z
   .object({
     kind: z.string(),

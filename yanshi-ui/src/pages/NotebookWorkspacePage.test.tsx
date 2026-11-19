@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
   NotebookArtifactsEnvelopeSchema,
+  NotebookAskResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
   NotebookSearchEnvelopeSchema,
@@ -12,10 +13,12 @@ import { inspectYamlLocally } from '../studio/presets';
 import {
   dedupeDeliverableCitations,
   encodeBytesToBase64,
+  NotebookAskResultCard,
   NotebookDeliverableCitationBar,
   NotebookWorkspacePage,
   notebookArtifactToMediaItem,
   notebookIdFromPath,
+  resolveScopedSourceIds,
   STUDIO_GENERATORS,
 } from './NotebookWorkspacePage';
 
@@ -185,7 +188,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(chunk.metadata?.start_line).toBe(1);
   });
 
-  it('renders 3-column NotebookWorkspacePage SSR markup with PDF/Recording tabs, chunk lookup, native dialogs, and 11 generators', () => {
+  it('renders 3-column NotebookWorkspacePage SSR markup with PDF/Recording tabs, grounded Ask card, chunk lookup, native dialogs, and 12 generators', () => {
     const html = renderToStaticMarkup(
       <NotebookWorkspacePage apiToken="" onTokenChange={() => {}} />,
     );
@@ -194,6 +197,9 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="nb-tab-recording"');
     expect(html).toContain('accept=".pdf,.docx,.csv,');
+    expect(html).toContain('data-testid="notebook-ask-card"');
+    expect(html).toContain('data-testid="notebook-ask-input"');
+    expect(html).toContain('data-testid="notebook-ask-submit"');
     expect(html).toContain('data-testid="chunk-lookup-input"');
     expect(html).toContain('data-testid="delete-notebook-dialog"');
     expect(html).toContain('data-testid="chunk-preview-dialog"');
@@ -202,6 +208,72 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     for (const spec of STUDIO_GENERATORS) {
       expect(html).toContain(`data-testid="generator-card-${spec.kind}"`);
     }
+  });
+
+  it('computes scoped source_ids and renders grounded NotebookAskResultCard with citation chips', () => {
+    const sampleSources = [
+      {
+        id: 'src-a',
+        notebook_id: 'nb-1',
+        kind: 'file',
+        title: 'Basins CSV',
+        status: 'ready',
+        created_at: '2026-11-19T00:00:00Z',
+        updated_at: '2026-11-19T00:00:00Z',
+      },
+      {
+        id: 'src-b',
+        notebook_id: 'nb-1',
+        kind: 'file',
+        title: 'Amphidromic DOCX',
+        status: 'ready',
+        created_at: '2026-11-19T00:00:01Z',
+        updated_at: '2026-11-19T00:00:01Z',
+      },
+      {
+        id: 'src-pending',
+        notebook_id: 'nb-1',
+        kind: 'url',
+        title: 'Pending URL',
+        status: 'ingesting',
+        created_at: '2026-11-19T00:00:02Z',
+        updated_at: '2026-11-19T00:00:02Z',
+      },
+    ];
+    expect(resolveScopedSourceIds(sampleSources, new Set())).toBeUndefined();
+    expect(resolveScopedSourceIds(sampleSources, new Set(['src-pending']))).toBeUndefined();
+    expect(resolveScopedSourceIds(sampleSources, new Set(['src-b']))).toEqual(['src-a']);
+    expect(resolveScopedSourceIds(sampleSources, new Set(['src-a', 'src-b']))).toEqual([]);
+
+    const askParsed = NotebookAskResponseSchema.parse({
+      notebook_id: 'nb-1',
+      question: 'Bay of Fundy 峰值潮差是多少？',
+      answer: 'Bay of Fundy 的峰值潮差达到 16.3 米。',
+      model: 'gpt-4o',
+      citations: [
+        {
+          source_id: 'src-a',
+          chunk_id: 'src-a:0',
+          quote: 'basin: BayOfFundy | peak_m: 16.3',
+        },
+      ],
+      used_chunk_count: 2,
+    });
+
+    const askHtml = renderToStaticMarkup(
+      <NotebookAskResultCard
+        result={askParsed}
+        sourceTitleById={new Map([['src-a', 'Basins CSV']])}
+        onInspectChunk={() => {}}
+        onUseAsFocus={() => {}}
+        onSaveAsSource={() => {}}
+      />,
+    );
+    expect(askHtml).toContain('data-testid="notebook-ask-result"');
+    expect(askHtml).toContain('16.3 米');
+    expect(askHtml).toContain('data-testid="citation-chip-src-a:0"');
+    expect(askHtml).toContain('data-testid="save-ask-as-source-btn"');
+    expect(askHtml).toContain('Basins CSV');
   });
 
   it('deduplicates deliverable citations and renders accessible chunk-lookup buttons', () => {

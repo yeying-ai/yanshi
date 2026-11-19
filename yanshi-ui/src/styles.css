@@ -5320,6 +5320,170 @@ button.nb-citation-chip:focus-visible {
   word-break: break-word;
 }
 
+.nb-source-scope-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  color: #475569;
+}
+
+.nb-source-scope-bar__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nb-source-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.nb-source-check-label span {
+  overflow-wrap: anywhere;
+}
+
+.nb-source-checkbox {
+  accent-color: #0f766e;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.nb-source-checkbox:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
+@supports not (accent-color: #0f766e) {
+  .nb-source-check-label {
+    position: relative;
+    padding-left: 1.5rem;
+  }
+
+  .nb-source-check-label input[type='checkbox'].nb-source-checkbox {
+    position: absolute !important;
+    clip-path: inset(50%) !important;
+    overflow: hidden !important;
+    width: 1px !important;
+    height: 1px !important;
+    margin: -1px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    white-space: nowrap !important;
+  }
+
+  .nb-source-check-label input[type='checkbox'].nb-source-checkbox + span::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid #94a3b8;
+    background: #ffffff;
+    border-radius: 4px;
+    box-sizing: border-box;
+  }
+
+  .nb-source-check-label input[type='checkbox'].nb-source-checkbox:focus-visible + span::before {
+    outline: 2px solid #0f766e;
+    outline-offset: 2px;
+  }
+
+  .nb-source-check-label input[type='checkbox'].nb-source-checkbox:checked + span::before {
+    background-color: #0f766e;
+    border-color: #0f766e;
+  }
+
+  .nb-source-check-label input[type='checkbox'].nb-source-checkbox:checked + span::after {
+    content: '✓';
+    position: absolute;
+    left: 0.2rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 0.78rem;
+  }
+}
+
+.nb-source-item--excluded {
+  opacity: 0.62;
+}
+
+.nb-ask-card {
+  margin-bottom: 12px;
+}
+
+.nb-ask-card h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.nb-ask-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.nb-ask-form input {
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  font-size: 13px;
+}
+
+.nb-ask-answer {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid #ccfbf1;
+  background: #f0fdfa;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nb-ask-answer__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #115e59;
+}
+
+.nb-ask-answer__body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #0f172a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nb-ask-answer__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 1180px) {
   .nb-workbench {
     grid-template-columns: 1fr;
