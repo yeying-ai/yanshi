@@ -528,9 +528,29 @@ export const NotebookGenerateResponseSchema = z
   .loose();
 export type NotebookGenerateResponse = z.infer<typeof NotebookGenerateResponseSchema>;
 
+export const DeliverableCitationSchema = z
+  .object({
+    source_id: z.string(),
+    chunk_id: z.string().optional().default(''),
+    quote: z.string(),
+  })
+  .loose();
+export type DeliverableCitation = z.infer<typeof DeliverableCitationSchema>;
+
+export const NotebookDeliverableSchema = z
+  .object({
+    kind: z.string(),
+    title: z.string(),
+    content: z.record(z.string(), z.unknown()).optional(),
+    citations: z.array(DeliverableCitationSchema).optional().default([]),
+  })
+  .loose();
+export type NotebookDeliverable = z.infer<typeof NotebookDeliverableSchema>;
+
 export const NotebookArtifactSchema = z
   .object({
     kind: z.string(),
+    deliverable: NotebookDeliverableSchema.nullable().optional(),
     id: z.string(),
     run_id: z.string(),
     node_id: z.string(),

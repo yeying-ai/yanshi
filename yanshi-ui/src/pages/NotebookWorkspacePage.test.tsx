@@ -10,7 +10,9 @@ import {
 import { OFFICIAL_GENERATOR_PRESETS } from '../studio/generatorCatalog';
 import { inspectYamlLocally } from '../studio/presets';
 import {
+  dedupeDeliverableCitations,
   encodeBytesToBase64,
+  NotebookDeliverableCitationBar,
   NotebookWorkspacePage,
   notebookArtifactToMediaItem,
   notebookIdFromPath,
@@ -145,6 +147,17 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
       artifacts: [
         {
           kind: 'mindmap',
+          deliverable: {
+            kind: 'mindmap',
+            title: 'Lunar Tidal Map',
+            citations: [
+              {
+                source_id: 'src-1',
+                chunk_id: 'src-1:0',
+                quote: 'Spring tides occur during new and full moons.',
+              },
+            ],
+          },
           id: 'art-1',
           run_id: 'run-1',
           node_id: 'map_svg',
@@ -157,6 +170,8 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
       ],
     });
     expect(arts.artifacts).toHaveLength(1);
+    expect(arts.artifacts[0]?.deliverable?.title).toBe('Lunar Tidal Map');
+    expect(arts.artifacts[0]?.deliverable?.citations[0]?.chunk_id).toBe('src-1:0');
 
     const chunk = NotebookChunkSchema.parse({
       chunk_id: 'src-1:0',
@@ -187,5 +202,35 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     for (const spec of STUDIO_GENERATORS) {
       expect(html).toContain(`data-testid="generator-card-${spec.kind}"`);
     }
+  });
+
+  it('deduplicates deliverable citations and renders accessible chunk-lookup buttons', () => {
+    const deduped = dedupeDeliverableCitations([
+      { source_id: 'src-1', chunk_id: 'src-1:0', quote: 'Spring tides peak at new moon.' },
+      { source_id: 'src-1', chunk_id: 'src-1:0', quote: 'Spring tides peak at new moon.' },
+      { source_id: 'src-2', chunk_id: 'src-2:1', quote: 'Neap tides occur at quarter moon.' },
+    ]);
+    expect(deduped).toHaveLength(2);
+
+    const titles = new Map([
+      ['src-1', 'Lunar Mechanics'],
+      ['src-2', 'Coastal Survey'],
+    ]);
+    const html = renderToStaticMarkup(
+      <NotebookDeliverableCitationBar
+        deliverable={{
+          kind: 'data_table',
+          title: 'Tidal Amplitude Table',
+          citations: deduped,
+        }}
+        sourceTitleById={titles}
+        onInspectChunk={() => {}}
+      />,
+    );
+    expect(html).toContain('Tidal Amplitude Table');
+    expect(html).toContain('data-testid="citation-chip-src-1:0"');
+    expect(html).toContain('data-testid="citation-chip-src-2:1"');
+    expect(html).toContain('Lunar Mechanics');
+    expect(html).toContain('type="button"');
   });
 });

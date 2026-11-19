@@ -908,11 +908,18 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
   .await?;
   if let Some(link) = &ctx.notebook {
     use yanshi_db::{ArtifactRepo as _, NotebookRepo as _};
+    let deliverable = extract_run_deliverable(&state);
     for artifact in ctx.repos.artifacts.list_for_run(ctx.run_id).await? {
       ctx
         .repos
         .notebooks
-        .attach_artifact(&ctx.tenant_id, link.notebook_id, artifact.id, &link.kind)
+        .attach_artifact_with_deliverable(
+          &ctx.tenant_id,
+          link.notebook_id,
+          artifact.id,
+          &link.kind,
+          deliverable.as_ref(),
+        )
         .await?;
     }
   }
@@ -1506,6 +1513,35 @@ fn first_state_error(state: &HashMap<String, AsyncNodeResult>) -> Option<String>
   state
     .first_node_failure()
     .map(|(node_id, err)| format!("{node_id}: {err}"))
+}
+
+/// Extract the structured `Deliverable` JSON object produced by a Studio
+/// generator's `deliverable` node (`outputs["deliverable"]` or wrapped
+/// `outputs["output"]["deliverable"]`).
+fn extract_run_deliverable(state: &HashMap<String, AsyncNodeResult>) -> Option<serde_json::Value> {
+  let outputs = state.get("deliverable")?.as_ref().ok()?;
+  let candidate = match outputs
+    .get("deliverable")
+    .or_else(|| outputs.get("output"))
+    .or_else(|| outputs.get("deliverable_output"))
+  {
+    Some(yanshi_core::value::FlowValue::Json(v)) => v.clone(),
+    _ => return None,
+  };
+  match candidate {
+    serde_json::Value::Object(mut map) => {
+      if let Some(inner) = map.remove("deliverable")
+        && inner.is_object()
+      {
+        Some(inner)
+      } else if map.contains_key("kind") && map.contains_key("title") {
+        Some(serde_json::Value::Object(map))
+      } else {
+        None
+      }
+    }
+    _ => None,
+  }
 }
 
 async fn stub_execute(ctx: &RunContext) -> Result<(), yanshi_db::DbError> {
@@ -2629,6 +2665,45 @@ mod first_state_error_tests {
     assert_eq!(
       error,
       "z_root_llm: Node execution failed: provider 401 unauthorized"
+    );
+  }
+
+  #[test]
+  fn extract_run_deliverable_unpacks_direct_and_wrapped_json_shapes() {
+    use serde_json::json;
+    use yanshi_core::value::FlowValue;
+
+    let direct_obj = json!({
+      "kind": "report",
+      "title": "Ocean Tides",
+      "content": {"sections": []},
+      "citations": [{"source_id": "s1", "chunk_id": "s1:0", "quote": "Tides follow the moon."}]
+    });
+    let mut direct_state = HashMap::new();
+    direct_state.insert(
+      "deliverable".to_string(),
+      Ok(HashMap::from([(
+        "deliverable".to_string(),
+        FlowValue::Json(direct_obj.clone()),
+      )])),
+    );
+    assert_eq!(
+      super::extract_run_deliverable(&direct_state),
+      Some(direct_obj.clone())
+    );
+
+    let mut wrapped_state = HashMap::new();
+    wrapped_state.insert(
+      "deliverable".to_string(),
+      Ok(HashMap::from([(
+        "output".to_string(),
+        FlowValue::Json(json!({ "deliverable": direct_obj })),
+      )])),
+    );
+    assert_eq!(
+      super::extract_run_deliverable(&wrapped_state)
+        .and_then(|v| v["title"].as_str().map(str::to_string)),
+      Some("Ocean Tides".to_string())
     );
   }
 }

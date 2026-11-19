@@ -192,6 +192,13 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     );
   }
   let md = by_node("report_md").expect("md");
+  assert_eq!(md["deliverable"]["title"], "Tides", "{md}");
+  assert_eq!(
+    md["deliverable"]["citations"].as_array().map(Vec::len),
+    Some(2),
+    "GET /v1/notebooks/:id/artifacts must expose persisted Deliverable citations: {md}"
+  );
+  assert_eq!(md["deliverable"]["citations"][0]["chunk_id"], chunk, "{md}");
   let (code, bytes) = call(
     &state,
     "GET",

@@ -1330,6 +1330,37 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
   assert_eq!(attached.len(), 1);
   assert_eq!(attached[0].kind, "report");
   assert_eq!(attached[0].artifact.name, "1.md");
+  assert_eq!(attached[0].deliverable, None);
+
+  let sample_deliverable = serde_json::json!({
+    "kind": "report",
+    "title": "Spring Tides",
+    "content": {"sections": []},
+    "citations": [{"source_id": source.id.to_string(), "chunk_id": format!("{}:0", source.id), "quote": "Tides follow the moon."}],
+    "files": []
+  });
+  assert!(
+    repos
+      .notebooks
+      .attach_artifact_with_deliverable(
+        &tenant,
+        notebook.id,
+        artifact.id,
+        "report",
+        Some(&sample_deliverable),
+      )
+      .await
+      .expect("attach with deliverable")
+  );
+  let attached_with_deliverable = repos
+    .notebooks
+    .list_artifacts(&tenant, notebook.id)
+    .await
+    .expect("list");
+  assert_eq!(
+    attached_with_deliverable[0].deliverable,
+    Some(sample_deliverable)
+  );
   assert!(
     repos
       .notebooks

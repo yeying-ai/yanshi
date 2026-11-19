@@ -91,11 +91,13 @@ pub struct NewSource {
   pub uri: Option<String>,
 }
 
-/// An artifact attached to a notebook, with the deliverable kind that
-/// produced it.
+/// An artifact attached to a notebook, with the deliverable kind and
+/// structured `Deliverable` JSON (title, content, citations) that produced it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotebookArtifact {
   pub kind: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub deliverable: Option<serde_json::Value>,
   #[serde(flatten)]
   pub artifact: Artifact,
 }
@@ -117,6 +119,21 @@ pub trait NotebookRepo: Send + Sync {
     notebook_id: Uuid,
     artifact_id: Uuid,
     kind: &str,
+  ) -> Result<bool, DbError> {
+    self
+      .attach_artifact_with_deliverable(tenant_id, notebook_id, artifact_id, kind, None)
+      .await
+  }
+  /// Link a registered artifact to a notebook together with its optional
+  /// `Deliverable` JSON (`RFC_CONTENT_STUDIO.md` §6). Idempotent; if linked
+  /// again with `Some(deliverable)`, backfills or updates `deliverable`.
+  async fn attach_artifact_with_deliverable(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    artifact_id: Uuid,
+    kind: &str,
+    deliverable: Option<&serde_json::Value>,
   ) -> Result<bool, DbError>;
   async fn list_artifacts(
     &self,
@@ -218,43 +235,33 @@ impl NotebookRepo for PgNotebookRepo {
     Ok(deleted == 1)
   }
 
-  async fn attach_artifact(
+  async fn attach_artifact_with_deliverable(
     &self,
     tenant_id: &str,
     notebook_id: Uuid,
     artifact_id: Uuid,
     kind: &str,
+    deliverable: Option<&serde_json::Value>,
   ) -> Result<bool, DbError> {
     // Both sides must belong to the tenant; the INSERT ... SELECT only
     // produces a row when they do.
-    let inserted = sqlx::query(
-      r#"INSERT INTO notebook_artifacts (notebook_id, artifact_id, kind)
-         SELECT n.id, a.id, $4
+    let affected = sqlx::query(
+      r#"INSERT INTO notebook_artifacts (notebook_id, artifact_id, kind, deliverable)
+         SELECT n.id, a.id, $4, $5
          FROM notebooks n, artifacts a
          WHERE n.id = $1 AND n.tenant_id = $3 AND a.id = $2 AND a.tenant_id = $3
-         ON CONFLICT (notebook_id, artifact_id) DO NOTHING"#,
+         ON CONFLICT (notebook_id, artifact_id) DO UPDATE
+           SET deliverable = COALESCE(EXCLUDED.deliverable, notebook_artifacts.deliverable)"#,
     )
     .bind(notebook_id)
     .bind(artifact_id)
     .bind(tenant_id)
     .bind(kind)
+    .bind(deliverable)
     .execute(&self.pool)
     .await?
     .rows_affected();
-    if inserted == 1 {
-      return Ok(true);
-    }
-    // Already linked counts as success.
-    let linked: Option<(i32,)> = sqlx::query_as(
-      r#"SELECT 1 FROM notebook_artifacts na JOIN notebooks n ON n.id = na.notebook_id
-         WHERE na.notebook_id = $1 AND na.artifact_id = $2 AND n.tenant_id = $3"#,
-    )
-    .bind(notebook_id)
-    .bind(artifact_id)
-    .bind(tenant_id)
-    .fetch_optional(&self.pool)
-    .await?;
-    Ok(linked.is_some())
+    Ok(affected == 1)
   }
 
   async fn list_artifacts(
@@ -265,11 +272,12 @@ impl NotebookRepo for PgNotebookRepo {
     #[derive(FromRow)]
     struct Row {
       kind: String,
+      deliverable: Option<serde_json::Value>,
       #[sqlx(flatten)]
       artifact: Artifact,
     }
     let rows = sqlx::query_as::<_, Row>(
-      r#"SELECT na.kind, a.id, a.run_id, a.node_id, a.name, a.path_or_url, a.mime_type,
+      r#"SELECT na.kind, na.deliverable, a.id, a.run_id, a.node_id, a.name, a.path_or_url, a.mime_type,
                 a.created_at, a.tenant_id, a.size_bytes, a.sha256
          FROM notebook_artifacts na
          JOIN notebooks n ON n.id = na.notebook_id
@@ -286,6 +294,7 @@ impl NotebookRepo for PgNotebookRepo {
         .into_iter()
         .map(|row| NotebookArtifact {
           kind: row.kind,
+          deliverable: row.deliverable,
           artifact: row.artifact,
         })
         .collect(),

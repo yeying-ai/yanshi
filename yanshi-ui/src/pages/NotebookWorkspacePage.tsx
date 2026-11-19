@@ -22,9 +22,11 @@ import {
   RunEnvelopeSchema,
   StreamedEventSchema,
   parseJsonResponse,
+  type DeliverableCitation,
   type Notebook,
   type NotebookArtifact,
   type NotebookChunk,
+  type NotebookDeliverable,
   type NotebookSearchHit,
   type NotebookSource,
   type StreamedEvent,
@@ -470,6 +472,83 @@ export function notebookArtifactToMediaItem(artifact: NotebookArtifact): MediaPr
     mimeType: artifact.mime_type ?? undefined,
     sizeBytes: artifact.size_bytes ?? undefined,
   };
+}
+
+/** Deduplicate deliverable citations by `(chunk_id, quote)` while preserving citation order. */
+export function dedupeDeliverableCitations(
+  citations: ReadonlyArray<DeliverableCitation> | undefined,
+): DeliverableCitation[] {
+  if (!citations || citations.length === 0) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const unique: DeliverableCitation[] = [];
+  for (const cit of citations) {
+    const chunkId = (cit.chunk_id ?? '').trim();
+    const quote = cit.quote.trim();
+    if (!quote) continue;
+    const key = `${chunkId}::${quote}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ ...cit, chunk_id: chunkId, quote });
+  }
+  return unique;
+}
+
+export interface NotebookDeliverableCitationBarProps {
+  deliverable: NotebookDeliverable;
+  sourceTitleById: ReadonlyMap<string, string>;
+  onInspectChunk: (chunkId: string) => void;
+}
+
+export function NotebookDeliverableCitationBar({
+  deliverable,
+  sourceTitleById,
+  onInspectChunk,
+}: NotebookDeliverableCitationBarProps): React.ReactElement {
+  const citations = dedupeDeliverableCitations(deliverable.citations);
+  return (
+    <div className="nb-deliverable-bar" data-testid="deliverable-citation-bar">
+      {deliverable.title.trim() && (
+        <h4 className="nb-deliverable-title">{deliverable.title}</h4>
+      )}
+      {citations.length > 0 && (
+        <ul className="nb-citation-chips" role="list" aria-label="交付物原文引用">
+          {citations.map((cit, index) => {
+            const sourceLabel = sourceTitleById.get(cit.source_id) ?? '资料引用';
+            const snippet =
+              cit.quote.length > 56 ? `${cit.quote.slice(0, 56)}…` : cit.quote;
+            const hasChunk = cit.chunk_id.length > 0;
+            return (
+              <li key={`${cit.chunk_id || 'quote'}-${index}`}>
+                {hasChunk ? (
+                  <button
+                    type="button"
+                    className="nb-citation-chip"
+                    data-testid={`citation-chip-${cit.chunk_id}`}
+                    aria-label={`查看引用 #${index + 1} 原文分块 ${cit.chunk_id}：${sourceLabel}`}
+                    onClick={() => onInspectChunk(cit.chunk_id)}
+                  >
+                    <span className="nb-citation-chip__badge">
+                      [{index + 1}] {sourceLabel}
+                    </span>
+                    <span className="nb-citation-chip__quote">“{snippet}”</span>
+                  </button>
+                ) : (
+                  <span className="nb-citation-chip nb-citation-chip--static">
+                    <span className="nb-citation-chip__badge">
+                      [{index + 1}] {sourceLabel}
+                    </span>
+                    <span className="nb-citation-chip__quote">“{snippet}”</span>
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function buildInitialGeneratorDrafts(): Record<GeneratorKind, Record<string, string | boolean>> {
@@ -1888,30 +1967,45 @@ export function NotebookWorkspacePage({
                   </p>
                 </div>
               ) : (
-                filteredArtifacts.map((art) => {
-                  const mediaItem = notebookArtifactToMediaItem(art);
-                  return (
-                    <div key={art.id} className="nb-artifact-block">
-                      <div className="nb-artifact-block__meta">
-                        <span className="nb-gen-badge">{art.kind}</span>
-                        <small>{formatTime(art.created_at)}</small>
-                        <SpaLink
-                          className="studio-link-btn"
-                          to={`/ui/studio?run_id=${encodeURIComponent(
-                            art.run_id,
-                          )}&preset=${encodeURIComponent(art.kind)}`}
-                        >
-                          查看运行 #{art.run_id.slice(0, 8)}
-                        </SpaLink>
+                (() => {
+                  const renderedDeliverableRuns = new Set<string>();
+                  return filteredArtifacts.map((art) => {
+                    const mediaItem = notebookArtifactToMediaItem(art);
+                    const showDeliverableBar =
+                      Boolean(art.deliverable) && !renderedDeliverableRuns.has(art.run_id);
+                    if (showDeliverableBar) {
+                      renderedDeliverableRuns.add(art.run_id);
+                    }
+                    return (
+                      <div key={art.id} className="nb-artifact-block">
+                        <div className="nb-artifact-block__meta">
+                          <span className="nb-gen-badge">{art.kind}</span>
+                          <small>{formatTime(art.created_at)}</small>
+                          <SpaLink
+                            className="studio-link-btn"
+                            to={`/ui/studio?run_id=${encodeURIComponent(
+                              art.run_id,
+                            )}&preset=${encodeURIComponent(art.kind)}`}
+                          >
+                            查看运行 #{art.run_id.slice(0, 8)}
+                          </SpaLink>
+                        </div>
+                        {showDeliverableBar && art.deliverable && (
+                          <NotebookDeliverableCitationBar
+                            deliverable={art.deliverable}
+                            sourceTitleById={sourceTitleById}
+                            onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+                          />
+                        )}
+                        <AuthorizedMedia
+                          item={mediaItem}
+                          apiToken={apiToken}
+                          tenantId={tenantId}
+                        />
                       </div>
-                      <AuthorizedMedia
-                        item={mediaItem}
-                        apiToken={apiToken}
-                        tenantId={tenantId}
-                      />
-                    </div>
-                  );
-                })
+                    );
+                  });
+                })()
               )}
             </div>
           </div>

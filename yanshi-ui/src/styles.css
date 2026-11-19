@@ -5242,6 +5242,84 @@ dialog.nb-dialog p {
   overflow: auto;
 }
 
+.nb-deliverable-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.nb-deliverable-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.4;
+}
+
+.nb-citation-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.nb-citation-chip {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  button.nb-citation-chip {
+    transition: box-shadow 140ms ease-out, border-color 140ms ease-out, scale 120ms ease-out;
+  }
+}
+
+button.nb-citation-chip:hover {
+  border-color: #0f766e;
+  background: #f0fdfa;
+  box-shadow: 0 2px 6px rgba(15, 118, 110, 0.14);
+}
+
+button.nb-citation-chip:active {
+  scale: 0.99;
+}
+
+button.nb-citation-chip:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
+.nb-citation-chip--static {
+  cursor: default;
+}
+
+.nb-citation-chip__badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.nb-citation-chip__quote {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #475569;
+  word-break: break-word;
+}
+
 @media (max-width: 1180px) {
   .nb-workbench {
     grid-template-columns: 1fr;
