@@ -4705,7 +4705,8 @@ button.studio-upload-btn:hover {
 .nb-field textarea,
 .nb-create-form input,
 .nb-search-form input,
-.nb-model-box input {
+.nb-model-box input,
+.nb-cost-box input {
   width: 100%;
   min-height: 36px;
   padding: 7px 10px;
@@ -4715,6 +4716,11 @@ button.studio-upload-btn:hover {
   color: #18212f;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.nb-cost-box input[aria-invalid="true"] {
+  border-color: #b91c1c;
+  background: #fef2f2;
 }
 
 .nb-field textarea {
@@ -4728,6 +4734,7 @@ button.studio-upload-btn:hover {
 .nb-create-form input:focus-visible,
 .nb-search-form input:focus-visible,
 .nb-model-box input:focus-visible,
+.nb-cost-box input:focus-visible,
 .nb-tabs [role="tab"]:focus-visible {
   outline: 2px solid #1b5f6d;
   outline-offset: 1px;
@@ -4933,15 +4940,31 @@ button.studio-upload-btn:hover {
   color: #56707f;
 }
 
+.nb-studio-bar__controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .nb-model-box {
-  min-width: 250px;
-  flex: 0 1 320px;
+  min-width: 220px;
+  flex: 1 1 240px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.nb-model-box label {
+.nb-cost-box {
+  min-width: 140px;
+  flex: 0 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nb-model-box label,
+.nb-cost-box label {
   font-size: 11.5px;
   font-weight: 650;
   color: #334155;

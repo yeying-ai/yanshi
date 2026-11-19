@@ -16,7 +16,9 @@ import {
   NotebookAskResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
+  NotebookExportBundleSchema,
   NotebookGenerateResponseSchema,
+  NotebookImportResponseSchema,
   NotebookSchema,
   NotebookSearchEnvelopeSchema,
   NotebookSourceSchema,
@@ -497,6 +499,20 @@ export function dedupeDeliverableCitations(
   return unique;
 }
 
+export function parseCostLimitUsdDraft(
+  raw: string,
+): { ok: true; value?: number } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: true, value: undefined };
+  }
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num <= 0) {
+    return { ok: false, error: '单次预算上限（USD）必须是大于 0 的有效数字。' };
+  }
+  return { ok: true, value: num };
+}
+
 export interface NotebookDeliverableCitationBarProps {
   deliverable: NotebookDeliverable;
   sourceTitleById: ReadonlyMap<string, string>;
@@ -748,6 +764,13 @@ export function NotebookWorkspacePage({
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteNotebookBusy, setDeleteNotebookBusy] = useState<boolean>(false);
+  const [exportNotebookBusy, setExportNotebookBusy] = useState<boolean>(false);
+  const [importBundleFile, setImportBundleFile] = useState<File | null>(null);
+  const [importNotebookBusy, setImportNotebookBusy] = useState<boolean>(false);
+  const [zipDownloadBusy, setZipDownloadBusy] = useState<boolean>(false);
+  const [costLimitUsdDraft, setCostLimitUsdDraft] = useState<string>('');
+  const [costLimitInvalid, setCostLimitInvalid] = useState<boolean>(false);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const chunkDialogRef = useRef<HTMLDialogElement | null>(null);
 
@@ -1070,6 +1093,141 @@ export function NotebookWorkspacePage({
       setErrorBanner(formatApiError(err));
     } finally {
       setDeleteNotebookBusy(false);
+    }
+  };
+
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  };
+
+  const handleExportNotebook = async (format: 'json' | 'brief') => {
+    if (!selectedNotebookId || exportNotebookBusy) return;
+    setExportNotebookBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/export`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`导出笔记本失败 (${res.status}): ${text}`);
+      }
+      const bundle = await parseJsonResponse(
+        NotebookExportBundleSchema,
+        res,
+        'GET /v1/notebooks/:id/export',
+      );
+      const shortId = selectedNotebookId.slice(0, 8);
+      if (format === 'brief') {
+        const mdBlob = new Blob([bundle.markdown_brief ?? ''], {
+          type: 'text/markdown; charset=utf-8',
+        });
+        triggerBlobDownload(mdBlob, `yanshi-notebook-${shortId}-briefing.md`);
+        setNoticeBanner(`已导出研究简报「yanshi-notebook-${shortId}-briefing.md」。`);
+      } else {
+        const jsonBlob = new Blob([JSON.stringify(bundle, null, 2)], {
+          type: 'application/json; charset=utf-8',
+        });
+        triggerBlobDownload(jsonBlob, `yanshi-notebook-${shortId}.json`);
+        setNoticeBanner(`已导出可移植笔记本包「yanshi-notebook-${shortId}.json」。`);
+      }
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setExportNotebookBusy(false);
+    }
+  };
+
+  const handleImportNotebook = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    if (!importBundleFile) {
+      setErrorBanner('请先选择一个可移植笔记本 .json 文件。');
+      importFileInputRef.current?.focus();
+      return;
+    }
+    setImportNotebookBusy(true);
+    setErrorBanner(null);
+    try {
+      const rawText = await importBundleFile.text();
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(rawText);
+      } catch {
+        throw new Error(`文件「${importBundleFile.name}」不是合法的 JSON 笔记本包。`);
+      }
+      const res = await apiFetch(
+        '/v1/notebooks/import',
+        apiToken,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsedJson),
+        },
+        tenantId,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`导入笔记本失败 (${res.status}): ${text}`);
+      }
+      const imported = await parseJsonResponse(
+        NotebookImportResponseSchema,
+        res,
+        'POST /v1/notebooks/import',
+      );
+      setNotebooks((prev) => [
+        imported.notebook,
+        ...prev.filter((n) => n.id !== imported.notebook.id),
+      ]);
+      setImportBundleFile(null);
+      if (importFileInputRef.current) {
+        importFileInputRef.current.value = '';
+      }
+      handleSelectNotebook(imported.notebook.id);
+      setNoticeBanner(
+        `已导入笔记本「${imported.notebook.title}」（${imported.imported_sources} 份来源、${imported.imported_chunks} 个分块立即可搜）。`,
+      );
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setImportNotebookBusy(false);
+    }
+  };
+
+  const handleDownloadNotebookZip = async () => {
+    if (!selectedNotebookId || zipDownloadBusy) return;
+    setZipDownloadBusy(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/artifacts.zip`,
+        apiToken,
+        {},
+        tenantId,
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `打包下载成品失败 (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`,
+        );
+      }
+      const blob = await res.blob();
+      const shortId = selectedNotebookId.slice(0, 8);
+      triggerBlobDownload(blob, `yanshi-notebook-${shortId}-artifacts.zip`);
+      setNoticeBanner(`已打包下载全部成品与 BRIEFING.md（yanshi-notebook-${shortId}-artifacts.zip）。`);
+    } catch (err) {
+      setErrorBanner(formatApiError(err));
+    } finally {
+      setZipDownloadBusy(false);
     }
   };
 
@@ -1542,6 +1700,14 @@ export function NotebookWorkspacePage({
       }
     }
 
+    const parsedCost = parseCostLimitUsdDraft(costLimitUsdDraft);
+    if (!parsedCost.ok) {
+      setCostLimitInvalid(true);
+      setErrorBanner(parsedCost.error);
+      document.getElementById('nb-cost-limit-input')?.focus();
+      return;
+    }
+
     setGenerateBusyKind(spec.kind);
     setErrorBanner(null);
     setNoticeBanner(null);
@@ -1555,6 +1721,9 @@ export function NotebookWorkspacePage({
       }
       if (scopedSourceIds) {
         body.source_ids = scopedSourceIds;
+      }
+      if (parsedCost.value !== undefined) {
+        body.cost_limit_usd = parsedCost.value;
       }
       const res = await apiFetch(
         `/v1/notebooks/${encodeURIComponent(selectedNotebookId)}/generate`,
@@ -1674,6 +1843,24 @@ export function NotebookWorkspacePage({
                       <button
                         type="button"
                         className="studio-link-btn"
+                        data-testid="export-notebook-json-btn"
+                        disabled={exportNotebookBusy}
+                        onClick={() => void handleExportNotebook('json')}
+                      >
+                        导出包 (.json)
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-link-btn"
+                        data-testid="export-notebook-brief-btn"
+                        disabled={exportNotebookBusy}
+                        onClick={() => void handleExportNotebook('brief')}
+                      >
+                        导出简报 (.md)
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-link-btn"
                         data-testid="open-rename-notebook-btn"
                         aria-expanded={renamingNotebook}
                         aria-controls="nb-rename-form"
@@ -1779,6 +1966,38 @@ export function NotebookWorkspacePage({
                   disabled={createNotebookBusy}
                 >
                   {createNotebookBusy ? '创建中…' : '新建'}
+                </button>
+              </div>
+            </form>
+
+            <form
+              className="nb-create-form"
+              method="POST"
+              action="/v1/notebooks/import"
+              aria-label="导入可移植笔记本包"
+              onSubmit={(ev) => void handleImportNotebook(ev)}
+            >
+              <label htmlFor="nb-import-bundle-file">导入可移植笔记本包 (.json)</label>
+              <div className="nb-create-form__row">
+                <input
+                  ref={importFileInputRef}
+                  id="nb-import-bundle-file"
+                  name="bundle_file"
+                  type="file"
+                  accept=".json,application/json"
+                  data-testid="import-notebook-file-input"
+                  onChange={(ev) => {
+                    setImportBundleFile(ev.target.files?.[0] ?? null);
+                    setErrorBanner(null);
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="studio-btn-secondary studio-btn-sm"
+                  data-testid="import-notebook-submit-btn"
+                  disabled={importNotebookBusy}
+                >
+                  {importNotebookBusy ? '导入中…' : '导入'}
                 </button>
               </div>
             </form>
@@ -2202,20 +2421,48 @@ export function NotebookWorkspacePage({
                   : '创建并选择笔记本后即可向资料提问或一键生成多模态成品'}
               </p>
             </div>
-            <div className="nb-model-box">
-              <label htmlFor="nb-model-input">生成模型 (model)</label>
-              <input
-                id="nb-model-input"
-                name="model"
-                type="text"
-                data-testid="notebook-model-input"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                placeholder="例如 gpt-4o / kimi-k2.6（留空读 YANSHI_GENERATE_MODEL）"
-                value={modelName}
-                onChange={(ev) => setModelName(ev.target.value)}
-              />
+            <div className="nb-studio-bar__controls">
+              <div className="nb-model-box">
+                <label htmlFor="nb-model-input">生成模型 (model)</label>
+                <input
+                  id="nb-model-input"
+                  name="model"
+                  type="text"
+                  data-testid="notebook-model-input"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="例如 gpt-4o / kimi-k2.6（留空读 YANSHI_GENERATE_MODEL）"
+                  value={modelName}
+                  onChange={(ev) => setModelName(ev.target.value)}
+                />
+              </div>
+              <div className="nb-cost-box">
+                <label htmlFor="nb-cost-limit-input">单次预算上限 ($ USD)</label>
+                <input
+                  id="nb-cost-limit-input"
+                  name="cost_limit_usd"
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  aria-invalid={costLimitInvalid ? 'true' : undefined}
+                  data-testid="notebook-cost-limit-input"
+                  placeholder="可选，如 2.50"
+                  value={costLimitUsdDraft}
+                  onChange={(ev) => {
+                    setCostLimitUsdDraft(ev.target.value);
+                    if (costLimitInvalid) {
+                      setCostLimitInvalid(false);
+                    }
+                  }}
+                  onBlur={() => {
+                    const checked = parseCostLimitUsdDraft(costLimitUsdDraft);
+                    setCostLimitInvalid(!checked.ok);
+                  }}
+                />
+              </div>
             </div>
           </div>
 
@@ -2427,14 +2674,27 @@ export function NotebookWorkspacePage({
           <div className="nb-card nb-card--gallery">
             <div className="nb-card__head">
               <h2>成品画廊 ({filteredArtifacts.length})</h2>
-              <button
-                type="button"
-                className="studio-link-btn"
-                disabled={!selectedNotebookId}
-                onClick={() => void loadNotebookDetailAndArtifacts(selectedNotebookId)}
-              >
-                刷新
-              </button>
+              <div className="nb-picker-actions">
+                {artifacts.length > 0 && (
+                  <button
+                    type="button"
+                    className="studio-link-btn"
+                    data-testid="download-notebook-zip-btn"
+                    disabled={!selectedNotebookId || zipDownloadBusy}
+                    onClick={() => void handleDownloadNotebookZip()}
+                  >
+                    {zipDownloadBusy ? '打包中…' : '打包下载 (.zip)'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="studio-link-btn"
+                  disabled={!selectedNotebookId}
+                  onClick={() => void loadNotebookDetailAndArtifacts(selectedNotebookId)}
+                >
+                  刷新
+                </button>
+              </div>
             </div>
 
             <div className="nb-gallery-filters" role="group" aria-label="按生成类型筛选成品">

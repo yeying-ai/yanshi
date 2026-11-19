@@ -38,3 +38,8 @@ commit-docs
 
 # Workflow run artifacts
 **/runs/
+
+# Playwright E2E reports & traces
+yanshi-ui/test-results/
+yanshi-ui/playwright-report/
+yanshi-ui/playwright-results.xml

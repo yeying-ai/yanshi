@@ -585,6 +585,30 @@ export const NotebookArtifactsEnvelopeSchema = z
   .loose();
 export type NotebookArtifactsEnvelope = z.infer<typeof NotebookArtifactsEnvelopeSchema>;
 
+export const NotebookExportBundleSchema = z
+  .object({
+    version: z.number(),
+    notebook: z
+      .object({
+        title: z.string(),
+      })
+      .loose(),
+    sources: z.array(z.unknown()),
+    deliverables: z.array(z.unknown()).optional().default([]),
+    markdown_brief: z.string().optional().default(''),
+  })
+  .loose();
+export type NotebookExportBundle = z.infer<typeof NotebookExportBundleSchema>;
+
+export const NotebookImportResponseSchema = z
+  .object({
+    notebook: NotebookSchema,
+    imported_sources: z.number(),
+    imported_chunks: z.number(),
+  })
+  .loose();
+export type NotebookImportResponse = z.infer<typeof NotebookImportResponseSchema>;
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /**

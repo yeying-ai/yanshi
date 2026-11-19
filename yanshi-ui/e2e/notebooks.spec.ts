@@ -1,5 +1,5 @@
 /**
- * Playwright E2E test for `/ui/notebooks` (`Track AC`).
+ * Playwright E2E test for `/ui/notebooks` (`Track AC` & `Track AD`).
  *
  * Exercises the Content Studio Notebook workspace against a live `yanshi-server`
  * without requiring any external LLM API keys:
@@ -9,7 +9,10 @@
  *      waits for background chunking to settle at `已就绪`.
  *   4. Runs BM25 passage search (`GET /v1/notebooks/:id/search`) and opens
  *      the cited chunk inside the native `<dialog>` preview.
- *   5. Deletes the notebook (`DELETE /v1/notebooks/:id`) via the confirmation
+ *   5. Exports a portable `.json` bundle (`GET /v1/notebooks/:id/export`),
+ *      re-imports it (`POST /v1/notebooks/import`), and verifies immediate BM25
+ *      search on the imported notebook.
+ *   6. Deletes both notebooks (`DELETE /v1/notebooks/:id`) via the confirmation
  *      `<dialog>`.
  */
 
@@ -17,11 +20,13 @@
 // @ts-ignore — @playwright/test is an optional dev dep installed in e2e jobs.
 import { expect, test } from '@playwright/test';
 
-const baseURL = process.env.BASE_URL ?? 'http://127.0.0.1:8080';
-const apiToken = process.env.YANSHI_API_TOKEN ?? '';
+const env = (globalThis as unknown as { process: { env: Record<string, string | undefined> } })
+  .process.env;
+const baseURL = env.BASE_URL ?? 'http://127.0.0.1:8080';
+const apiToken = env.YANSHI_API_TOKEN ?? '';
 
-test.describe('Content Studio — /ui/notebooks lifecycle & search', () => {
-  test('creates, renames, ingests text, searches BM25 chunks, previews citation dialog, and deletes', async ({
+test.describe('Content Studio — /ui/notebooks lifecycle, search & portable bundle round-trip', () => {
+  test('creates, renames, ingests text, searches BM25, exports/imports JSON bundle, and deletes', async ({
     page,
   }) => {
     await page.goto(`${baseURL}/ui/notebooks`);
@@ -37,6 +42,7 @@ test.describe('Content Studio — /ui/notebooks lifecycle & search', () => {
     await page.getByTestId('new-notebook-title-input').fill('Tidal Draft');
     await page.getByTestId('create-notebook-btn').click();
     await page.waitForURL(/\/ui\/notebooks\/[0-9a-f-]+$/i);
+    const originalUrl = page.url();
 
     // 2. Inline rename (`PATCH /v1/notebooks/:id`)
     await page.getByTestId('open-rename-notebook-btn').click();
@@ -67,7 +73,31 @@ test.describe('Content Studio — /ui/notebooks lifecycle & search', () => {
       .getByRole('button', { name: '关闭' })
       .click();
 
-    // 5. Delete notebook (`DELETE /v1/notebooks/:id`)
+    // 5. Export portable `.json` bundle & re-import into a second notebook
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByTestId('export-notebook-json-btn').click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/^yanshi-notebook-[0-9a-f]{8}\.json$/i);
+    const downloadedPath = await download.path();
+    expect(downloadedPath).toBeTruthy();
+
+    await page.getByTestId('import-notebook-file-input').setInputFiles(downloadedPath!);
+    await page.getByTestId('import-notebook-submit-btn').click();
+    await expect
+      .poll(() => page.url(), { timeout: 10_000 })
+      .not.toBe(originalUrl);
+    await expect(page.getByTestId('source-scope-bar')).toContainText('1/1 份就绪资料');
+
+    // Verify imported notebook is immediately searchable via BM25
+    await page.getByTestId('notebook-search-input').fill('equinoctial');
+    await page.getByTestId('notebook-search-submit').click();
+    await expect(page.getByRole('button', { name: /查看分块/ }).first()).toBeVisible();
+
+    // 6. Delete imported notebook, then delete original notebook
+    await page.getByTestId('open-delete-notebook-btn').click();
+    await page.getByTestId('confirm-delete-notebook-btn').click();
+    await expect(page).toHaveURL(originalUrl);
+
     await page.getByTestId('open-delete-notebook-btn').click();
     await page.getByTestId('confirm-delete-notebook-btn').click();
     await page.waitForURL(/\/ui\/notebooks$/);

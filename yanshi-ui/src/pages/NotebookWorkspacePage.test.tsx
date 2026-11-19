@@ -6,6 +6,8 @@ import {
   NotebookAskResponseSchema,
   NotebookChunkSchema,
   NotebookDetailEnvelopeSchema,
+  NotebookExportBundleSchema,
+  NotebookImportResponseSchema,
   NotebookSearchEnvelopeSchema,
 } from '../schemas';
 import { OFFICIAL_GENERATOR_PRESETS } from '../studio/generatorCatalog';
@@ -19,6 +21,7 @@ import {
   NotebookWorkspacePage,
   notebookArtifactToMediaItem,
   notebookIdFromPath,
+  parseCostLimitUsdDraft,
   resolveScopedSourceIds,
   STUDIO_GENERATORS,
 } from './NotebookWorkspacePage';
@@ -201,6 +204,9 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('data-testid="notebook-ask-card"');
     expect(html).toContain('data-testid="notebook-ask-input"');
     expect(html).toContain('data-testid="notebook-ask-submit"');
+    expect(html).toContain('data-testid="notebook-cost-limit-input"');
+    expect(html).toContain('data-testid="import-notebook-file-input"');
+    expect(html).toContain('data-testid="import-notebook-submit-btn"');
     expect(html).toContain('data-testid="chunk-lookup-input"');
     expect(html).toContain('data-testid="delete-notebook-dialog"');
     expect(html).toContain('data-testid="chunk-preview-dialog"');
@@ -316,5 +322,35 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('data-testid="citation-chip-src-2:1"');
     expect(html).toContain('Lunar Mechanics');
     expect(html).toContain('type="button"');
+  });
+
+  it('validates cost_limit_usd drafts and portable export/import Zod schemas', () => {
+    expect(parseCostLimitUsdDraft('   ')).toEqual({ ok: true, value: undefined });
+    expect(parseCostLimitUsdDraft(' 2.50 ')).toEqual({ ok: true, value: 2.5 });
+    expect(parseCostLimitUsdDraft('0').ok).toBe(false);
+    expect(parseCostLimitUsdDraft('-1.25').ok).toBe(false);
+    expect(parseCostLimitUsdDraft('abc').ok).toBe(false);
+
+    const bundle = NotebookExportBundleSchema.parse({
+      version: 1,
+      notebook: { id: 'nb-1', title: 'Macrotidal Archive' },
+      sources: [{ kind: 'text', title: 'Note', chunks: [] }],
+      markdown_brief: '# Macrotidal Archive\n',
+    });
+    expect(bundle.version).toBe(1);
+    expect(bundle.markdown_brief).toContain('Macrotidal Archive');
+
+    const imported = NotebookImportResponseSchema.parse({
+      notebook: {
+        id: 'nb-2',
+        tenant_id: 'default',
+        title: 'Macrotidal Archive',
+        created_at: '2026-11-19T00:00:00Z',
+        updated_at: '2026-11-19T00:00:00Z',
+      },
+      imported_sources: 1,
+      imported_chunks: 3,
+    });
+    expect(imported.imported_chunks).toBe(3);
   });
 });
