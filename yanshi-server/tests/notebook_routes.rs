@@ -166,7 +166,7 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   .await;
   assert_eq!(code, StatusCode::BAD_REQUEST, "empty recording payload");
 
-  // PDF upload and audio recording (transcribed via mock-asr).
+  // PDF, DOCX, CSV uploads and audio recording (transcribed via mock-asr).
   let pdf_bytes = minimal_pdf_bytes("Perigean king tides peak when the moon is closest.");
   let (code, pdf_src) = call(
     &state,
@@ -181,6 +181,69 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   )
   .await;
   assert_eq!(code, StatusCode::OK, "{pdf_src}");
+
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "corrupt.docx",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(b"not-a-zip")
+    })),
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::BAD_REQUEST,
+    "non-zip docx rejected at submit"
+  );
+
+  let docx_bytes = {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+      let mut zip = zip::ZipWriter::new(&mut cursor);
+      let opts = zip::write::SimpleFileOptions::default();
+      zip.start_file("word/document.xml", opts).expect("start");
+      zip
+        .write_all(
+          br#"<?xml version="1.0" encoding="UTF-8"?><w:document><w:body><w:p><w:r><w:t>Amphidromic nodes anchor zero-amplitude rotary tidal systems.</w:t></w:r></w:p></w:body></w:document>"#,
+        )
+        .expect("write");
+      zip.finish().expect("finish");
+    }
+    cursor.into_inner()
+  };
+  let (code, docx_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "amphidromic.docx",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(&docx_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{docx_src}");
+
+  let csv_bytes = b"estuary,macrotidal_range_m\nSevernBore,15.0\n";
+  let (code, csv_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "estuaries.csv",
+      "content_base64": base64::engine::general_purpose::STANDARD.encode(csv_bytes)
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{csv_src}");
 
   let dir = std::env::temp_dir().join(format!("yanshi-nb-routes-{}", std::process::id()));
   std::fs::create_dir_all(&dir).expect("dir");
@@ -210,7 +273,7 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(code, StatusCode::OK, "{rec_src}");
 
   let sources = settled_sources(&state, &tenant, &id).await;
-  assert_eq!(sources.len(), 5);
+  assert_eq!(sources.len(), 7);
   let by_kind = |kind: &str| {
     sources
       .iter()
@@ -280,6 +343,16 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(
     pdf_hits["chunks"][0]["source_id"], pdf_src["id"],
     "PDF text is searchable: {pdf_hits}"
+  );
+  let (_, docx_hits) = search(state.clone(), "Amphidromic").await;
+  assert_eq!(
+    docx_hits["chunks"][0]["source_id"], docx_src["id"],
+    "DOCX text is searchable: {docx_hits}"
+  );
+  let (_, csv_hits) = search(state.clone(), "SevernBore").await;
+  assert_eq!(
+    csv_hits["chunks"][0]["source_id"], csv_src["id"],
+    "CSV rows are searchable with column headers: {csv_hits}"
   );
   let (_, rec_hits) = search(state.clone(), "transcript").await;
   assert_eq!(

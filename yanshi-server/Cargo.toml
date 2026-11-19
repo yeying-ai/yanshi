@@ -34,6 +34,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Y1.3: artifact digests at registration + streamed downloads.
 sha2 = "0.10"
 tempfile = "3"
+csv = "1.3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-util = { version = "0.7.11", features = ["io"] }
 dirs = "5.0"

@@ -15,11 +15,12 @@
 //!
 //! Ingestion: fetch (`url`, through the http tool's SSRF filter: the URL
 //! is tenant-supplied), or take the pasted `text`, or decode an uploaded
-//! `file` (`.txt`, `.md`, `.html`, `.pdf`), or transcribe an uploaded
-//! audio `recording` via a configured ASR model; extract text (HTML and
-//! PDF via the RAG loaders, with `pdftotext` fallback when installed);
-//! chunk by paragraph; store the chunks in `source_chunks`; mark the
-//! source `ready` (or `failed`, with the reason).
+//! `file` (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.csv`, `.tsv`, `.json`),
+//! or transcribe an uploaded audio `recording` via a configured ASR model;
+//! extract text (HTML and PDF via the RAG loaders with `pdftotext` fallback,
+//! DOCX via pure-Rust WordprocessingML extraction, CSV/TSV/JSON with header
+//! labels preserved per row); chunk by paragraph; store the chunks in
+//! `source_chunks`; mark the source `ready` (or `failed`, with the reason).
 //!
 //! The index is derived, not stored: a notebook's BM25 index is built
 //! from its ready chunks on first search, cached in this process, and
@@ -49,6 +50,8 @@ use crate::{AppState, error::ApiError, tenant::TenantId};
 
 /// Uploaded / pasted sources larger than this are refused at submit.
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
+/// Uncompressed XML read ceiling when unpacking `.docx` archives (zip-bomb guard).
+const MAX_DOCX_XML_BYTES: usize = 16 * 1024 * 1024;
 /// Paragraph chunking: target size and overlap, in characters.
 const CHUNK_SIZE: usize = 1200;
 const CHUNK_OVERLAP: usize = 150;
@@ -214,7 +217,8 @@ pub enum AddSourceRequest {
     #[serde(default)]
     title: Option<String>,
   },
-  /// An uploaded document (`.txt`, `.md`, `.html`, `.pdf`), base64-encoded.
+  /// An uploaded document (`.txt`, `.md`, `.html`, `.pdf`, `.docx`, `.csv`,
+  /// `.tsv`, `.json`), base64-encoded.
   File {
     filename: String,
     content_base64: String,
@@ -244,6 +248,10 @@ enum BytesFormat {
   PlainText,
   Html,
   Pdf,
+  Docx,
+  Csv,
+  Tsv,
+  Json,
 }
 
 /// What ingestion starts from, resolved at submit time.
@@ -323,9 +331,13 @@ pub async fn add_source(
         "html" | "htm" => BytesFormat::Html,
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
         "pdf" => BytesFormat::Pdf,
+        "docx" => BytesFormat::Docx,
+        "csv" => BytesFormat::Csv,
+        "tsv" => BytesFormat::Tsv,
+        "json" => BytesFormat::Json,
         other => {
           return Err(ApiError::BadRequest(format!(
-            "unsupported file type '.{other}': upload .txt, .md, .html or .pdf"
+            "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .csv, .tsv or .json"
           )));
         }
       };
@@ -343,6 +355,11 @@ pub async fn add_source(
       if format == BytesFormat::Pdf && !bytes.starts_with(b"%PDF-") {
         return Err(ApiError::BadRequest(
           "file is not a valid PDF (missing %PDF- header)".into(),
+        ));
+      }
+      if format == BytesFormat::Docx && !bytes.starts_with(b"PK\x03\x04") {
+        return Err(ApiError::BadRequest(
+          "file is not a valid DOCX (missing PK zip header)".into(),
         ));
       }
       let resolved_title = title
@@ -504,10 +521,31 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
   match format {
     BytesFormat::Html => html_text(&bytes).await,
     BytesFormat::Pdf => pdf_text(&bytes).await,
+    BytesFormat::Docx => docx_text(&bytes),
+    BytesFormat::Csv => delimited_text(&bytes, b','),
+    BytesFormat::Tsv => delimited_text(&bytes, b'\t'),
+    BytesFormat::Json => json_text(&bytes),
     BytesFormat::PlainText => {
       String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())
     }
   }
+}
+
+fn url_path_extension(raw_url: &str) -> Option<String> {
+  let path = url::Url::parse(raw_url)
+    .ok()
+    .map(|u| u.path().to_string())
+    .unwrap_or_else(|| {
+      raw_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
+    });
+  FsPath::new(&path)
+    .extension()
+    .and_then(|e| e.to_str())
+    .map(str::to_ascii_lowercase)
 }
 
 /// GET `url` through the http tool's default policy, which refuses
@@ -526,13 +564,22 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
     return Err(format!("fetching {url} returned HTTP {}", response.status));
   }
   let bytes = response.body;
+  let ext = url_path_extension(url);
   let format = if bytes.starts_with(b"%PDF-") {
     BytesFormat::Pdf
+  } else if bytes.starts_with(b"PK\x03\x04") && ext.as_deref() == Some("docx") {
+    BytesFormat::Docx
   } else {
     let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
     let lowered = sample.trim_start().to_ascii_lowercase();
     if lowered.starts_with("<!doctype html") || lowered.contains("<html") {
       BytesFormat::Html
+    } else if ext.as_deref() == Some("csv") {
+      BytesFormat::Csv
+    } else if ext.as_deref() == Some("tsv") {
+      BytesFormat::Tsv
+    } else if ext.as_deref() == Some("json") {
+      BytesFormat::Json
     } else {
       BytesFormat::PlainText
     }
@@ -610,6 +657,273 @@ async fn pdftotext_fallback(pdf_path: &FsPath, id: Uuid) -> Result<String, Strin
   };
   let _ = tokio::fs::remove_file(&out_path).await;
   result
+}
+
+/// Pure-Rust OOXML `.docx` text extraction (`word/document.xml`, plus optional
+/// `word/footnotes.xml` and `word/endnotes.xml`), preserving paragraph breaks
+/// and table rows (`| cell1 | cell2 |`) while bounding uncompressed XML bytes
+/// against zip-bomb payloads.
+fn docx_text(bytes: &[u8]) -> Result<String, String> {
+  use std::io::Read as _;
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    .map_err(|e| format!("invalid DOCX archive: {e}"))?;
+
+  let mut budget_remaining = MAX_DOCX_XML_BYTES;
+  let mut sections: Vec<String> = Vec::new();
+  for entry_name in [
+    "word/document.xml",
+    "word/footnotes.xml",
+    "word/endnotes.xml",
+  ] {
+    let mut entry = match archive.by_name(entry_name) {
+      Ok(file) => file,
+      Err(zip::result::ZipError::FileNotFound) => {
+        if entry_name == "word/document.xml" {
+          return Err("invalid DOCX archive: missing word/document.xml".to_string());
+        }
+        continue;
+      }
+      Err(e) => return Err(format!("reading {entry_name} failed: {e}")),
+    };
+    let mut xml_bytes = Vec::new();
+    entry
+      .by_ref()
+      .take((budget_remaining as u64).saturating_add(1))
+      .read_to_end(&mut xml_bytes)
+      .map_err(|e| format!("decompressing {entry_name} failed: {e}"))?;
+    if xml_bytes.len() > budget_remaining {
+      return Err(format!(
+        "DOCX uncompressed XML exceeds {MAX_DOCX_XML_BYTES} bytes safety limit"
+      ));
+    }
+    budget_remaining -= xml_bytes.len();
+    let xml =
+      String::from_utf8(xml_bytes).map_err(|_| format!("{entry_name} is not valid UTF-8 XML"))?;
+    let extracted = extract_wordprocessingml_text(&xml);
+    if !extracted.trim().is_empty() {
+      sections.push(extracted);
+    }
+  }
+  Ok(sections.join("\n\n"))
+}
+
+fn extract_wordprocessingml_text(xml: &str) -> String {
+  let mut blocks: Vec<String> = Vec::new();
+  let mut current_para = String::new();
+  let mut in_text_run = false;
+  let mut table_depth: usize = 0;
+  let mut current_row: Vec<String> = Vec::new();
+  let mut current_cell_paras: Vec<String> = Vec::new();
+
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    if in_text_run && lt > 0 {
+      current_para.push_str(&decode_xml_entities(&rest[..lt]));
+    }
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let is_closing = raw_tag.starts_with('/');
+    let is_self_closing = raw_tag.ends_with('/');
+    let tag_body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+
+    match (tag_name, is_closing, is_self_closing) {
+      ("w:t" | "t", false, false) => {
+        in_text_run = true;
+      }
+      ("w:t" | "t", true, _) => {
+        in_text_run = false;
+      }
+      ("w:tab", false, _) => {
+        current_para.push('\t');
+      }
+      ("w:br" | "w:cr", false, _) => {
+        current_para.push('\n');
+      }
+      ("w:tbl", false, false) => {
+        let trimmed = current_para.trim();
+        if !trimmed.is_empty() {
+          blocks.push(trimmed.to_string());
+        }
+        current_para.clear();
+        table_depth += 1;
+      }
+      ("w:tbl", true, _) => {
+        table_depth = table_depth.saturating_sub(1);
+      }
+      ("w:tr", false, false) if table_depth > 0 => {
+        current_row.clear();
+      }
+      ("w:tc", false, false) if table_depth > 0 => {
+        current_cell_paras.clear();
+        current_para.clear();
+      }
+      ("w:p", true, _) => {
+        let trimmed = current_para.trim();
+        if !trimmed.is_empty() {
+          if table_depth > 0 {
+            current_cell_paras.push(trimmed.to_string());
+          } else {
+            blocks.push(trimmed.to_string());
+          }
+        }
+        current_para.clear();
+      }
+      ("w:tc", true, _) if table_depth > 0 => {
+        current_row.push(current_cell_paras.join(" "));
+        current_cell_paras.clear();
+      }
+      ("w:tr", true, _) if table_depth > 0 => {
+        if current_row.iter().any(|c| !c.trim().is_empty()) {
+          blocks.push(format!("| {} |", current_row.join(" | ")));
+        }
+        current_row.clear();
+      }
+      _ => {}
+    }
+  }
+  blocks.join("\n\n")
+}
+
+fn decode_xml_entities(input: &str) -> String {
+  if !input.contains('&') {
+    return input.to_string();
+  }
+  let mut out = String::with_capacity(input.len());
+  let mut rest = input;
+  while let Some(amp) = rest.find('&') {
+    out.push_str(&rest[..amp]);
+    let after = &rest[amp + 1..];
+    if let Some(semi) = after.find(';') {
+      let entity = &after[..semi];
+      let decoded = match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+          u32::from_str_radix(&entity[2..], 16)
+            .ok()
+            .and_then(char::from_u32)
+        }
+        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
+        _ => None,
+      };
+      if let Some(ch) = decoded {
+        out.push(ch);
+        rest = &after[semi + 1..];
+        continue;
+      }
+    }
+    out.push('&');
+    rest = after;
+  }
+  out.push_str(rest);
+  out
+}
+
+/// Format CSV / TSV tabular bytes into self-describing paragraph blocks
+/// (`Header: Value | ...`) so every chunk retains column labels during BM25
+/// search and downstream Studio generation.
+fn delimited_text(bytes: &[u8], delimiter: u8) -> Result<String, String> {
+  let raw = std::str::from_utf8(bytes)
+    .map_err(|_| "tabular file is not UTF-8 text".to_string())?
+    .trim_start_matches('\u{feff}');
+  let mut reader = csv::ReaderBuilder::new()
+    .delimiter(delimiter)
+    .flexible(true)
+    .from_reader(raw.as_bytes());
+  let headers: Vec<String> = reader
+    .headers()
+    .map_err(|e| format!("parsing table header failed: {e}"))?
+    .iter()
+    .map(|h| h.trim().to_string())
+    .collect();
+  if headers.is_empty() {
+    return Err("tabular file has no columns".to_string());
+  }
+
+  let mut lines: Vec<String> = Vec::new();
+  lines.push(format!("Columns: {}", headers.join(" | ")));
+
+  let mut current_group: Vec<String> = Vec::new();
+  for (row_idx, record) in reader.records().enumerate() {
+    let record = record.map_err(|e| format!("parsing row {} failed: {e}", row_idx + 1))?;
+    let pairs: Vec<String> = record
+      .iter()
+      .enumerate()
+      .filter_map(|(col_idx, cell)| {
+        let val = cell.trim();
+        if val.is_empty() {
+          return None;
+        }
+        let col_label = headers
+          .get(col_idx)
+          .filter(|h| !h.is_empty())
+          .cloned()
+          .unwrap_or_else(|| format!("col_{}", col_idx + 1));
+        Some(format!("{col_label}: {val}"))
+      })
+      .collect();
+    if !pairs.is_empty() {
+      current_group.push(format!("Row {}: {}", row_idx + 1, pairs.join(" | ")));
+      if current_group.len() >= 10 {
+        lines.push(current_group.join("\n"));
+        current_group.clear();
+      }
+    }
+  }
+  if !current_group.is_empty() {
+    lines.push(current_group.join("\n"));
+  }
+  Ok(lines.join("\n\n"))
+}
+
+/// Format structured JSON into paragraph-separated records for chunking & BM25.
+fn json_text(bytes: &[u8]) -> Result<String, String> {
+  let raw = std::str::from_utf8(bytes)
+    .map_err(|_| "JSON file is not UTF-8 text".to_string())?
+    .trim_start_matches('\u{feff}');
+  let parsed: Value = serde_json::from_str(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+  match parsed {
+    Value::Array(items) => {
+      let mut blocks = Vec::with_capacity(items.len());
+      for (idx, item) in items.into_iter().enumerate() {
+        match item {
+          Value::Object(map) => {
+            let pairs: Vec<String> = map
+              .into_iter()
+              .filter(|(_, v)| !v.is_null())
+              .map(|(k, v)| match v {
+                Value::String(s) => format!("{k}: {s}"),
+                other => format!("{k}: {other}"),
+              })
+              .collect();
+            if !pairs.is_empty() {
+              blocks.push(format!("Record {}: {}", idx + 1, pairs.join(" | ")));
+            }
+          }
+          other => {
+            blocks.push(format!(
+              "Record {}: {}",
+              idx + 1,
+              serde_json::to_string_pretty(&other).unwrap_or_default()
+            ));
+          }
+        }
+      }
+      Ok(blocks.join("\n\n"))
+    }
+    other => serde_json::to_string_pretty(&other).map_err(|e| format!("formatting JSON: {e}")),
+  }
 }
 
 /// Transcribe an uploaded audio recording via a registered ASR model.
@@ -1207,6 +1521,95 @@ mod tests {
       balanced.iter().any(|c| c.source_id == src_a)
         && balanced.iter().any(|c| c.source_id == src_b),
       "unfocused selection over budget must represent both sources"
+    );
+  }
+
+  fn build_docx_bytes(document_xml: &str) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+      let mut zip = zip::ZipWriter::new(&mut cursor);
+      let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+      zip.start_file("[Content_Types].xml", opts).expect("start");
+      zip
+        .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types/>")
+        .expect("write");
+      zip.start_file("word/document.xml", opts).expect("start");
+      zip.write_all(document_xml.as_bytes()).expect("write");
+      zip.finish().expect("finish");
+    }
+    cursor.into_inner()
+  }
+
+  #[test]
+  fn docx_extracts_paragraphs_tables_entities_and_blocks_oversized_xml() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+          <w:p><w:r><w:t>Amphidromic Ocean Dynamics &amp; Resonance</w:t></w:r></w:p>
+          <w:p><w:r><w:t>Coriolis deflection rotates tidal waves around amphidromic nodes.</w:t></w:r></w:p>
+          <w:tbl>
+            <w:tr>
+              <w:tc><w:p><w:r><w:t>Basin</w:t></w:r></w:p></w:tc>
+              <w:tc><w:p><w:r><w:t>Peak Range</w:t></w:r></w:p></w:tc>
+            </w:tr>
+            <w:tr>
+              <w:tc><w:p><w:r><w:t>Bay of Fundy</w:t></w:r></w:p></w:tc>
+              <w:tc><w:p><w:r><w:t>16.3 m</w:t></w:r></w:p></w:tc>
+            </w:tr>
+          </w:tbl>
+        </w:body>
+      </w:document>"#;
+    let docx = build_docx_bytes(xml);
+    let extracted = docx_text(&docx).expect("docx text");
+    assert!(
+      extracted.contains("Amphidromic Ocean Dynamics & Resonance"),
+      "{extracted}"
+    );
+    assert!(
+      extracted.contains("| Bay of Fundy | 16.3 m |"),
+      "{extracted}"
+    );
+
+    // Oversized deflated XML (> MAX_DOCX_XML_BYTES) is rejected cleanly.
+    let huge_xml = format!(
+      "<w:document><w:body><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:body></w:document>",
+      "A".repeat(MAX_DOCX_XML_BYTES + 1024)
+    );
+    let bomb = build_docx_bytes(&huge_xml);
+    assert!(
+      bomb.len() < MAX_SOURCE_BYTES,
+      "deflated payload fits upload size"
+    );
+    let err = docx_text(&bomb).expect_err("must reject oversized uncompressed XML");
+    assert!(err.contains("safety limit"), "{err}");
+  }
+
+  #[test]
+  fn csv_tsv_and_json_sources_preserve_field_labels() {
+    let csv = b"station,range_m,regime\nFundy,16.3,Semidiurnal\nSevern,15.0,Macrotidal\n";
+    let csv_out = delimited_text(csv, b',').expect("csv");
+    assert!(csv_out.contains("Columns: station | range_m | regime"));
+    assert!(csv_out.contains("Row 1: station: Fundy | range_m: 16.3 | regime: Semidiurnal"));
+
+    let tsv = b"metric\tvalue\np99_latency_ms\t4.2\n";
+    let tsv_out = delimited_text(tsv, b'\t').expect("tsv");
+    assert!(tsv_out.contains("Row 1: metric: p99_latency_ms | value: 4.2"));
+
+    let json_bytes = br#"[{"service":"gateway","qps":12500},{"service":"worker","qps":4200}]"#;
+    let json_out = json_text(json_bytes).expect("json");
+    assert!(
+      json_out.contains("Record 1:")
+        && json_out.contains("service: gateway")
+        && json_out.contains("qps: 12500"),
+      "{json_out}"
+    );
+    assert!(
+      json_out.contains("Record 2:")
+        && json_out.contains("service: worker")
+        && json_out.contains("qps: 4200"),
+      "{json_out}"
     );
   }
 }

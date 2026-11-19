@@ -1072,7 +1072,7 @@ export function NotebookWorkspacePage({
         };
       } else if (ingestTab === 'file') {
         if (!selectedUploadFile) {
-          throw new Error('请选择一个 .pdf、.txt、.md 或 .html 文档文件。');
+          throw new Error('请选择一个 .pdf、.docx、.csv、.tsv、.json、.txt、.md 或 .html 文档文件。');
         }
         const buffer = await selectedUploadFile.arrayBuffer();
         const contentBase64 = encodeBytesToBase64(new Uint8Array(buffer));
@@ -1534,13 +1534,13 @@ export function NotebookWorkspacePage({
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
                     <label htmlFor="nb-src-file">
-                      选择本地文档（支持 .pdf / .md / .txt / .html，≤10MB）
+                      选择本地文档或表格（支持 .pdf / .docx / .csv / .tsv / .json / .md / .txt / .html，≤10MB）
                     </label>
                     <input
                       id="nb-src-file"
                       name="file"
                       type="file"
-                      accept=".pdf,.txt,.md,.markdown,.html,.htm,application/pdf,text/plain,text/markdown,text/html"
+                      accept=".pdf,.docx,.csv,.tsv,.json,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,text/tab-separated-values,application/json,text/plain,text/markdown,text/html"
                       onChange={(ev) => setSelectedUploadFile(ev.target.files?.[0] ?? null)}
                     />
                   </div>

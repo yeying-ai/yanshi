@@ -193,7 +193,7 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('<search>');
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="nb-tab-recording"');
-    expect(html).toContain('accept=".pdf,');
+    expect(html).toContain('accept=".pdf,.docx,.csv,');
     expect(html).toContain('data-testid="chunk-lookup-input"');
     expect(html).toContain('data-testid="delete-notebook-dialog"');
     expect(html).toContain('data-testid="chunk-preview-dialog"');
