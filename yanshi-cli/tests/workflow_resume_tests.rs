@@ -165,3 +165,77 @@ fn checkpoint_is_rejected_in_server_mode() {
     .failure()
     .stderr(predicate::str::contains("--checkpoint is local-only"));
 }
+
+#[test]
+fn resume_restores_runtime_model_override_from_checkpoint_metadata() {
+  let fixture = Fixture::new();
+  fs::write(
+    fixture.home.path().join(".yanshi").join("models.yml"),
+    r#"
+models:
+  mock-chat:
+    vendor: mock
+    type: text
+    model_id: mock-chat
+providers:
+  mock:
+    api_key_env: MOCK_API_KEY
+"#,
+  )
+  .expect("write chat models.yml");
+
+  let note_path = fixture.work.path().join("gate.txt");
+  let llm_flow = fixture.work.path().join("llm_resume.yml");
+  fs::write(
+    &llm_flow,
+    format!(
+      r#"
+name: llm-resumable
+nodes:
+  - id: gate
+    type: file
+    parameters:
+      operation: read
+      path: "{gate}"
+      allowed_paths: ["{root}"]
+  - id: summarize
+    type: llm
+    dependencies: ["gate"]
+    parameters:
+      model: unregistered-default-model
+      prompt: "Echo: ${{{{gate.content}}}}"
+"#,
+      gate = note_path.display(),
+      root = fixture.work.path().display(),
+    ),
+  )
+  .expect("write llm_resume.yml");
+
+  // First run fails at `gate`, before `summarize` executes, while recording `-m mock-chat`.
+  let first = fixture
+    .yanshi()
+    .args(["workflow", "run"])
+    .arg(&llm_flow)
+    .arg("--run-dir")
+    .arg(fixture.runs())
+    .args(["--checkpoint", "-m", "mock-chat"])
+    .assert()
+    .failure();
+  let stdout = String::from_utf8_lossy(&first.get_output().stdout).to_string();
+  let run_id = run_id_from(&stdout);
+
+  fs::write(&note_path, "checkpoint model override works").expect("write gate");
+
+  // Resume WITHOUT `-m`: `summarize` only succeeds if `mock-chat` was restored from checkpoint metadata.
+  fixture
+    .yanshi()
+    .args(["workflow", "resume", &run_id])
+    .arg(&llm_flow)
+    .arg("--run-dir")
+    .arg(fixture.runs())
+    .env("YANSHI_MOCK_RESPONSE", "resumed-via-checkpoint-model")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("resumed to completion"))
+    .stdout(predicate::str::contains("resumed-via-checkpoint-model"));
+}

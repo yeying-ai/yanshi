@@ -78,6 +78,9 @@ pub struct FlowExecutionConfig {
   /// (`None` in local CLI / SDK; `Some(roots)` on multi-tenant gateway runs,
   /// where local reads must stay within the run's artifact root or `roots`).
   pub allowed_path_roots: Option<Vec<PathBuf>>,
+  /// Optional LLM model override recorded into checkpoints (`yanshi.model_override`)
+  /// so `workflow resume` can rebuild the `Flow` with the same `--model` flag.
+  pub model_override: Option<String>,
 }
 
 impl FlowExecutionConfig {
@@ -113,6 +116,7 @@ impl FlowExecutionConfig {
       debug_controller: None,
       question_handler: None,
       allowed_path_roots: None,
+      model_override: None,
     }
   }
 
@@ -174,6 +178,16 @@ impl FlowExecutionConfig {
     self.allowed_path_roots = Some(roots);
     self
   }
+
+  /// Record the `--model` override applied when constructing the `Flow` so
+  /// checkpoints persist and restore it across `workflow resume`.
+  pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
+    let trimmed = model.into();
+    if !trimmed.trim().is_empty() {
+      self.model_override = Some(trimmed);
+    }
+    self
+  }
 }
 
 impl Default for FlowExecutionConfig {
@@ -192,6 +206,7 @@ impl Default for FlowExecutionConfig {
       debug_controller: None,
       question_handler: None,
       allowed_path_roots: None,
+      model_override: None,
     }
   }
 }

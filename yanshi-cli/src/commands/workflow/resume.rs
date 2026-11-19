@@ -21,6 +21,7 @@ use crate::executor::build_flow_from_definition;
 pub async fn execute(
   run_id: String,
   workflow_file: String,
+  model: Option<String>,
   run_dir: Option<String>,
   force_replay: bool,
   output: Option<String>,
@@ -38,30 +39,48 @@ pub async fn execute(
     .context("Failed to resolve the run base directory")?;
   let dir = checkpoint_dir(&base, &run_id);
   let config = CheckpointConfig::default().with_checkpoint_dir(&dir);
-  let has_checkpoint = CheckpointManager::new(config.clone())
+  let Some(checkpoint) = CheckpointManager::new(config.clone())
     .context("Failed to open the checkpoint directory")?
     .load_latest_checkpoint(&run_id)
     .await
     .context("Failed to read the checkpoint")?
-    .is_some();
-  if !has_checkpoint {
+  else {
     bail!(
       "no checkpoint for run '{run_id}' under {} (was it started with --checkpoint, \
        and with the same --run-dir?)",
       dir.display()
     );
-  }
+  };
 
-  let flow = build_flow_from_definition(&flow_def, None)?
+  let explicit_model = model
+    .as_deref()
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+    .map(str::to_string);
+  let effective_model = explicit_model
+    .as_deref()
+    .or_else(|| checkpoint.recorded_model_override());
+
+  let flow = build_flow_from_definition(&flow_def, effective_model)?
     .with_checkpointing(config)
     .context("Failed to enable checkpointing")?;
   println!("🔁 Resuming run {run_id} from {}", dir.display());
+  if let Some(m) = effective_model {
+    println!("🤖 Model override: {m}");
+  }
 
   let cancel = FlowCancellationToken::new();
   let state = flow
-    .resume_with_config(&run_id, &ResumePlanOptions { force_replay }, |config| {
-      config.with_cancellation_token(cancel)
-    })
+    .resume_with_config(
+      &run_id,
+      &ResumePlanOptions { force_replay },
+      |mut config| {
+        if let Some(m) = explicit_model {
+          config = config.with_model_override(m);
+        }
+        config.with_cancellation_token(cancel)
+      },
+    )
     .await
     .with_context(|| format!("Failed to resume run '{run_id}'"))?;
   if let Some(error) = first_genuine_state_error(&state) {

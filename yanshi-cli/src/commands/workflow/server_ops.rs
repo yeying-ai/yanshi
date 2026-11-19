@@ -82,30 +82,32 @@ pub async fn cancel(
 ///   `--timeout`, `--max-retries`). Each error names the gap and
 ///   points at the local-mode workaround.
 ///
-/// `execution_mode_default` and `max_concurrency_default` are the
-/// flag defaults — the validation only fires when the operator
-/// explicitly chose something else (so passing `--execution-mode
-/// serial` with the default is a no-op).
+/// Options forwarded to `POST /v1/runs` and post-completion artifact retrieval
+/// when `yanshi workflow run --server` is invoked.
+pub struct ServerRunOptions<'a> {
+  pub inputs: &'a serde_json::Map<String, serde_json::Value>,
+  pub model: Option<&'a str>,
+  pub cost_limit_usd: Option<f64>,
+  pub max_concurrency: Option<usize>,
+  pub output_dir: Option<&'a std::path::Path>,
+  pub poll_timeout: std::time::Duration,
+}
+
+/// Reject `workflow run` flags that remain strictly local-only when
+/// dispatching via `--server` (`--run-dir`, `--output`, `--checkpoint`,
+/// `--watch`, `--dry-run`, `--max-retries`), and validate server-bound
+/// `--max-concurrency` / `--cost-limit-usd` up front before opening a socket.
 #[allow(clippy::too_many_arguments)]
 pub fn reject_local_only_flags(
-  model: Option<&str>,
-  execution_mode: &str,
-  execution_mode_default: &str,
   max_concurrency: usize,
-  max_concurrency_default: usize,
+  cost_limit_usd: Option<f64>,
   run_dir: Option<&str>,
   watch: bool,
   output: Option<&str>,
-  output_dir: Option<&str>,
   checkpoint: bool,
-  input: &[String],
   dry_run: bool,
-  timeout: &str,
-  timeout_default: &str,
   max_retries: u32,
 ) -> Result<()> {
-  // Always-local first — these are the clearest cases and their
-  // remedies are the most concrete.
   if run_dir.is_some() {
     anyhow::bail!(
       "--run-dir is local-only (the server controls its own filesystem layout under its \
@@ -125,13 +127,6 @@ pub fn reject_local_only_flags(
        when using --server and resume with POST /v1/runs/{{id}}:resume."
     );
   }
-  if output_dir.is_some() {
-    anyhow::bail!(
-      "--output-dir is local-only for now. In server mode, list a run's artifacts with \
-       GET /v1/runs/{{id}}/artifacts and download each from \
-       GET /v1/runs/{{id}}/artifacts/{{artifact_id}}."
-    );
-  }
   if watch {
     anyhow::bail!(
       "--watch is local-only (polls the in-process run state). In server mode, stream the \
@@ -145,50 +140,17 @@ pub fn reject_local_only_flags(
        once validation passes."
     );
   }
-
-  // Future API additions — the wire body could accept these once
-  // POST /v1/runs is extended; each message says so explicitly.
-  if model.is_some() {
-    anyhow::bail!(
-      "--model is not yet wired to the server (POST /v1/runs body does not accept a per-run \
-       model override today; tracked under P10.11.4). The server uses the model declared in \
-       each LLM node of the workflow YAML. Drop --model or run locally to override."
-    );
-  }
-  if execution_mode != execution_mode_default {
-    anyhow::bail!(
-      "--execution-mode '{execution_mode}' is not yet wired to the server (POST /v1/runs body \
-       does not accept an execution-mode override today; tracked under P10.11.4). The server \
-       runner uses its own configured mode. Drop --execution-mode or run locally."
-    );
-  }
-  if max_concurrency != max_concurrency_default {
-    anyhow::bail!(
-      "--max-concurrency {max_concurrency} is not yet wired to the server (POST /v1/runs body \
-       does not accept this override today; tracked under P10.11.4). Drop --max-concurrency \
-       or run locally."
-    );
-  }
-  if !input.is_empty() {
-    anyhow::bail!(
-      "--input is not yet wired to the server (POST /v1/runs body does not accept initial \
-       inputs today; tracked under P10.11.4). Either bake the values into the workflow YAML \
-       before submission, or run locally with --input."
-    );
-  }
-  if timeout != timeout_default {
-    anyhow::bail!(
-      "--timeout '{timeout}' is not yet wired to the server (POST /v1/runs body does not \
-       accept a per-run timeout today; tracked under P10.11.4). The server applies its own \
-       configured timeout. Drop --timeout or run locally."
-    );
-  }
   if max_retries != 0 {
     anyhow::bail!(
       "--max-retries {max_retries} is not yet wired to the server (POST /v1/runs body does \
-       not accept a per-run retry budget today; tracked under P10.11.4). Drop --max-retries \
-       or run locally."
+       not accept a per-run retry budget today). Drop --max-retries or run locally."
     );
+  }
+  if max_concurrency == 0 {
+    anyhow::bail!("--max-concurrency must be greater than zero");
+  }
+  if let Some(limit) = cost_limit_usd {
+    yanshi_config::config::v2::validate_cost_limit(limit).map_err(anyhow::Error::msg)?;
   }
   Ok(())
 }
@@ -440,32 +402,95 @@ fn format_event_text(event: &serde_json::Value) -> String {
   format!("[{seq}] {kind:<32} {ts} {payload_display}")
 }
 
+fn sanitize_remote_segment(raw: &str, fallback: &str) -> String {
+  let candidate = std::path::Path::new(raw)
+    .file_name()
+    .and_then(|n| n.to_str())
+    .map(str::trim)
+    .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+    .unwrap_or(fallback);
+  candidate.replace(['/', '\\'], "_")
+}
+
+async fn download_server_run_artifacts(
+  client: &ServerClient,
+  run_id: &str,
+  out_dir: &std::path::Path,
+) -> Result<usize> {
+  use anyhow::Context as _;
+  use sha2::{Digest as _, Sha256};
+
+  std::fs::create_dir_all(out_dir)
+    .with_context(|| format!("failed to create output directory {}", out_dir.display()))?;
+  let art_env = client.list_run_artifacts(run_id).await?;
+  let art_list = art_env["artifacts"]
+    .as_array()
+    .cloned()
+    .or_else(|| art_env.as_array().cloned())
+    .unwrap_or_default();
+
+  let mut manifest_entries = Vec::with_capacity(art_list.len());
+  for art in art_list {
+    let art_id = art["id"].as_str().context("artifact entry missing id")?;
+    let node_id =
+      sanitize_remote_segment(art["node_id"].as_str().unwrap_or("artifact"), "artifact");
+    let file_name = sanitize_remote_segment(art["name"].as_str().unwrap_or(art_id), art_id);
+    let bytes = client.download_run_artifact(run_id, art_id).await?;
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let node_dir = out_dir.join(&node_id);
+    std::fs::create_dir_all(&node_dir)
+      .with_context(|| format!("failed to create {}", node_dir.display()))?;
+    let dest = node_dir.join(&file_name);
+    std::fs::write(&dest, &bytes).with_context(|| format!("failed to write {}", dest.display()))?;
+    manifest_entries.push(serde_json::json!({
+      "id": art_id,
+      "node_id": node_id,
+      "file": format!("{node_id}/{file_name}"),
+      "mime_type": art["mime_type"],
+      "size_bytes": bytes.len(),
+      "sha256": sha256,
+    }));
+  }
+
+  let manifest_path = out_dir.join(super::artifacts::MANIFEST_FILE);
+  std::fs::write(
+    &manifest_path,
+    serde_json::to_vec_pretty(&serde_json::json!({
+      "run_id": run_id,
+      "artifacts": manifest_entries,
+    }))?,
+  )
+  .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+  Ok(manifest_entries.len())
+}
+
 /// Submit a workflow body via the server and poll until terminal.
-/// Returns the final run JSON from `GET /v1/runs/{id}`.
-///
-/// `format` chooses the stdout shape:
-/// - `"text"` (default): emoji submit line + final pretty JSON on stdout.
-/// - `"json-envelope"`: submit / poll progress lines go to **stderr** so
-///   stdout stays a single parseable `CliJsonEnvelope`. Non-success
-///   terminal status surfaces in `envelope.errors[]`.
+/// Returns `Err` when the run ends in `failed` or `cancelled` so CI / shell
+/// callers observe a non-zero exit code.
 pub async fn run_via_server(
   server_url: &str,
   auth_token: Option<&str>,
   tenant: Option<&str>,
   workflow_text: &str,
   format: &str,
+  opts: ServerRunOptions<'_>,
 ) -> Result<()> {
   let is_envelope = format == "json-envelope";
   let client = build_client(server_url, auth_token, tenant)?;
-  let submission = client.submit_run(workflow_text).await?;
+  let submission = client
+    .submit_run_with_options(
+      workflow_text,
+      Some(opts.inputs),
+      opts.model,
+      opts.cost_limit_usd,
+      opts.max_concurrency,
+    )
+    .await?;
   let run_id = submission["run_id"]
     .as_str()
     .ok_or_else(|| anyhow::anyhow!("server response missing run_id: {submission}"))?
     .to_string();
 
-  // Progress goes to stderr in envelope mode so stdout stays clean
-  // for `jq` consumers. Text mode keeps the original stdout
-  // behaviour for back-compat with shell logs that captured it.
   let progress_line = format!(
     "📋 Submitted run {run_id}; status: {}",
     submission["status"]
@@ -476,23 +501,29 @@ pub async fn run_via_server(
     println!("{progress_line}");
   }
 
-  // Poll the run until it reaches a terminal status. The server flips
-  // the row to `succeeded` / `failed` / `cancelled` once the inline
-  // executor finishes. Bounded so a stuck server doesn't hang the CLI.
-  const POLL_TIMEOUT_MS: u64 = 60_000;
   const POLL_INTERVAL_MS: u64 = 250;
-  let mut waited = 0u64;
+  let deadline =
+    std::time::Instant::now() + opts.poll_timeout.max(std::time::Duration::from_millis(1));
   loop {
     let row = client.get_run(&run_id).await?;
     let status = row["status"].as_str().unwrap_or("unknown");
     if matches!(status, "succeeded" | "failed" | "cancelled") {
+      if status == "succeeded"
+        && let Some(out_dir) = opts.output_dir
+      {
+        let count = download_server_run_artifacts(&client, &run_id, out_dir).await?;
+        let dl_msg = format!(
+          "📤 Downloaded {count} artifact(s) to {} (manifest: {})",
+          out_dir.display(),
+          super::artifacts::MANIFEST_FILE
+        );
+        if is_envelope {
+          eprintln!("{dl_msg}");
+        } else {
+          println!("{dl_msg}");
+        }
+      }
       if is_envelope {
-        // P3.3 migration: wrap the terminal run row in the canonical
-        // envelope. Non-success statuses populate `errors[]` so
-        // shell tooling can branch on `errors.length > 0` without
-        // walking `result.status`. The bare run row stays available
-        // as `envelope.result` so consumers who pinned to the legacy
-        // shape migrate by reading `envelope.result.<field>`.
         let errors: Vec<String> = if status == "succeeded" {
           Vec::new()
         } else {
@@ -504,15 +535,23 @@ pub async fn run_via_server(
       } else {
         println!("{}", serde_json::to_string_pretty(&row)?);
       }
+      if status != "succeeded" {
+        let err_detail = row["error"]
+          .as_str()
+          .filter(|e| !e.trim().is_empty())
+          .map(|e| format!(": {e}"))
+          .unwrap_or_default();
+        anyhow::bail!("run {run_id} ended with status '{status}'{err_detail}");
+      }
       return Ok(());
     }
-    if waited >= POLL_TIMEOUT_MS {
+    if std::time::Instant::now() >= deadline {
       anyhow::bail!(
-        "run {run_id} did not reach a terminal status within {POLL_TIMEOUT_MS} ms; last status: {status}"
+        "run {run_id} did not reach a terminal status within {:?}; last status: {status}",
+        opts.poll_timeout
       );
     }
     tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
-    waited += POLL_INTERVAL_MS;
   }
 }
 
@@ -582,60 +621,38 @@ mod tests {
   /// inherits the shape.
   #[allow(clippy::too_many_arguments)]
   fn run_validator(
-    model: Option<&str>,
-    execution_mode: &str,
     max_concurrency: usize,
+    cost_limit_usd: Option<f64>,
     run_dir: Option<&str>,
     watch: bool,
     output: Option<&str>,
-    input: &[String],
+    checkpoint: bool,
     dry_run: bool,
-    timeout: &str,
     max_retries: u32,
   ) -> Result<()> {
     reject_local_only_flags(
-      model,
-      execution_mode,
-      "serial",
       max_concurrency,
-      4,
+      cost_limit_usd,
       run_dir,
       watch,
       output,
-      None,
-      false,
-      input,
+      checkpoint,
       dry_run,
-      timeout,
-      "60s",
       max_retries,
     )
   }
 
   #[test]
   fn workflow_run_server_baseline_passes() {
-    // Defaults across the board must yield Ok — otherwise every
-    // operator's first `workflow run --server <url> <file>` would
-    // get rejected.
-    run_validator(None, "serial", 4, None, false, None, &[], false, "60s", 0)
-      .expect("defaults must pass");
+    run_validator(4, None, None, false, None, false, false, 0).expect("defaults must pass");
+    run_validator(8, Some(1.5), None, false, None, false, false, 0)
+      .expect("wired concurrency + cost_limit_usd must pass");
   }
 
   #[test]
   fn workflow_run_server_rejects_run_dir_as_local_only() {
-    let err = run_validator(
-      None,
-      "serial",
-      4,
-      Some("/tmp/x"),
-      false,
-      None,
-      &[],
-      false,
-      "60s",
-      0,
-    )
-    .expect_err("--run-dir must be rejected");
+    let err = run_validator(4, None, Some("/tmp/x"), false, None, false, false, 0)
+      .expect_err("--run-dir must be rejected");
     let msg = err.to_string();
     assert!(msg.contains("--run-dir is local-only"), "{msg}");
     assert!(
@@ -646,22 +663,10 @@ mod tests {
 
   #[test]
   fn workflow_run_server_rejects_output_path_with_alternative_hint() {
-    let err = run_validator(
-      None,
-      "serial",
-      4,
-      None,
-      false,
-      Some("out.json"),
-      &[],
-      false,
-      "60s",
-      0,
-    )
-    .expect_err("--output must be rejected");
+    let err = run_validator(4, None, None, false, Some("out.json"), false, false, 0)
+      .expect_err("--output must be rejected");
     let msg = err.to_string();
     assert!(msg.contains("--output 'out.json' is local-only"), "{msg}");
-    // The error must point the operator at the in-band alternatives.
     assert!(
       msg.contains("json-envelope") || msg.contains("workflow logs"),
       "{msg}"
@@ -670,139 +675,40 @@ mod tests {
 
   #[test]
   fn workflow_run_server_rejects_watch_with_logs_alternative() {
-    let err = run_validator(None, "serial", 4, None, true, None, &[], false, "60s", 0)
+    let err = run_validator(4, None, None, true, None, false, false, 0)
       .expect_err("--watch must be rejected");
     let msg = err.to_string();
     assert!(msg.contains("--watch is local-only"), "{msg}");
-    // Operators get the workflow logs --follow alternative explicitly.
     assert!(msg.contains("workflow logs"), "{msg}");
     assert!(msg.contains("--follow"), "{msg}");
   }
 
   #[test]
   fn workflow_run_server_rejects_dry_run_with_validate_alternative() {
-    let err = run_validator(None, "serial", 4, None, false, None, &[], true, "60s", 0)
+    let err = run_validator(4, None, None, false, None, false, true, 0)
       .expect_err("--dry-run must be rejected");
     let msg = err.to_string();
     assert!(msg.contains("--dry-run is local-only"), "{msg}");
-    // The clean alternative for a dry-run-then-submit pattern is
-    // `workflow validate`; the error names it.
     assert!(msg.contains("workflow validate"), "{msg}");
   }
 
   #[test]
-  fn workflow_run_server_rejects_model_with_future_api_note() {
-    let err = run_validator(
-      Some("gpt-4o"),
-      "serial",
-      4,
-      None,
-      false,
-      None,
-      &[],
-      false,
-      "60s",
-      0,
-    )
-    .expect_err("--model must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("--model is not yet wired"), "{msg}");
-    // The "future API addition" caveat names P10.11.4 so curious
-    // operators can trace it back.
-    assert!(msg.contains("P10.11.4"), "{msg}");
-  }
-
-  #[test]
-  fn workflow_run_server_rejects_execution_mode_when_explicitly_set() {
-    // Defaults pass; only the explicit override trips the guard.
-    let err = run_validator(
-      None,
-      "concurrent",
-      4,
-      None,
-      false,
-      None,
-      &[],
-      false,
-      "60s",
-      0,
-    )
-    .expect_err("--execution-mode concurrent must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("--execution-mode 'concurrent'"), "{msg}");
-    assert!(msg.contains("P10.11.4"), "{msg}");
-  }
-
-  #[test]
-  fn workflow_run_server_accepts_execution_mode_at_default_value() {
-    // Passing `--execution-mode serial` explicitly is the same as
-    // the default; the validator must not trip.
-    run_validator(None, "serial", 4, None, false, None, &[], false, "60s", 0)
-      .expect("explicit default value must pass");
-  }
-
-  #[test]
-  fn workflow_run_server_rejects_max_concurrency_when_changed() {
-    let err = run_validator(None, "serial", 16, None, false, None, &[], false, "60s", 0)
-      .expect_err("--max-concurrency 16 must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("--max-concurrency 16"), "{msg}");
-  }
-
-  #[test]
-  fn workflow_run_server_rejects_input_pairs_with_yaml_inline_hint() {
-    let inputs = vec!["k".to_string(), "v".to_string()];
-    let err = run_validator(
-      None, "serial", 4, None, false, None, &inputs, false, "60s", 0,
-    )
-    .expect_err("--input must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("--input is not yet wired"), "{msg}");
-    // Operators get the "bake into YAML" workaround explicitly.
-    assert!(msg.contains("workflow YAML"), "{msg}");
-  }
-
-  #[test]
-  fn workflow_run_server_rejects_timeout_when_changed() {
-    let err = run_validator(None, "serial", 4, None, false, None, &[], false, "120s", 0)
-      .expect_err("--timeout 120s must be rejected");
-    let msg = err.to_string();
-    assert!(msg.contains("--timeout '120s'"), "{msg}");
-  }
-
-  #[test]
   fn workflow_run_server_rejects_max_retries_when_nonzero() {
-    let err = run_validator(None, "serial", 4, None, false, None, &[], false, "60s", 3)
+    let err = run_validator(4, None, None, false, None, false, false, 3)
       .expect_err("--max-retries 3 must be rejected");
     let msg = err.to_string();
     assert!(msg.contains("--max-retries 3"), "{msg}");
   }
 
-  /// Guard ordering invariant: when multiple local-only flags are
-  /// set at once, the always-local category fires first (run_dir
-  /// before model). Pin this so a future refactor doesn't silently
-  /// flip the order and start surfacing a less-actionable error
-  /// when both are set.
   #[test]
-  fn workflow_run_server_rejects_always_local_before_future_api() {
-    let err = run_validator(
-      Some("gpt-4o"),
-      "serial",
-      4,
-      Some("/tmp/x"),
-      false,
-      None,
-      &[],
-      false,
-      "60s",
-      0,
-    )
-    .expect_err("both flags set must still err");
-    let msg = err.to_string();
-    assert!(
-      msg.contains("--run-dir"),
-      "always-local --run-dir must surface first when both set: {msg}",
-    );
+  fn workflow_run_server_validates_zero_concurrency_and_bad_cost_limit() {
+    let zero = run_validator(0, None, None, false, None, false, false, 0)
+      .expect_err("--max-concurrency 0 must fail");
+    assert!(zero.to_string().contains("--max-concurrency"));
+
+    let bad_cost = run_validator(4, Some(0.0), None, false, None, false, false, 0)
+      .expect_err("--cost-limit-usd 0 must fail");
+    assert!(bad_cost.to_string().contains("cost_limit_usd"));
   }
 
   /// P10.11.1: --follow + --format json-envelope is rejected with

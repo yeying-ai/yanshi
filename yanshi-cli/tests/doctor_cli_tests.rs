@@ -792,3 +792,81 @@ entrypoint = "bin/dummy"
   );
   assert_eq!(entry["entrypoint_exists"], true);
 }
+
+#[test]
+fn doctor_text_output_renders_installations_section() {
+  let home = TempDir::new().unwrap();
+  let mcp_toml = home.path().join(".yanshi/mcp.toml");
+  std::fs::create_dir_all(mcp_toml.parent().unwrap()).unwrap();
+  std::fs::write(
+    &mcp_toml,
+    r#"
+[[mcp_servers]]
+name = "demo_echo"
+command = "/bin/echo"
+"#,
+  )
+  .unwrap();
+
+  let mut cmd = Command::cargo_bin("yanshi").unwrap();
+  cmd
+    .args(["doctor", "--profile", "dev", "--check-installations"])
+    .env("HOME", home.path())
+    .env("YANSHI_MCP_CONFIG", &mcp_toml);
+  let output = cmd.output().unwrap();
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(
+    stdout.contains("Installations:"),
+    "expected Installations section in text output: {stdout}"
+  );
+  assert!(
+    stdout.contains("mcp servers (1):"),
+    "expected mcp servers summary in text output: {stdout}"
+  );
+  assert!(
+    stdout.contains("demo_echo"),
+    "expected demo_echo server in text output: {stdout}"
+  );
+}
+
+#[test]
+fn doctor_invalid_mcp_toml_promotes_status_to_warning_and_exits_nonzero() {
+  let home = TempDir::new().unwrap();
+  let yanshi_dir = home.path().join(".yanshi");
+  std::fs::create_dir_all(&yanshi_dir).unwrap();
+  let models_yml = yanshi_dir.join("models.yml");
+  std::fs::write(
+    &models_yml,
+    "models:\n  m:\n    vendor: mock\n    type: text\n    model_id: m\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n",
+  )
+  .unwrap();
+  let mcp_toml = yanshi_dir.join("mcp.toml");
+  std::fs::write(&mcp_toml, "not = [valid toml").unwrap();
+
+  let mut cmd = Command::cargo_bin("yanshi").unwrap();
+  cmd
+    .args([
+      "doctor",
+      "--profile",
+      "dev",
+      "--format",
+      "json",
+      "--check-installations",
+    ])
+    .env("HOME", home.path())
+    .env("YANSHI_MODELS_CONFIG", &models_yml)
+    .env("YANSHI_MCP_CONFIG", &mcp_toml);
+  let output = cmd.output().unwrap();
+  assert_eq!(
+    output.status.code(),
+    Some(1),
+    "invalid mcp.toml must promote otherwise-ok dev profile to warning (exit 1)"
+  );
+  let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(report["status"], "warning");
+  assert!(
+    report["installations"]["mcp_config_source"]
+      .as_str()
+      .is_some_and(|s| s.starts_with("error loading mcp.toml:"))
+  );
+}

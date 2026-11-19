@@ -128,110 +128,98 @@ fn cli_workflow_run_server_rejects_dry_run() {
   assert!(stderr.contains("workflow validate"), "{stderr}");
 }
 
-#[test]
-fn cli_workflow_run_server_rejects_model_with_future_api_note() {
+#[tokio::test]
+async fn cli_workflow_run_server_forwards_inputs_model_cost_concurrency_and_exits_nonzero_on_failure()
+ {
+  use axum::{
+    Json, Router,
+    routing::{get, post},
+  };
+  use serde_json::{Value, json};
+  use std::sync::{Arc, Mutex};
+
+  let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+  let captured_post = captured.clone();
+  let app = Router::new()
+    .route(
+      "/v1/runs",
+      post(move |Json(body): Json<Value>| {
+        let cap = captured_post.clone();
+        async move {
+          *cap.lock().expect("lock") = Some(body);
+          Json(json!({
+            "run_id": "00000000-0000-0000-0000-000000000042",
+            "status": "queued"
+          }))
+        }
+      }),
+    )
+    .route(
+      "/v1/runs/:id",
+      get(|| async {
+        Json(json!({
+          "id": "00000000-0000-0000-0000-000000000042",
+          "status": "failed",
+          "error": "node 'render' failed: upstream quota"
+        }))
+      }),
+    );
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  tokio::spawn(async move {
+    let _ = axum::serve(listener, app).await;
+  });
+  let server_url = format!("http://{addr}");
+
   let (_dir, path) = write_workflow();
-  let assert = cli_bin()
-    .args([
-      "workflow",
-      "run",
-      path.to_str().unwrap(),
-      "--server",
-      "http://127.0.0.1:1",
-      "--model",
-      "gpt-4o",
-    ])
-    .assert()
-    .failure();
+  let assert = tokio::task::spawn_blocking(move || {
+    cli_bin()
+      .args([
+        "workflow",
+        "run",
+        path.to_str().unwrap(),
+        "--server",
+        &server_url,
+        "--model",
+        "gpt-5-mini",
+        "--cost-limit-usd",
+        "1.25",
+        "--execution-mode",
+        "concurrent",
+        "--max-concurrency",
+        "6",
+        "--input",
+        "topic=tides",
+        "--input",
+        "count=3",
+        "--timeout",
+        "15s",
+      ])
+      .assert()
+      .failure()
+  })
+  .await
+  .expect("join");
+
   let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
   assert!(
-    stderr.contains("--model is not yet wired"),
-    "stderr must explain the rejection: {stderr}"
+    stderr.contains("ended with status 'failed'") && stderr.contains("upstream quota"),
+    "failed remote run must exit non-zero and report error: {stderr}"
   );
-  // Future-API addition messages name the tracking ID so curious
-  // operators can find the follow-up work.
-  assert!(stderr.contains("P10.11.4"), "{stderr}");
-}
 
-#[test]
-fn cli_workflow_run_server_rejects_execution_mode_when_overridden() {
-  let (_dir, path) = write_workflow();
-  let assert = cli_bin()
-    .args([
-      "workflow",
-      "run",
-      path.to_str().unwrap(),
-      "--server",
-      "http://127.0.0.1:1",
-      "--execution-mode",
-      "concurrent",
-    ])
-    .assert()
-    .failure();
-  let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-  assert!(
-    stderr.contains("--execution-mode 'concurrent'"),
-    "stderr must quote the override: {stderr}"
-  );
-}
-
-#[test]
-fn cli_workflow_run_server_rejects_max_concurrency_when_changed() {
-  let (_dir, path) = write_workflow();
-  let assert = cli_bin()
-    .args([
-      "workflow",
-      "run",
-      path.to_str().unwrap(),
-      "--server",
-      "http://127.0.0.1:1",
-      "--max-concurrency",
-      "16",
-    ])
-    .assert()
-    .failure();
-  let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-  assert!(stderr.contains("--max-concurrency 16"), "{stderr}");
-}
-
-#[test]
-fn cli_workflow_run_server_rejects_input_pairs() {
-  let (_dir, path) = write_workflow();
-  let assert = cli_bin()
-    .args([
-      "workflow",
-      "run",
-      path.to_str().unwrap(),
-      "--server",
-      "http://127.0.0.1:1",
-      "--input",
-      "key",
-      "value",
-    ])
-    .assert()
-    .failure();
-  let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-  assert!(stderr.contains("--input is not yet wired"), "{stderr}");
-  assert!(stderr.contains("workflow YAML"), "{stderr}");
-}
-
-#[test]
-fn cli_workflow_run_server_rejects_timeout_when_overridden() {
-  let (_dir, path) = write_workflow();
-  let assert = cli_bin()
-    .args([
-      "workflow",
-      "run",
-      path.to_str().unwrap(),
-      "--server",
-      "http://127.0.0.1:1",
-      "--timeout",
-      "120s",
-    ])
-    .assert()
-    .failure();
-  let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-  assert!(stderr.contains("--timeout '120s'"), "{stderr}");
+  let body = captured
+    .lock()
+    .expect("lock")
+    .clone()
+    .expect("POST /v1/runs body captured");
+  assert_eq!(body["model"], "gpt-5-mini");
+  assert_eq!(body["cost_limit_usd"], 1.25);
+  assert_eq!(body["max_concurrency"], 6);
+  assert_eq!(body["inputs"]["topic"], "tides");
+  assert_eq!(body["inputs"]["count"], 3);
 }
 
 #[test]

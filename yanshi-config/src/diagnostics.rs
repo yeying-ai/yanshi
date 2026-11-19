@@ -566,6 +566,16 @@ pub async fn build_report(
     None
   };
   if let Some(probe) = installations_report.as_ref() {
+    if probe
+      .mcp_config_source
+      .as_deref()
+      .is_some_and(|src| src.starts_with("error loading mcp.toml:"))
+    {
+      status.promote(match profile {
+        DoctorProfile::Production => DoctorStatus::Fail,
+        _ => DoctorStatus::Warning,
+      });
+    }
     for server_probe in &probe.mcp_servers {
       if !server_probe.reachable {
         status.promote(match profile {
@@ -936,13 +946,30 @@ fn probe_writable(dir: &Path) -> bool {
   }
 }
 
+fn is_loopback_http_url(raw_url: &str) -> bool {
+  let Ok(parsed) = reqwest::Url::parse(raw_url.trim()) else {
+    return false;
+  };
+  let Some(host) = parsed.host_str() else {
+    return false;
+  };
+  let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+  if unbracketed.eq_ignore_ascii_case("localhost") {
+    return true;
+  }
+  unbracketed
+    .parse::<std::net::IpAddr>()
+    .is_ok_and(|ip| ip.is_loopback())
+}
+
 async fn probe_server(url: &str) -> ServerReport {
   let trimmed = url.trim_end_matches('/');
   let health = format!("{trimmed}/health");
-  let client = match reqwest::Client::builder()
-    .timeout(std::time::Duration::from_secs(3))
-    .build()
-  {
+  let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3));
+  if is_loopback_http_url(trimmed) {
+    builder = builder.no_proxy();
+  }
+  let client = match builder.build() {
     Ok(client) => client,
     Err(err) => {
       return ServerReport {
@@ -1372,6 +1399,65 @@ pub fn print_text_report(report: &DoctorReport) {
     print_dir_check("marketplace cache", &backup.marketplace_cache);
     print_dir_check("skills dir", &backup.skills_dir);
     print_dir_check("plugins dir", &backup.plugins_dir);
+    println!();
+  }
+
+  if let Some(inst) = &report.installations {
+    println!("Installations:");
+    println!(
+      "  skills root: {}",
+      optional_path(inst.skills_root.as_deref())
+    );
+    println!(
+      "  plugins root: {}",
+      optional_path(inst.plugins_root.as_deref())
+    );
+    if let Some(source) = &inst.mcp_config_source {
+      println!("  mcp config: {source}");
+    }
+    if inst.mcp_servers.is_empty() {
+      println!("  mcp servers: none");
+    } else {
+      println!("  mcp servers ({}):", inst.mcp_servers.len());
+      for srv in &inst.mcp_servers {
+        let scope = srv
+          .skill
+          .as_deref()
+          .map(|sk| format!("skill:{sk} -> "))
+          .unwrap_or_default();
+        let reach = if srv.reachable { "ok" } else { "missing" };
+        println!("    {scope}{}: {} ({reach})", srv.server, srv.command);
+      }
+    }
+    if inst.plugins.is_empty() {
+      println!("  plugins: none");
+    } else {
+      println!("  plugins ({}):", inst.plugins.len());
+      for plug in &inst.plugins {
+        let exists_label = if plug.entrypoint_exists {
+          "ok"
+        } else {
+          "missing"
+        };
+        let dry_suffix = match &plug.dry_run {
+          None => String::new(),
+          Some(dr) => match &dr.outcome {
+            DryRunOutcomeReport::Passed { exit_code } => {
+              format!(", dry-run: passed (exit {exit_code}, {}ms)", dr.duration_ms)
+            }
+            DryRunOutcomeReport::Failed { kind } => {
+              format!(", dry-run: failed ({kind:?}, {}ms)", dr.duration_ms)
+            }
+          },
+        };
+        println!(
+          "    {}@{}: {} ({exists_label}{dry_suffix})",
+          plug.name,
+          plug.version,
+          plug.entrypoint.display()
+        );
+      }
+    }
     println!();
   }
 

@@ -88,6 +88,8 @@ pub mod run_metadata {
   pub const MAX_CONCURRENCY: &str = "yanshi.max_concurrency";
   pub const COST_LIMIT_USD: &str = "yanshi.cost_limit_usd";
   pub const RUN_BASE_DIR: &str = "yanshi.run_base_dir";
+  /// Optional `--model` override supplied when building the workflow.
+  pub const MODEL_OVERRIDE: &str = "yanshi.model_override";
 }
 
 /// Y2.4: the metadata the executor stores with each checkpoint.
@@ -119,10 +121,27 @@ pub fn run_metadata_for(
       dir.to_string_lossy().into_owned(),
     );
   }
+  if let Some(model) = config
+    .model_override
+    .as_deref()
+    .map(str::trim)
+    .filter(|m| !m.is_empty())
+  {
+    metadata.insert(run_metadata::MODEL_OVERRIDE.to_string(), model.to_string());
+  }
   metadata
 }
 
 impl Checkpoint {
+  /// Optional `--model` override recorded when the original run started.
+  pub fn recorded_model_override(&self) -> Option<&str> {
+    self
+      .metadata
+      .get(run_metadata::MODEL_OVERRIDE)
+      .map(|s| s.trim())
+      .filter(|s| !s.is_empty())
+  }
+
   /// Y2.4: the run's initial inputs. Empty for checkpoints written
   /// before Y2.4; an unreadable value is an error rather than a silent
   /// resume with missing inputs.
@@ -161,6 +180,9 @@ impl Checkpoint {
     }
     if let Some(dir) = get(run_metadata::RUN_BASE_DIR) {
       config = config.with_run_base_dir(PathBuf::from(dir));
+    }
+    if let Some(model) = self.recorded_model_override() {
+      config = config.with_model_override(model);
     }
     config
   }

@@ -25,6 +25,7 @@ pub async fn execute(
   watch: bool,
   output: Option<String>,
   model: Option<String>,
+  cost_limit_usd: Option<f64>,
   input: Vec<(String, String)>,
   dry_run: bool,
   timeout: String,
@@ -126,8 +127,11 @@ pub async fn execute(
   let timeout_duration =
     parse_duration(&timeout).with_context(|| format!("Invalid --timeout value '{}'", timeout))?;
   let mut execution_config = parse_execution_config(&execution_mode, max_concurrency, run_dir)?;
+  if let Some(m) = &model {
+    execution_config = execution_config.with_model_override(m.clone());
+  }
   if let Some(limit) = flow_def
-    .effective_cost_limit(None)
+    .effective_cost_limit(cost_limit_usd)
     .map_err(anyhow::Error::msg)?
   {
     println!("💰 Cost limit: ${limit:.4}");
@@ -296,11 +300,11 @@ fn parse_inputs(input: Vec<(String, String)>) -> Result<AsyncNodeInputs> {
   Ok(inputs)
 }
 
-fn parse_input_value(raw_value: &str) -> Value {
+pub(super) fn parse_input_value(raw_value: &str) -> Value {
   serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_string()))
 }
 
-fn parse_duration(raw: &str) -> Result<Duration> {
+pub(super) fn parse_duration(raw: &str) -> Result<Duration> {
   let raw = raw.trim();
   if raw.is_empty() {
     bail!("duration cannot be empty");

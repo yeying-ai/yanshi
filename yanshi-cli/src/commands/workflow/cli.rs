@@ -19,6 +19,9 @@ enum WorkflowCommands {
     /// Override the model used by LLM nodes in this workflow
     #[arg(short = 'm', long)]
     model: Option<String>,
+    /// Optional USD spend cap for this run (`> 0`)
+    #[arg(long = "cost-limit-usd", value_name = "USD")]
+    cost_limit_usd: Option<f64>,
     /// Workflow input as `--input KEY VALUE` or `--input KEY=VALUE` (repeatable)
     #[arg(short, long, num_args = 1..=2, value_names = ["KEY[=VALUE]", "VALUE"])]
     input: Vec<String>,
@@ -157,6 +160,9 @@ enum WorkflowCommands {
     run_id: String,
     /// The workflow file the run was started from
     workflow_file: String,
+    /// Override the model used by LLM nodes when resuming (defaults to the original run's `--model` if recorded)
+    #[arg(short = 'm', long)]
+    model: Option<String>,
     /// Run base directory the run used (default: YANSHI_RUN_DIR or ~/.yanshi/runs)
     #[arg(long)]
     run_dir: Option<String>,
@@ -295,6 +301,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       watch,
       output,
       model,
+      cost_limit_usd,
       input,
       dry_run,
       timeout,
@@ -310,53 +317,69 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       format,
     } => {
       let input_pairs = crate::commands::parse_input_flag_tokens(&input)?;
-      // Server-mode short-circuits the in-process executor when
-      // --server (or YANSHI_SERVER_URL) is set. P10.11.4
-      // closed the silent-drop class of bug: every per-run knob
-      // the local executor consumes is now rejected up front
-      // with an actionable message naming the local mode
-      // alternative or future-API status.
       if let Some(server_url) = crate::server_client::resolve_server_url(server.as_deref()) {
-        // Defaults must match the clap flag definitions above —
-        // the validator only fires when the operator explicitly
-        // overrode them.
         const EXECUTION_MODE_DEFAULT: &str = "serial";
         const MAX_CONCURRENCY_DEFAULT: usize = 4;
         const TIMEOUT_DEFAULT: &str = "60s";
-        let validation = server_ops::reject_local_only_flags(
-          model.as_deref(),
-          &execution_mode,
-          EXECUTION_MODE_DEFAULT,
+        server_ops::reject_local_only_flags(
           max_concurrency,
-          MAX_CONCURRENCY_DEFAULT,
+          cost_limit_usd,
           run_dir.as_deref(),
           watch,
           output.as_deref(),
-          output_dir.as_deref(),
           checkpoint,
-          &input,
           dry_run,
-          &timeout,
-          TIMEOUT_DEFAULT,
           max_retries,
-        );
-        match validation {
-          Err(err) => Err(err),
-          Ok(()) => match std::fs::read_to_string(&workflow_file) {
-            Ok(body) => {
-              server_ops::run_via_server(
-                &server_url,
-                auth_token.as_deref(),
-                tenant.as_deref(),
-                &body,
-                &format,
-              )
-              .await
-            }
-            Err(e) => Err(anyhow::anyhow!(
-              "failed to read workflow file '{workflow_file}': {e}"
-            )),
-          },
+        )?;
+        let poll_timeout = if timeout == TIMEOUT_DEFAULT {
+          std::time::Duration::from_secs(600)
+        } else {
+          run::parse_duration(&timeout)
+            .map_err(|e| anyhow::anyhow!("Invalid --timeout value '{timeout}': {e}"))?
+        };
+        let mut input_map = serde_json::Map::new();
+        for (k, raw_v) in input_pairs {
+          if k.trim().is_empty() {
+            anyhow::bail!("Input key cannot be empty");
+          }
+          input_map.insert(k, run::parse_input_value(&raw_v));
+        }
+        let server_max_concurrency = if execution_mode != EXECUTION_MODE_DEFAULT
+          || max_concurrency != MAX_CONCURRENCY_DEFAULT
+        {
+          Some(
+            if execution_mode == "serial" && max_concurrency == MAX_CONCURRENCY_DEFAULT {
+              1
+            } else {
+              max_concurrency
+            },
+          )
+        } else {
+          None
+        };
+        let out_path = output_dir.as_deref().map(std::path::PathBuf::from);
+        match std::fs::read_to_string(&workflow_file) {
+          Ok(body) => {
+            server_ops::run_via_server(
+              &server_url,
+              auth_token.as_deref(),
+              tenant.as_deref(),
+              &body,
+              &format,
+              server_ops::ServerRunOptions {
+                inputs: &input_map,
+                model: model.as_deref(),
+                cost_limit_usd,
+                max_concurrency: server_max_concurrency,
+                output_dir: out_path.as_deref(),
+                poll_timeout,
+              },
+            )
+            .await
+          }
+          Err(e) => Err(anyhow::anyhow!(
+            "failed to read workflow file '{workflow_file}': {e}"
+          )),
         }
       } else {
         run::execute(
@@ -364,6 +387,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
           watch,
           output,
           model,
+          cost_limit_usd,
           input_pairs,
           dry_run,
           timeout,
@@ -457,6 +481,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
     WorkflowCommands::Resume {
       run_id,
       workflow_file,
+      model,
       run_dir,
       force_replay,
       output,
@@ -465,6 +490,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       resume::execute(
         run_id,
         workflow_file,
+        model,
         run_dir,
         force_replay,
         output,

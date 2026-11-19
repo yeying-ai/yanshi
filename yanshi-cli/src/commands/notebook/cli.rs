@@ -96,7 +96,7 @@ pub enum NotebookCommands {
     #[arg(long)]
     title: Option<String>,
   },
-  /// Add a URL, pasted text, local document (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html), or audio recording
+  /// Add a URL, pasted text, local document (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html/.srt/.vtt), or audio recording
   AddSource {
     /// Notebook UUID
     notebook_id: String,
@@ -106,7 +106,7 @@ pub enum NotebookCommands {
     /// Inline text note
     #[arg(long, conflicts_with_all = ["url", "file", "recording"])]
     text: Option<String>,
-    /// Local document file path (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`)
+    /// Local document file path (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`, `.srt`, `.vtt`)
     #[arg(long, value_name = "PATH", conflicts_with_all = ["url", "text", "recording"])]
     file: Option<PathBuf>,
     /// Local audio recording file path (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.webm`, `.aac`)
@@ -323,6 +323,16 @@ pub enum NotebookCommands {
   Artifacts {
     /// Notebook UUID
     notebook_id: String,
+  },
+  /// Attach primary/preview deliverables of a completed Studio or workflow run (`POST /v1/notebooks/{id}/artifacts`)
+  AttachRun {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Completed workflow / Studio run UUID
+    run_id: String,
+    /// Optional deliverable kind override (inferred from the run's `Deliverable` output when omitted)
+    #[arg(long)]
+    kind: Option<String>,
   },
   /// Detach an artifact from a notebook (`DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`)
   RemoveArtifact {
@@ -541,11 +551,13 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&imported)?);
       } else {
         println!(
-          "Imported notebook {}  {} ({} sources, {} chunks)",
+          "Imported notebook {}  {} ({} sources, {} chunks, {} deliverables, {} messages)",
           imported["notebook"]["id"].as_str().unwrap_or("?"),
           imported["notebook"]["title"].as_str().unwrap_or(""),
           imported["imported_sources"].as_u64().unwrap_or(0),
-          imported["imported_chunks"].as_u64().unwrap_or(0)
+          imported["imported_chunks"].as_u64().unwrap_or(0),
+          imported["imported_deliverables"].as_u64().unwrap_or(0),
+          imported["imported_messages"].as_u64().unwrap_or(0),
         );
       }
     }
@@ -1218,6 +1230,26 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
             );
           }
         }
+      }
+    }
+    NotebookCommands::AttachRun {
+      notebook_id,
+      run_id,
+      kind,
+    } => {
+      let attached = client
+        .attach_notebook_run(&notebook_id, &run_id, kind.as_deref())
+        .await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&attached)?);
+      } else {
+        println!(
+          "Attached {} deliverable file(s) from run {} to notebook {} [{}]",
+          attached["attached_count"].as_u64().unwrap_or(0),
+          attached["run_id"].as_str().unwrap_or(&run_id),
+          attached["notebook_id"].as_str().unwrap_or(&notebook_id),
+          attached["kind"].as_str().unwrap_or("report"),
+        );
       }
     }
     NotebookCommands::RemoveArtifact {

@@ -90,6 +90,38 @@ fn resolve_tenant_id_from(flag: Option<&str>, env_value: Option<&str>) -> String
     .unwrap_or_else(|| "default".to_string())
 }
 
+pub(crate) fn is_loopback_url(raw_url: &str) -> bool {
+  let Ok(parsed) = reqwest::Url::parse(raw_url.trim()) else {
+    return false;
+  };
+  let Some(host) = parsed.host_str() else {
+    return false;
+  };
+  let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+  if unbracketed.eq_ignore_ascii_case("localhost") {
+    return true;
+  }
+  unbracketed
+    .parse::<std::net::IpAddr>()
+    .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn build_http_client(
+  base_url: &str,
+  timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Client> {
+  let mut builder = reqwest::Client::builder();
+  if is_loopback_url(base_url) {
+    builder = builder.no_proxy();
+  }
+  if let Some(dur) = timeout {
+    builder = builder.timeout(dur);
+  }
+  builder
+    .build()
+    .context("failed to build server HTTP client")
+}
+
 /// Thin HTTP wrapper for the v1 control-plane API.
 pub struct ServerClient {
   base_url: String,
@@ -102,18 +134,14 @@ impl ServerClient {
   /// Build a client targeting `base_url`. `auth_token` is added as
   /// `Authorization: Bearer <token>` on every request when present.
   ///
-  /// The underlying reqwest client disables system proxies — `localhost`
-  /// roundtrips through a Clash/V2Ray-style HTTP proxy on macOS
-  /// otherwise (see CLAUDE.md "Rust HTTP Testing Guidelines"). The
-  /// reasoning applies to CLI use against a local `yanshi serve` too.
+  /// System proxies are bypassed automatically when `base_url` targets a
+  /// loopback host (`localhost`, `127.0.0.1`, `[::1]`) while remaining
+  /// enabled for remote HTTPS gateways behind corporate/HTTP proxies.
   pub fn new(base_url: String, auth_token: Option<String>, tenant_id: String) -> Result<Self> {
-    let http = reqwest::Client::builder()
-      .no_proxy()
-      .timeout(std::time::Duration::from_secs(30))
-      .build()
-      .context("failed to build server HTTP client")?;
+    let clean_base = trim_trailing_slash(base_url);
+    let http = build_http_client(&clean_base, Some(std::time::Duration::from_secs(30)))?;
     Ok(Self {
-      base_url: trim_trailing_slash(base_url),
+      base_url: clean_base,
       http,
       auth_token,
       tenant_id,
@@ -144,16 +172,49 @@ impl ServerClient {
   /// `POST /v1/runs` — submit a workflow body. Returns the parsed JSON
   /// `{ run_id, status }` envelope.
   pub async fn submit_run(&self, workflow: &str) -> Result<Value> {
-    let body = serde_json::json!({
-      "workflow": workflow,
-      "tenant_id": self.tenant_id,
-    });
+    self
+      .submit_run_with_options(workflow, None, None, None, None)
+      .await
+  }
+
+  /// `POST /v1/runs` — submit a workflow body with optional declared `inputs`,
+  /// `model` override, `cost_limit_usd`, and `max_concurrency`.
+  pub async fn submit_run_with_options(
+    &self,
+    workflow: &str,
+    inputs: Option<&serde_json::Map<String, Value>>,
+    model: Option<&str>,
+    cost_limit_usd: Option<f64>,
+    max_concurrency: Option<usize>,
+  ) -> Result<Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("workflow".to_string(), Value::String(workflow.to_string()));
+    body.insert(
+      "tenant_id".to_string(),
+      Value::String(self.tenant_id.clone()),
+    );
+    if let Some(inp) = inputs
+      && !inp.is_empty()
+    {
+      body.insert("inputs".to_string(), Value::Object(inp.clone()));
+    }
+    if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+      body.insert("model".to_string(), Value::String(m.to_string()));
+    }
+    if let Some(limit) = cost_limit_usd
+      && let Some(num) = serde_json::Number::from_f64(limit)
+    {
+      body.insert("cost_limit_usd".to_string(), Value::Number(num));
+    }
+    if let Some(conc) = max_concurrency {
+      body.insert("max_concurrency".to_string(), Value::Number(conc.into()));
+    }
     let response = self
       .http
       .post(self.url("/v1/runs"))
       .headers(self.auth_headers())
       .header(CONTENT_TYPE, "application/json")
-      .body(body.to_string())
+      .body(Value::Object(body).to_string())
       .send()
       .await
       .context("failed to POST /v1/runs")?;
@@ -289,13 +350,8 @@ impl ServerClient {
     // The default 30s `ServerClient` timeout would tear down a live
     // SSE follow inside a minute; build a dedicated long-lived
     // client for this single request.
-    let follow_client = reqwest::Client::builder()
-      .no_proxy()
-      // No request-level timeout: SSE streams stay open indefinitely
-      // (the server uses a 15s keep-alive). A read-timeout could
-      // belong here in the future but isn't required for v1.
-      .build()
-      .context("failed to build SSE follow HTTP client")?;
+    let follow_client =
+      build_http_client(&self.base_url, None).context("failed to build SSE follow HTTP client")?;
     let response = follow_client
       .get(url)
       .headers(self.auth_headers())
@@ -531,10 +587,7 @@ impl ServerClient {
   /// `POST /v1/notebooks/{id}/ask` — ask a source-grounded question with cited chunks.
   pub async fn ask_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
     let path = format!("/v1/notebooks/{}/ask", encode_uri_segment(notebook_id));
-    let client = reqwest::Client::builder()
-      .no_proxy()
-      .timeout(std::time::Duration::from_secs(180))
-      .build()
+    let client = build_http_client(&self.base_url, Some(std::time::Duration::from_secs(180)))
       .context("failed to build HTTP client for notebook ask")?;
     let response = client
       .post(self.url(&path))
@@ -643,10 +696,7 @@ impl ServerClient {
   /// `POST /v1/notebooks/{id}/plan` — plan a multi-deliverable Studio batch from a natural-language goal.
   pub async fn plan_notebook(&self, notebook_id: &str, body: &Value) -> Result<Value> {
     let path = format!("/v1/notebooks/{}/plan", encode_uri_segment(notebook_id));
-    let client = reqwest::Client::builder()
-      .no_proxy()
-      .timeout(std::time::Duration::from_secs(180))
-      .build()
+    let client = build_http_client(&self.base_url, Some(std::time::Duration::from_secs(180)))
       .context("failed to build HTTP client for notebook plan")?;
     let response = client
       .post(self.url(&path))
@@ -693,6 +743,34 @@ impl ServerClient {
     expect_success(response).await
   }
 
+  /// `POST /v1/notebooks/{id}/artifacts` — attach primary/preview deliverables of a succeeded run.
+  pub async fn attach_notebook_run(
+    &self,
+    notebook_id: &str,
+    run_id: &str,
+    kind: Option<&str>,
+  ) -> Result<Value> {
+    let path = format!(
+      "/v1/notebooks/{}/artifacts",
+      encode_uri_segment(notebook_id)
+    );
+    let mut body = serde_json::Map::new();
+    body.insert("run_id".to_string(), Value::String(run_id.to_string()));
+    if let Some(k) = kind.map(str::trim).filter(|s| !s.is_empty()) {
+      body.insert("kind".to_string(), Value::String(k.to_string()));
+    }
+    let response = self
+      .http
+      .post(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(Value::Object(body).to_string())
+      .send()
+      .await
+      .context("failed to POST /v1/notebooks/{id}/artifacts")?;
+    expect_success(response).await
+  }
+
   /// `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}` — detach an artifact (`204 No Content`).
   pub async fn delete_notebook_artifact(&self, notebook_id: &str, artifact_id: &str) -> Result<()> {
     let path = format!(
@@ -716,10 +794,7 @@ impl ServerClient {
       "/v1/notebooks/{}/artifacts.zip",
       encode_uri_segment(notebook_id)
     );
-    let client = reqwest::Client::builder()
-      .no_proxy()
-      .timeout(std::time::Duration::from_secs(300))
-      .build()
+    let client = build_http_client(&self.base_url, Some(std::time::Duration::from_secs(300)))
       .context("failed to build notebook zip download HTTP client")?;
     let response = client
       .get(self.url(&path))
@@ -750,10 +825,7 @@ impl ServerClient {
       encode_uri_segment(run_id),
       encode_uri_segment(artifact_id)
     );
-    let client = reqwest::Client::builder()
-      .no_proxy()
-      .timeout(std::time::Duration::from_secs(300))
-      .build()
+    let client = build_http_client(&self.base_url, Some(std::time::Duration::from_secs(300)))
       .context("failed to build artifact download HTTP client")?;
     let response = client
       .get(self.url(&path))
@@ -982,5 +1054,14 @@ mod tests {
   fn parse_sse_event_payload_ignores_structural_fields_without_data() {
     let raw = "id: 42\nevent: heartbeat\n\n";
     assert!(parse_sse_event_payload(raw).is_none());
+  }
+
+  #[test]
+  fn is_loopback_url_distinguishes_loopback_from_remote_hosts() {
+    assert!(is_loopback_url("http://127.0.0.1:8080"));
+    assert!(is_loopback_url("http://localhost:8080/v1"));
+    assert!(is_loopback_url("http://[::1]:8080"));
+    assert!(!is_loopback_url("https://studio.example.com"));
+    assert!(!is_loopback_url("http://10.0.0.42:8080"));
   }
 }

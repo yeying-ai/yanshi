@@ -236,7 +236,50 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
         Json(json!({
           "notebook": { "id": Uuid::new_v4(), "title": "Imported Tidal Copy" },
           "imported_sources": 1,
-          "imported_chunks": 1
+          "imported_chunks": 1,
+          "imported_deliverables": 1,
+          "imported_messages": 0
+        }))
+      }),
+    )
+    .route(
+      "/v1/notebooks/:id/artifacts",
+      get({
+        let art_get_id = art_id.clone();
+        let run_art_id = run_id.clone();
+        move |Path(id): Path<String>| {
+          let art_get_id = art_get_id.clone();
+          let run_art_id = run_art_id.clone();
+          async move {
+            Json(json!({
+              "artifacts": [{
+                "id": art_get_id,
+                "notebook_id": id,
+                "run_id": run_art_id,
+                "kind": "data_table",
+                "deliverable": {
+                  "title": "Macrotidal Basin Metrics",
+                  "summary": "Peak spring tidal ranges.",
+                  "files": [{ "artifact_id": art_get_id, "name": "1.csv", "role": "primary" }]
+                }
+              }]
+            }))
+          }
+        }
+      })
+      .post(|Path(id): Path<String>, Json(body): Json<Value>| async move {
+        assert_eq!(body["kind"], "briefing");
+        Json(json!({
+          "notebook_id": id,
+          "run_id": body["run_id"],
+          "kind": "briefing",
+          "attached_count": 1,
+          "artifacts": [{
+            "id": Uuid::new_v4(),
+            "notebook_id": id,
+            "run_id": body["run_id"],
+            "kind": "briefing"
+          }]
         }))
       }),
     )
@@ -527,6 +570,18 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
   .expect("generate-batch");
   assert_eq!(batch_sub["runs"][0]["kind"], "flashcards");
 
+  let attached = bin_run(vec![
+    "attach-run".into(),
+    nb_id.clone(),
+    run_id.clone(),
+    "--kind".into(),
+    "briefing".into(),
+  ])
+  .await
+  .expect("attach-run");
+  assert_eq!(attached["attached_count"], 1);
+  assert_eq!(attached["kind"], "briefing");
+
   // 6. Remove artifact, remove source & delete notebook
   let removed_art = bin_run(vec!["remove-artifact".into(), nb_id.clone(), art_id])
     .await
@@ -718,10 +773,41 @@ async fn notebook_cli_runs_against_live_postgres_gateway_when_configured() {
   ])
   .await
   .expect("live import");
+  assert_eq!(imported["imported_deliverables"], 2);
   let imported_id = imported["notebook"]["id"]
     .as_str()
     .expect("imported id")
     .to_string();
+  let imported_arts = run_cli(vec!["artifacts".into(), imported_id.clone()])
+    .await
+    .expect("imported artifacts");
+  assert_eq!(
+    imported_arts["artifacts"][0]["deliverable"]["title"],
+    "Severn Tidal Table"
+  );
+  let srt_file = temp.path().join("lecture.srt");
+  std::fs::write(
+    &srt_file,
+    b"1\n00:00:01,000 --> 00:00:03,500\nBristolChannelTidalBore crests at 14.8m.\n",
+  )
+  .expect("write srt");
+  let _ = run_cli(vec![
+    "add-source".into(),
+    imported_id.clone(),
+    "--file".into(),
+    srt_file.display().to_string(),
+    "--wait".into(),
+  ])
+  .await
+  .expect("add srt source");
+  let srt_hits = run_cli(vec![
+    "search".into(),
+    imported_id.clone(),
+    "BristolChannelTidalBore".into(),
+  ])
+  .await
+  .expect("search srt");
+  assert_eq!(srt_hits["chunks"].as_array().map(Vec::len), Some(1));
   let imported_search = run_cli(vec!["search".into(), imported_id.clone(), "Severn".into()])
     .await
     .expect("search imported");

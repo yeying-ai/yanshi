@@ -23,6 +23,7 @@
 //! - `POST   /v1/notebooks/:id/generate` (all 12 compiled-in Studio generators + `cost_limit_usd`)
 //! - `POST   /v1/notebooks/:id/generate-batch`
 //! - `GET    /v1/notebooks/:id/artifacts` (including `deliverable` JSON)
+//! - `POST   /v1/notebooks/:id/artifacts` (attach a completed Studio / workflow run)
 //! - `GET    /v1/notebooks/:id/artifacts.zip` (`<kind>/<file>` + `BRIEFING.md` + manifest)
 //! - `DELETE /v1/notebooks/:id/artifacts/:artifact_id`
 
@@ -193,6 +194,8 @@ struct PersistedNotebookBundle {
   #[serde(default)]
   sources: Vec<LocalSource>,
   #[serde(default)]
+  raw_texts: HashMap<Uuid, String>,
+  #[serde(default)]
   artifacts: Vec<LocalNotebookArtifact>,
   #[serde(default)]
   messages: Vec<LocalNotebookMessage>,
@@ -201,6 +204,7 @@ struct PersistedNotebookBundle {
 struct NotebookEntry {
   notebook: LocalNotebook,
   sources: Vec<LocalSource>,
+  raw_texts_by_source: HashMap<Uuid, String>,
   chunks_by_source: HashMap<Uuid, Vec<LocalSourceChunk>>,
   artifacts: Vec<LocalNotebookArtifact>,
   messages: Vec<LocalNotebookMessage>,
@@ -269,7 +273,7 @@ impl LocalNotebooksState {
     notebooks_root_dir(&self.base_dir).join(notebook_id.to_string())
   }
 
-  fn attach_run_artifacts(
+  pub(crate) fn attach_run_artifacts(
     &self,
     tenant_id: &str,
     notebook_id: Uuid,
@@ -277,16 +281,19 @@ impl LocalNotebooksState {
     run_id: Uuid,
     summaries: &[LocalArtifactSummary],
     deliverable: Option<&Value>,
-  ) {
-    if summaries.is_empty() {
-      return;
+  ) -> usize {
+    let curated = select_local_deliverable_summaries(summaries, deliverable);
+    if curated.is_empty() {
+      return 0;
     }
-    let prepared: Vec<LocalNotebookArtifact> = summaries
-      .iter()
+    let prepared: Vec<LocalNotebookArtifact> = curated
+      .into_iter()
       .map(|summary| {
-        let sha256 = std::fs::read(&summary.file_path)
-          .ok()
-          .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
+        let sha256 = summary.sha256.clone().or_else(|| {
+          std::fs::read(&summary.file_path)
+            .ok()
+            .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+        });
         LocalNotebookArtifact {
           kind: kind.to_string(),
           deliverable: deliverable.cloned(),
@@ -307,12 +314,13 @@ impl LocalNotebooksState {
     let nb_dir = self.notebook_dir(notebook_id);
     let mut guard = self.lock_entries();
     let Some(entry) = guard.get_mut(&notebook_id) else {
-      return;
+      return 0;
     };
     if entry.notebook.tenant_id != tenant_id {
-      return;
+      return 0;
     }
     let mut changed = false;
+    let mut attached_count = 0usize;
     for candidate in prepared {
       if let Some(existing) = entry.artifacts.iter_mut().find(|a| a.id == candidate.id) {
         if existing.deliverable.is_none() && candidate.deliverable.is_some() {
@@ -321,6 +329,7 @@ impl LocalNotebooksState {
         }
       } else {
         entry.artifacts.push(candidate);
+        attached_count += 1;
         changed = true;
       }
     }
@@ -328,7 +337,43 @@ impl LocalNotebooksState {
       entry.notebook.updated_at = Utc::now();
       let _ = write_notebook_bundle_sync(&nb_dir, entry);
     }
+    attached_count
   }
+}
+
+fn select_local_deliverable_summaries<'a>(
+  summaries: &'a [LocalArtifactSummary],
+  deliverable: Option<&Value>,
+) -> Vec<&'a LocalArtifactSummary> {
+  if let Some(files) = deliverable
+    .and_then(|d| d.get("files"))
+    .and_then(Value::as_array)
+  {
+    let curated: HashSet<(&str, &str)> = files
+      .iter()
+      .filter(|entry| {
+        matches!(
+          entry.get("role").and_then(Value::as_str),
+          Some("primary" | "preview")
+        )
+      })
+      .filter_map(|entry| {
+        let node_id = entry.get("node_id")?.as_str()?;
+        let name = entry.get("name")?.as_str()?;
+        Some((node_id, name))
+      })
+      .collect();
+    if !curated.is_empty() {
+      let matched: Vec<&'a LocalArtifactSummary> = summaries
+        .iter()
+        .filter(|s| curated.contains(&(s.node_id.as_str(), s.name.as_str())))
+        .collect();
+      if !matched.is_empty() {
+        return matched;
+      }
+    }
+  }
+  summaries.iter().collect()
 }
 
 fn notebooks_root_dir(base_dir: &Path) -> PathBuf {
@@ -340,6 +385,7 @@ fn write_notebook_bundle_sync(nb_dir: &Path, entry: &NotebookEntry) -> std::io::
   let bundle = PersistedNotebookBundle {
     notebook: entry.notebook.clone(),
     sources: entry.sources.clone(),
+    raw_texts: entry.raw_texts_by_source.clone(),
     artifacts: entry.artifacts.clone(),
     messages: entry.messages.clone(),
   };
@@ -424,6 +470,7 @@ fn hydrate_notebooks_from_disk(base_dir: &Path) -> HashMap<Uuid, NotebookEntry> 
     let entry = NotebookEntry {
       notebook: bundle.notebook,
       sources: bundle.sources,
+      raw_texts_by_source: bundle.raw_texts,
       chunks_by_source,
       artifacts: bundle.artifacts,
       messages: bundle.messages,
@@ -484,7 +531,10 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
       "/v1/notebooks/:id/generate-batch",
       post(generate_batch_from_notebook),
     )
-    .route("/v1/notebooks/:id/artifacts", get(list_notebook_artifacts))
+    .route(
+      "/v1/notebooks/:id/artifacts",
+      get(list_notebook_artifacts).post(attach_notebook_run_artifacts),
+    )
     .route(
       "/v1/notebooks/:id/artifacts.zip",
       get(download_notebook_artifacts_zip),
@@ -528,6 +578,7 @@ async fn create_notebook(
   let entry = NotebookEntry {
     notebook: notebook.clone(),
     sources: Vec::new(),
+    raw_texts_by_source: HashMap::new(),
     chunks_by_source: HashMap::new(),
     artifacts: Vec::new(),
     messages: Vec::new(),
@@ -760,6 +811,9 @@ async fn update_source(
           &format!("storing chunks failed: {err}"),
         );
       }
+      if let Some(raw_text) = req.text {
+        entry.raw_texts_by_source.insert(source_id, raw_text);
+      }
       entry.chunks_by_source.insert(source_id, built_chunks);
       entry.sources[src_idx].status = "ready".to_string();
       entry.sources[src_idx].error = None;
@@ -899,6 +953,7 @@ async fn delete_source(
     if entry.sources.len() == before {
       false
     } else {
+      entry.raw_texts_by_source.remove(&source_id);
       entry.chunks_by_source.remove(&source_id);
       entry.notebook.updated_at = Utc::now();
       let _ = write_notebook_bundle_sync(&nb_dir, entry);
@@ -976,11 +1031,13 @@ async fn list_source_chunks(
     .cloned()
     .unwrap_or_default();
   chunks.sort_by_key(|c| c.ordinal);
+  let raw_text = entry.raw_texts_by_source.get(&source_id).cloned();
   (
     StatusCode::OK,
     Json(json!({
       "notebook_id": notebook_id,
       "source": source,
+      "raw_text": raw_text,
       "chunks": chunks,
     })),
   )
@@ -1023,6 +1080,7 @@ enum AddSourceRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BytesFormat {
   PlainText,
+  Subtitle,
   Html,
   Pdf,
   Docx,
@@ -1067,6 +1125,7 @@ async fn add_source(
     }
   }
 
+  let mut initial_raw_text: Option<String> = None;
   let (kind, title, uri, payload) = match req {
     AddSourceRequest::Url { url, title } => {
       let trimmed = url.trim().to_string();
@@ -1102,6 +1161,7 @@ async fn add_source(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| text.chars().take(60).collect());
+      initial_raw_text = Some(text.clone());
       (
         "text",
         resolved_title,
@@ -1125,6 +1185,7 @@ async fn add_source(
       let format = match extension.as_str() {
         "html" | "htm" => BytesFormat::Html,
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
+        "srt" | "vtt" => BytesFormat::Subtitle,
         "pdf" => BytesFormat::Pdf,
         "docx" => BytesFormat::Docx,
         "xlsx" => BytesFormat::Xlsx,
@@ -1136,7 +1197,7 @@ async fn add_source(
           return notebook_error_json(
             StatusCode::BAD_REQUEST,
             &format!(
-              "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv or .json"
+              "unsupported file type '.{other}': upload .txt, .md, .srt, .vtt, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv or .json"
             ),
           );
         }
@@ -1289,6 +1350,9 @@ async fn add_source(
         &format!("notebook {notebook_id} not found"),
       );
     };
+    if let Some(raw_text) = initial_raw_text {
+      entry.raw_texts_by_source.insert(source.id, raw_text);
+    }
     entry.sources.push(source.clone());
     entry.notebook.updated_at = now;
     if let Err(err) = write_notebook_bundle_sync(&nb_dir, entry) {
@@ -1401,6 +1465,7 @@ async fn ingest_local_source(
 async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<String, String> {
   match format {
     BytesFormat::Html => extract_html_text(&bytes).await,
+    BytesFormat::Subtitle => subtitle_text(&bytes),
     BytesFormat::Pdf => extract_pdf_text(&bytes).await,
     BytesFormat::Docx => docx_text(&bytes),
     BytesFormat::Xlsx => xlsx_text(&bytes),
@@ -1412,6 +1477,70 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
       String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())
     }
   }
+}
+
+fn subtitle_text(bytes: &[u8]) -> Result<String, String> {
+  let raw = std::str::from_utf8(bytes)
+    .map_err(|_| "subtitle file is not UTF-8 text".to_string())?
+    .trim_start_matches('\u{feff}');
+  let mut cues: Vec<String> = Vec::new();
+  let mut cur_ts: Option<String> = None;
+  let mut cur_lines: Vec<String> = Vec::new();
+
+  let flush_cue = |ts: &mut Option<String>, lines: &mut Vec<String>, out: &mut Vec<String>| {
+    if !lines.is_empty() {
+      let body = lines.join(" ");
+      if let Some(stamp) = ts.take() {
+        out.push(format!("[{stamp}] {body}"));
+      } else {
+        out.push(body);
+      }
+      lines.clear();
+    } else {
+      *ts = None;
+    }
+  };
+
+  for line in raw.lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      flush_cue(&mut cur_ts, &mut cur_lines, &mut cues);
+      continue;
+    }
+    if trimmed.eq_ignore_ascii_case("WEBVTT")
+      || trimmed.starts_with("NOTE")
+      || trimmed.starts_with("STYLE")
+    {
+      continue;
+    }
+    if cur_ts.is_none() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+      continue;
+    }
+    if let Some((start, rest)) = trimmed.split_once("-->") {
+      flush_cue(&mut cur_ts, &mut cur_lines, &mut cues);
+      let end = rest.split_whitespace().next().unwrap_or(rest);
+      cur_ts = Some(format!(
+        "{} -> {}",
+        start.trim().replace(',', "."),
+        end.trim().replace(',', ".")
+      ));
+      continue;
+    }
+    let cleaned = trimmed
+      .replace("<i>", "")
+      .replace("</i>", "")
+      .replace("<b>", "")
+      .replace("</b>", "");
+    if !cleaned.trim().is_empty() {
+      cur_lines.push(cleaned.trim().to_string());
+    }
+  }
+  flush_cue(&mut cur_ts, &mut cur_lines, &mut cues);
+
+  if cues.is_empty() {
+    return Ok(raw.trim().to_string());
+  }
+  Ok(cues.join("\n\n"))
 }
 
 fn sniff_ooxml_zip_format(bytes: &[u8], ext: Option<&str>) -> Option<BytesFormat> {
@@ -1472,6 +1601,27 @@ enum SmartUrlTarget {
   },
 }
 
+fn percent_encode_component(raw: &str) -> String {
+  let mut out = String::with_capacity(raw.len());
+  for &b in raw.as_bytes() {
+    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+      out.push(b as char);
+    } else {
+      out.push_str(&format!("%{b:02X}"));
+    }
+  }
+  out
+}
+
+fn encode_github_path(raw: &str) -> String {
+  raw
+    .split('/')
+    .filter(|seg| !seg.is_empty())
+    .map(percent_encode_component)
+    .collect::<Vec<_>>()
+    .join("/")
+}
+
 fn classify_smart_source_url(raw_url: &str) -> SmartUrlTarget {
   let Ok(parsed) = url::Url::parse(raw_url.trim()) else {
     return SmartUrlTarget::Direct;
@@ -1488,13 +1638,25 @@ fn classify_smart_source_url(raw_url: &str) -> SmartUrlTarget {
     host.as_str(),
     "arxiv.org" | "www.arxiv.org" | "export.arxiv.org"
   ) && segments.len() >= 2
-    && matches!(segments[0], "abs" | "e-print")
+    && matches!(segments[0], "abs" | "e-print" | "html")
   {
     let paper_id = segments[1..].join("/");
     let paper_id = paper_id.strip_suffix(".pdf").unwrap_or(&paper_id);
     if !paper_id.is_empty() {
       return SmartUrlTarget::RewriteUrl(format!("https://arxiv.org/pdf/{paper_id}.pdf"));
     }
+  }
+
+  if matches!(host.as_str(), "openreview.net" | "www.openreview.net")
+    && segments.first().copied() == Some("forum")
+    && let Some((_, forum_id)) = parsed
+      .query_pairs()
+      .find(|(k, v)| k == "id" && !v.is_empty())
+  {
+    return SmartUrlTarget::RewriteUrl(format!(
+      "https://openreview.net/pdf?id={}",
+      percent_encode_component(&forum_id)
+    ));
   }
 
   if matches!(host.as_str(), "github.com" | "www.github.com") && segments.len() >= 2 {
@@ -1520,10 +1682,11 @@ fn classify_smart_source_url(raw_url: &str) -> SmartUrlTarget {
         };
       }
       if segments[2] == "blob" && segments.len() >= 5 {
-        let git_ref = segments[3];
-        let file_path = segments[4..].join("/");
+        let enc_owner = percent_encode_component(owner);
+        let enc_repo = percent_encode_component(repo);
+        let enc_tail = encode_github_path(&segments[3..].join("/"));
         return SmartUrlTarget::RewriteUrl(format!(
-          "https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{file_path}"
+          "https://raw.githubusercontent.com/{enc_owner}/{enc_repo}/{enc_tail}"
         ));
       }
     }
@@ -1652,7 +1815,9 @@ async fn ingest_github_repo_snapshot(
     "User-Agent": "yanshi-studio-desktop/0.2",
   });
 
-  let repo_api = format!("https://api.github.com/repos/{owner}/{repo}");
+  let enc_owner = percent_encode_component(owner);
+  let enc_repo = percent_encode_component(repo);
+  let repo_api = format!("https://api.github.com/repos/{enc_owner}/{enc_repo}");
   let meta_res = tool
     .send_bytes(
       &json!({ "url": repo_api, "method": "GET", "headers": gh_headers }),
@@ -1668,26 +1833,90 @@ async fn ingest_github_repo_snapshot(
   }
   let meta_json: Value = serde_json::from_slice(&meta_res.body)
     .map_err(|err| format!("invalid GitHub repo JSON: {err}"))?;
-  let resolved_ref = git_ref
+  let mut resolved_ref = git_ref
     .filter(|r| !r.is_empty())
     .or_else(|| meta_json.get("default_branch").and_then(Value::as_str))
     .unwrap_or("main")
     .to_string();
+  let mut resolved_subpath = subpath.map(str::to_string);
   let description = meta_json
     .get("description")
     .and_then(Value::as_str)
     .unwrap_or_default()
     .trim();
 
-  let tree_api =
-    format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{resolved_ref}?recursive=1");
-  let tree_res = tool
-    .send_bytes(
-      &json!({ "url": tree_api, "method": "GET", "headers": gh_headers }),
-      Some(4 * 1024 * 1024),
-    )
+  let fetch_tree = |ref_name: &str| {
+    let enc_ref = percent_encode_component(ref_name);
+    let url = format!(
+      "https://api.github.com/repos/{enc_owner}/{enc_repo}/git/trees/{enc_ref}?recursive=1"
+    );
+    let tool = &tool;
+    let gh_headers = &gh_headers;
+    async move {
+      tool
+        .send_bytes(
+          &json!({ "url": url, "method": "GET", "headers": gh_headers }),
+          Some(4 * 1024 * 1024),
+        )
+        .await
+    }
+  };
+
+  let mut tree_res = fetch_tree(&resolved_ref)
     .await
     .map_err(|err| format!("fetching GitHub tree failed: {err}"))?;
+
+  if tree_res.status.as_u16() == 404
+    && let (Some(first_seg), Some(rest_sub)) = (git_ref, subpath)
+  {
+    let full_tail = format!("{first_seg}/{rest_sub}");
+    let enc_prefix = percent_encode_component(first_seg);
+    let mut candidate_refs: Vec<String> = Vec::new();
+    for ns in ["heads", "tags"] {
+      let refs_url = format!(
+        "https://api.github.com/repos/{enc_owner}/{enc_repo}/git/matching-refs/{ns}/{enc_prefix}"
+      );
+      if let Ok(res) = tool
+        .send_bytes(
+          &json!({ "url": refs_url, "method": "GET", "headers": gh_headers }),
+          Some(512 * 1024),
+        )
+        .await
+        && res.status.is_success()
+        && let Ok(Value::Array(items)) = serde_json::from_slice::<Value>(&res.body)
+      {
+        let strip_pfx = format!("refs/{ns}/");
+        for item in items {
+          if let Some(r) = item
+            .get("ref")
+            .and_then(Value::as_str)
+            .and_then(|s| s.strip_prefix(&strip_pfx))
+          {
+            candidate_refs.push(r.to_string());
+          }
+        }
+      }
+    }
+    candidate_refs.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    for cand in candidate_refs {
+      if full_tail == cand {
+        resolved_ref = cand;
+        resolved_subpath = None;
+        tree_res = fetch_tree(&resolved_ref)
+          .await
+          .map_err(|err| format!("fetching GitHub tree failed: {err}"))?;
+        break;
+      } else if let Some(rem) = full_tail.strip_prefix(&format!("{cand}/")) {
+        resolved_ref = cand;
+        resolved_subpath = (!rem.is_empty()).then(|| rem.to_string());
+        tree_res = fetch_tree(&resolved_ref)
+          .await
+          .map_err(|err| format!("fetching GitHub tree failed: {err}"))?;
+        break;
+      }
+    }
+  }
+
   if !tree_res.status.is_success() {
     return Err(format!("GitHub tree returned HTTP {}", tree_res.status));
   }
@@ -1710,12 +1939,13 @@ async fn ingest_github_repo_snapshot(
     })
     .unwrap_or_default();
 
-  let chosen = select_github_snapshot_paths(&blob_paths, subpath, MAX_SNAPSHOT_FILES);
+  let chosen =
+    select_github_snapshot_paths(&blob_paths, resolved_subpath.as_deref(), MAX_SNAPSHOT_FILES);
   let mut md = format!("# GitHub Repository: {owner}/{repo} (`{resolved_ref}`)\n\n");
   if !description.is_empty() {
     md.push_str(&format!("{description}\n\n"));
   }
-  if let Some(sub) = subpath.filter(|s| !s.is_empty()) {
+  if let Some(sub) = resolved_subpath.as_deref().filter(|s| !s.is_empty()) {
     md.push_str(&format!("Subpath filter: `{sub}`\n\n"));
   }
   md.push_str("## Repository File Tree\n\n```text\n");
@@ -1728,13 +1958,16 @@ async fn ingest_github_repo_snapshot(
   }
   md.push_str("```\n\n");
 
+  let enc_resolved_ref = encode_github_path(&resolved_ref);
   let mut used_chars = 0usize;
   for rel_path in chosen {
     if used_chars >= MAX_SNAPSHOT_TOTAL_CHARS {
       break;
     }
-    let raw_url =
-      format!("https://raw.githubusercontent.com/{owner}/{repo}/{resolved_ref}/{rel_path}");
+    let enc_rel = encode_github_path(&rel_path);
+    let raw_url = format!(
+      "https://raw.githubusercontent.com/{enc_owner}/{enc_repo}/{enc_resolved_ref}/{enc_rel}"
+    );
     let Ok(raw_res) = tool
       .send_bytes(
         &json!({ "url": raw_url, "method": "GET" }),
@@ -1767,19 +2000,25 @@ async fn ingest_source_url(url: &str) -> Result<(String, String), String> {
       git_ref,
       subpath,
     } => {
-      if let Ok(snapshot) =
-        ingest_github_repo_snapshot(&owner, &repo, git_ref.as_deref(), subpath.as_deref()).await
+      match ingest_github_repo_snapshot(&owner, &repo, git_ref.as_deref(), subpath.as_deref()).await
       {
-        return Ok(snapshot);
+        Ok(snapshot) => return Ok(snapshot),
+        Err(err) if git_ref.is_some() => return Err(err),
+        Err(_) => {}
       }
     }
     SmartUrlTarget::RewriteUrl(rewritten) => {
-      if let Ok((bytes, format)) = fetch_source_url(&rewritten).await
-        && let Ok(text) = extract_bytes_text(bytes.clone(), format).await
-        && !text.trim().is_empty()
-      {
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        return Ok((digest, text));
+      let is_github_raw = rewritten.starts_with("https://raw.githubusercontent.com/");
+      match fetch_source_url(&rewritten).await {
+        Ok((bytes, format)) => {
+          let text = extract_bytes_text(bytes.clone(), format).await?;
+          if !text.trim().is_empty() {
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            return Ok((digest, text));
+          }
+        }
+        Err(err) if is_github_raw => return Err(err),
+        Err(_) => {}
       }
     }
     SmartUrlTarget::Direct => {}
@@ -1804,22 +2043,56 @@ async fn fetch_source_url(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   if !response.status.is_success() {
     return Err(format!("fetching {url} returned HTTP {}", response.status));
   }
+  let content_type = response
+    .content_type
+    .as_deref()
+    .and_then(|ct| ct.split(';').next())
+    .map(|ct| ct.trim().to_ascii_lowercase());
+  if let Some(ref ct) = content_type
+    && (ct.starts_with("audio/") || ct.starts_with("video/") || ct.starts_with("image/"))
+  {
+    return Err(format!(
+      "URL returned binary media Content-Type '{ct}'; upload audio via `kind: recording` or run `video_summarizer` in Studio"
+    ));
+  }
   let bytes = response.body;
   let ext = url_path_extension(url);
-  let format = if bytes.starts_with(b"%PDF-") {
+  let format = if bytes.starts_with(b"%PDF-") || content_type.as_deref() == Some("application/pdf")
+  {
     BytesFormat::Pdf
   } else if let Some(ooxml) = sniff_ooxml_zip_format(&bytes, ext.as_deref()) {
     ooxml
   } else {
     let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
     let lowered = sample.trim_start().to_ascii_lowercase();
-    if lowered.starts_with("<!doctype html") || lowered.contains("<html") {
+    if lowered.starts_with("<!doctype html")
+      || lowered.contains("<html")
+      || matches!(
+        content_type.as_deref(),
+        Some("text/html" | "application/xhtml+xml")
+      )
+    {
       BytesFormat::Html
-    } else if ext.as_deref() == Some("csv") {
+    } else if ext.as_deref() == Some("csv") || content_type.as_deref() == Some("text/csv") {
       BytesFormat::Csv
-    } else if ext.as_deref() == Some("tsv") {
+    } else if ext.as_deref() == Some("tsv")
+      || content_type.as_deref() == Some("text/tab-separated-values")
+    {
       BytesFormat::Tsv
-    } else if ext.as_deref() == Some("json") {
+    } else if matches!(ext.as_deref(), Some("srt" | "vtt"))
+      || lowered.starts_with("webvtt")
+      || matches!(
+        content_type.as_deref(),
+        Some("text/vtt" | "application/x-subrip")
+      )
+    {
+      BytesFormat::Subtitle
+    } else if ext.as_deref() == Some("json")
+      || matches!(content_type.as_deref(), Some("application/json"))
+      || content_type
+        .as_deref()
+        .is_some_and(|ct| ct.ends_with("+json"))
+    {
       BytesFormat::Json
     } else {
       BytesFormat::PlainText
@@ -3384,7 +3657,10 @@ async fn dispatch_prepared_local_generator(
       inputs: prepared.inputs,
       model: Some(model.to_string()),
       cost_limit_usd,
+      max_concurrency: None,
       debug_controller: None,
+      notebook_id: Some(notebook_id),
+      notebook_kind: Some(prepared.kind.clone()),
       on_complete: Some(hook),
     })
     .await?;
@@ -4035,6 +4311,95 @@ async fn select_chunks_for_generate(
   selected
 }
 
+#[derive(Debug, Deserialize)]
+struct AttachNotebookRunRequest {
+  run_id: Uuid,
+  #[serde(default)]
+  kind: Option<String>,
+}
+
+async fn attach_notebook_run_artifacts(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+  Json(req): Json<AttachNotebookRunRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let has_nb = engine
+    .notebooks()
+    .lock_entries()
+    .get(&id)
+    .is_some_and(|e| e.notebook.tenant_id == tenant);
+  if !has_nb {
+    return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+  }
+
+  let (run_record, run_summaries, deliverable, run_nb_kind) = match engine
+    .get_completed_run_for_attach(&tenant, req.run_id)
+  {
+    Ok(quad) => quad,
+    Err((code, msg)) => return notebook_error_json(code, &msg),
+  };
+
+  let resolved_kind = req
+    .kind
+    .as_deref()
+    .map(str::trim)
+    .filter(|k| !k.is_empty())
+    .map(str::to_string)
+    .or_else(|| {
+      deliverable
+        .as_ref()
+        .and_then(|d| d.get("kind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+    })
+    .or_else(|| run_nb_kind)
+    .or_else(|| {
+      yanshi_config::executor::parse_workflow_definition(&run_record.workflow)
+        .ok()
+        .map(|d| d.name)
+        .filter(|n| !n.trim().is_empty())
+    })
+    .unwrap_or_else(|| "report".to_string());
+
+  let attached_count = engine.notebooks().attach_run_artifacts(
+    &tenant,
+    id,
+    &resolved_kind,
+    req.run_id,
+    &run_summaries,
+    deliverable.as_ref(),
+  );
+  let attached: Vec<LocalNotebookArtifact> = engine
+    .notebooks()
+    .lock_entries()
+    .get(&id)
+    .map(|entry| {
+      entry
+        .artifacts
+        .iter()
+        .filter(|a| a.run_id == req.run_id)
+        .cloned()
+        .collect()
+    })
+    .unwrap_or_default();
+
+  (
+    StatusCode::OK,
+    Json(json!({
+      "notebook_id": id,
+      "run_id": req.run_id,
+      "kind": resolved_kind,
+      "attached_count": attached_count,
+      "artifacts": attached,
+    })),
+  )
+    .into_response()
+}
+
 async fn list_notebook_artifacts(
   State(engine): State<LocalEngineState>,
   headers: HeaderMap,
@@ -4136,6 +4501,8 @@ struct ExportedNotebookSource {
   error: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   sha256: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  raw_text: Option<String>,
   #[serde(default)]
   chunks: Vec<ExportedSourceChunk>,
 }
@@ -4323,39 +4690,293 @@ fn render_local_notebook_markdown_brief(
   lines.join("\n")
 }
 
-fn remap_local_imported_citations(raw: &Value, source_id_map: &HashMap<Uuid, Uuid>) -> Value {
-  let Some(arr) = raw.as_array() else {
-    return json!([]);
-  };
-  let remapped: Vec<Value> = arr
-    .iter()
-    .map(|item| {
-      let Some(obj) = item.as_object() else {
-        return item.clone();
-      };
-      let mut next = obj.clone();
-      if let Some(old_src) = obj
-        .get("source_id")
-        .and_then(Value::as_str)
-        .and_then(|s| Uuid::parse_str(s).ok())
-        && let Some(new_src) = source_id_map.get(&old_src)
-      {
-        next.insert("source_id".to_string(), json!(new_src.to_string()));
-      }
-      if let Some(cid) = obj.get("chunk_id").and_then(Value::as_str)
-        && let Some((prefix, ordinal)) = cid.split_once(':')
-        && let Ok(old_src) = Uuid::parse_str(prefix)
-        && let Some(new_src) = source_id_map.get(&old_src)
-      {
+fn remap_local_imported_json_refs(
+  raw: &Value,
+  source_id_map: &HashMap<Uuid, Uuid>,
+  chunk_id_map: &HashMap<String, String>,
+) -> Value {
+  match raw {
+    Value::Array(arr) => Value::Array(
+      arr
+        .iter()
+        .map(|item| remap_local_imported_json_refs(item, source_id_map, chunk_id_map))
+        .collect(),
+    ),
+    Value::Object(obj) => {
+      let mut next = serde_json::Map::with_capacity(obj.len());
+      for (k, v) in obj {
+        if k == "source_id"
+          && let Some(old_src) = v.as_str().and_then(|s| Uuid::parse_str(s).ok())
+          && let Some(new_src) = source_id_map.get(&old_src)
+        {
+          next.insert(k.clone(), json!(new_src.to_string()));
+          continue;
+        }
+        if k == "chunk_id"
+          && let Some(cid) = v.as_str()
+        {
+          if let Some(mapped) = chunk_id_map.get(cid) {
+            next.insert(k.clone(), json!(mapped));
+            continue;
+          }
+          if let Some((prefix, ordinal)) = cid.split_once(':')
+            && let Ok(old_src) = Uuid::parse_str(prefix)
+            && let Some(new_src) = source_id_map.get(&old_src)
+          {
+            next.insert(k.clone(), json!(format!("{new_src}:{ordinal}")));
+            continue;
+          }
+        }
         next.insert(
-          "chunk_id".to_string(),
-          json!(format!("{new_src}:{ordinal}")),
+          k.clone(),
+          remap_local_imported_json_refs(v, source_id_map, chunk_id_map),
         );
       }
       Value::Object(next)
+    }
+    other => other.clone(),
+  }
+}
+
+fn is_local_synthesizable_text_deliverable(name: &str, mime_type: Option<&str>) -> bool {
+  let lower_name = name.to_ascii_lowercase();
+  let lower_mime = mime_type.unwrap_or_default().to_ascii_lowercase();
+  lower_name.ends_with(".html")
+    || lower_name.ends_with(".htm")
+    || lower_name.ends_with(".md")
+    || lower_name.ends_with(".csv")
+    || lower_name.ends_with(".tsv")
+    || lower_name.ends_with(".json")
+    || lower_mime.starts_with("text/")
+    || lower_mime == "application/json"
+}
+
+fn html_escape_local(raw: &str) -> String {
+  raw
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+}
+
+fn synthesize_local_imported_deliverable_bytes(
+  kind: &str,
+  name: &str,
+  mime_type: Option<&str>,
+  deliverable: Option<&Value>,
+) -> (String, String, Vec<u8>) {
+  let safe_base: String = name
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+        c
+      } else {
+        '_'
+      }
     })
     .collect();
-  Value::Array(remapped)
+  let lower_name = safe_base.to_ascii_lowercase();
+  let lower_mime = mime_type.unwrap_or_default().to_ascii_lowercase();
+  let title = deliverable
+    .and_then(|d| d.get("title"))
+    .and_then(Value::as_str)
+    .filter(|t| !t.trim().is_empty())
+    .unwrap_or(kind);
+  let content = deliverable.and_then(|d| d.get("content"));
+
+  if (lower_name.ends_with(".csv") || lower_mime.starts_with("text/csv"))
+    && let Some(cols) = content
+      .and_then(|c| c.get("columns"))
+      .and_then(Value::as_array)
+  {
+    let col_keys: Vec<(String, String)> = cols
+      .iter()
+      .filter_map(|col| {
+        if let Some(s) = col.as_str() {
+          Some((s.to_string(), s.to_string()))
+        } else {
+          let key = col.get("key").or_else(|| col.get("name"))?.as_str()?;
+          let label = col
+            .get("label")
+            .or_else(|| col.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or(key);
+          Some((key.to_string(), label.to_string()))
+        }
+      })
+      .collect();
+    let esc_csv = |cell: &str| {
+      if cell.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", cell.replace('"', "\"\""))
+      } else {
+        cell.to_string()
+      }
+    };
+    let mut lines = Vec::new();
+    if !col_keys.is_empty() {
+      lines.push(
+        col_keys
+          .iter()
+          .map(|(_, label)| esc_csv(label))
+          .collect::<Vec<_>>()
+          .join(","),
+      );
+      if let Some(rows) = content
+        .and_then(|c| c.get("rows"))
+        .and_then(Value::as_array)
+      {
+        for row in rows {
+          let cells = if let Some(obj) = row.as_object() {
+            let values_map = obj.get("values").and_then(Value::as_object).unwrap_or(obj);
+            col_keys
+              .iter()
+              .map(|(k, _)| match values_map.get(k) {
+                Some(Value::String(s)) => esc_csv(s),
+                Some(Value::Null) | None => String::new(),
+                Some(other) => esc_csv(&other.to_string()),
+              })
+              .collect::<Vec<_>>()
+          } else if let Some(arr) = row.as_array() {
+            arr
+              .iter()
+              .map(|v| {
+                v.as_str()
+                  .map(esc_csv)
+                  .unwrap_or_else(|| esc_csv(&v.to_string()))
+              })
+              .collect::<Vec<_>>()
+          } else {
+            Vec::new()
+          };
+          if !cells.is_empty() {
+            lines.push(cells.join(","));
+          }
+        }
+      }
+    }
+    let out_name = if lower_name.ends_with(".csv") {
+      safe_base
+    } else {
+      format!("{kind}.csv")
+    };
+    return (
+      out_name,
+      "text/csv; charset=utf-8".to_string(),
+      lines.join("\n").into_bytes(),
+    );
+  }
+
+  if lower_name.ends_with(".md") || lower_mime.starts_with("text/markdown") {
+    let mut md = format!("# {title}\n\n");
+    if let Some(sections) = content
+      .and_then(|c| c.get("sections"))
+      .and_then(Value::as_array)
+    {
+      for sec in sections {
+        if let Some(h) = sec
+          .get("heading")
+          .or_else(|| sec.get("title"))
+          .and_then(Value::as_str)
+        {
+          md.push_str(&format!("## {h}\n\n"));
+        }
+        if let Some(body) = sec
+          .get("body")
+          .or_else(|| sec.get("content"))
+          .and_then(Value::as_str)
+        {
+          md.push_str(body);
+          md.push_str("\n\n");
+        }
+      }
+    } else if let Some(raw_md) = content
+      .and_then(|c| c.get("markdown"))
+      .and_then(Value::as_str)
+    {
+      md.push_str(raw_md);
+      md.push('\n');
+    } else if let Some(deliv) = deliverable {
+      md.push_str("```json\n");
+      md.push_str(&serde_json::to_string_pretty(deliv).unwrap_or_default());
+      md.push_str("\n```\n");
+    }
+    let out_name = if lower_name.ends_with(".md") {
+      safe_base
+    } else {
+      format!("{kind}.md")
+    };
+    return (
+      out_name,
+      "text/plain; charset=utf-8".to_string(),
+      md.into_bytes(),
+    );
+  }
+
+  if lower_name.ends_with(".html")
+    || lower_name.ends_with(".htm")
+    || lower_mime.starts_with("text/html")
+  {
+    let mut body_html = String::new();
+    if let Some(sections) = content
+      .and_then(|c| c.get("sections"))
+      .and_then(Value::as_array)
+    {
+      for sec in sections {
+        let h = sec
+          .get("heading")
+          .or_else(|| sec.get("title"))
+          .and_then(Value::as_str)
+          .unwrap_or("Section");
+        let b = sec
+          .get("body")
+          .or_else(|| sec.get("content"))
+          .and_then(Value::as_str)
+          .unwrap_or_default();
+        body_html.push_str(&format!(
+          "<section><h2>{}</h2><p>{}</p></section>",
+          html_escape_local(h),
+          html_escape_local(b).replace('\n', "<br/>")
+        ));
+      }
+    } else if let Some(deliv) = deliverable {
+      body_html.push_str(&format!(
+        "<pre>{}</pre>",
+        html_escape_local(&serde_json::to_string_pretty(deliv).unwrap_or_default())
+      ));
+    }
+    let page = format!(
+      "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"/><title>{}</title>\
+       <style>body{{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:24px;line-height:1.6}}\
+       h1{{font-size:1.35rem;margin-bottom:12px}}h2{{font-size:1.05rem;color:#93c5fd}}pre{{white-space:pre-wrap;background:#1e293b;padding:14px;border-radius:8px}}</style>\
+       </head><body><h1>{}</h1>{body_html}</body></html>",
+      html_escape_local(title),
+      html_escape_local(title)
+    );
+    let out_name = if lower_name.ends_with(".html") || lower_name.ends_with(".htm") {
+      safe_base
+    } else {
+      format!("{kind}.html")
+    };
+    return (
+      out_name,
+      "text/html; charset=utf-8".to_string(),
+      page.into_bytes(),
+    );
+  }
+
+  let json_payload = deliverable
+    .cloned()
+    .unwrap_or_else(|| json!({ "kind": kind, "title": title, "imported_from": name }));
+  let stem = Path::new(&safe_base)
+    .file_stem()
+    .and_then(|s| s.to_str())
+    .filter(|s| !s.is_empty())
+    .unwrap_or(kind);
+  (
+    format!("{stem}.json"),
+    "application/json; charset=utf-8".to_string(),
+    serde_json::to_vec_pretty(&json_payload).unwrap_or_else(|_| b"{}".to_vec()),
+  )
 }
 
 async fn export_notebook(
@@ -4397,6 +5018,7 @@ async fn export_notebook(
         status: src.status.clone(),
         error: src.error.clone(),
         sha256: src.sha256.clone(),
+        raw_text: entry.raw_texts_by_source.get(&src.id).cloned(),
         chunks: chunks_by_source.remove(&src.id).unwrap_or_default(),
       })
       .collect();
@@ -4507,8 +5129,10 @@ async fn import_notebook(
 
   let mut total_bytes: usize = 0;
   let mut sources: Vec<LocalSource> = Vec::with_capacity(bundle.sources.len());
+  let mut raw_texts_by_source: HashMap<Uuid, String> = HashMap::new();
   let mut chunks_by_source: HashMap<Uuid, Vec<LocalSourceChunk>> = HashMap::new();
   let mut source_id_map: HashMap<Uuid, Uuid> = HashMap::new();
+  let mut chunk_id_map: HashMap<String, String> = HashMap::new();
   let mut imported_chunks: usize = 0;
 
   for (idx, src) in bundle.sources.iter().enumerate() {
@@ -4535,6 +5159,21 @@ async fn import_notebook(
     if let Some(old_id) = src.id {
       source_id_map.insert(old_id, source_id);
     }
+    if kind == "text"
+      && let Some(raw_t) = src
+        .raw_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+    {
+      if raw_t.len() > MAX_SOURCE_BYTES {
+        return notebook_error_json(
+          StatusCode::PAYLOAD_TOO_LARGE,
+          &format!("imported raw_text exceeds {MAX_SOURCE_BYTES} bytes"),
+        );
+      }
+      raw_texts_by_source.insert(source_id, raw_t);
+    }
     let source_title = {
       let t = src.title.trim();
       if !t.is_empty() {
@@ -4546,7 +5185,8 @@ async fn import_notebook(
       }
     };
 
-    let mut ordered_raw: Vec<(i32, String, Value)> = Vec::with_capacity(src.chunks.len());
+    let mut ordered_raw: Vec<(i32, Option<String>, String, Value)> =
+      Vec::with_capacity(src.chunks.len());
     for chunk in &src.chunks {
       let content = chunk.content.trim().to_string();
       if content.is_empty() {
@@ -4564,17 +5204,28 @@ async fn import_notebook(
       } else {
         json!({})
       };
-      ordered_raw.push((chunk.ordinal, content, meta));
+      let old_cid = chunk
+        .chunk_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .or_else(|| src.id.map(|oid| format!("{oid}:{}", chunk.ordinal)));
+      ordered_raw.push((chunk.ordinal, old_cid, content, meta));
     }
-    ordered_raw.sort_by_key(|(ord, _, _)| *ord);
+    ordered_raw.sort_by_key(|(ord, _, _, _)| *ord);
 
     let local_chunks: Vec<LocalSourceChunk> = ordered_raw
       .into_iter()
       .enumerate()
-      .map(|(pos, (_, content, metadata))| {
+      .map(|(pos, (_, old_cid, content, metadata))| {
         let ordinal = i32::try_from(pos).unwrap_or(0);
+        let new_cid = format!("{source_id}:{ordinal}");
+        if let Some(ocid) = old_cid {
+          chunk_id_map.insert(ocid, new_cid.clone());
+        }
         LocalSourceChunk {
-          chunk_id: format!("{source_id}:{ordinal}"),
+          chunk_id: new_cid,
           source_id,
           notebook_id,
           tenant_id: tenant.clone(),
@@ -4646,7 +5297,12 @@ async fn import_notebook(
     } else {
       msg.model.trim().to_string()
     };
-    let citations = remap_local_imported_citations(&msg.citations, &source_id_map);
+    let raw_cites = if msg.citations.is_array() {
+      &msg.citations
+    } else {
+      &Value::Array(Vec::new())
+    };
+    let citations = remap_local_imported_json_refs(raw_cites, &source_id_map, &chunk_id_map);
     messages.push(LocalNotebookMessage {
       id: Uuid::new_v4(),
       notebook_id,
@@ -4661,12 +5317,119 @@ async fn import_notebook(
   }
   let imported_messages = messages.len();
 
+  let runs_with_text_sibling: HashSet<Uuid> = bundle
+    .deliverables
+    .iter()
+    .take(200)
+    .filter(|d| is_local_synthesizable_text_deliverable(&d.name, d.mime_type.as_deref()))
+    .map(|d| d.run_id)
+    .collect();
+  let mut imported_run_map: HashMap<Uuid, (Uuid, PathBuf, String, Vec<LocalArtifactSummary>)> =
+    HashMap::new();
+  let mut fallback_emitted_runs: HashSet<Uuid> = HashSet::new();
+  let mut artifacts: Vec<LocalNotebookArtifact> = Vec::new();
+
+  for (idx, deliv) in bundle.deliverables.iter().take(200).enumerate() {
+    let kind_clean = deliv.kind.trim();
+    if kind_clean.is_empty() {
+      continue;
+    }
+    let is_text = is_local_synthesizable_text_deliverable(&deliv.name, deliv.mime_type.as_deref());
+    if !is_text
+      && (runs_with_text_sibling.contains(&deliv.run_id)
+        || !fallback_emitted_runs.insert(deliv.run_id))
+    {
+      continue;
+    }
+    let (new_run_id, run_dir) =
+      if let Some((existing_id, existing_dir, _, _)) = imported_run_map.get(&deliv.run_id) {
+        (*existing_id, existing_dir.clone())
+      } else {
+        let fresh_id = Uuid::new_v4();
+        let dir = engine.base_dir().join(fresh_id.to_string());
+        imported_run_map.insert(
+          deliv.run_id,
+          (fresh_id, dir.clone(), kind_clean.to_string(), Vec::new()),
+        );
+        (fresh_id, dir)
+      };
+
+    let remapped_deliverable = deliv
+      .deliverable
+      .as_ref()
+      .map(|val| remap_local_imported_json_refs(val, &source_id_map, &chunk_id_map));
+    let (file_name, mime_type, file_bytes) = synthesize_local_imported_deliverable_bytes(
+      kind_clean,
+      &deliv.name,
+      deliv.mime_type.as_deref(),
+      remapped_deliverable.as_ref(),
+    );
+    let node_dir = run_dir.join("artifacts").join("imported");
+    if let Err(err) = tokio::fs::create_dir_all(&node_dir).await {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("creating imported deliverable dir: {err}"),
+      );
+    }
+    let disk_name = format!("{}_{}", idx + 1, file_name);
+    let file_path = node_dir.join(&disk_name);
+    if let Err(err) = tokio::fs::write(&file_path, &file_bytes).await {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("writing imported deliverable file: {err}"),
+      );
+    }
+    let sha = format!("{:x}", Sha256::digest(&file_bytes));
+    let art_id = Uuid::new_v4();
+    let created_at = deliv.created_at;
+    let summary = LocalArtifactSummary {
+      id: art_id,
+      node_id: "imported".to_string(),
+      name: file_name.clone(),
+      mime_type: mime_type.clone(),
+      size_bytes: file_bytes.len() as u64,
+      sha256: Some(sha.clone()),
+      created_at,
+      file_path: file_path.clone(),
+    };
+    if let Some((_, _, _, list)) = imported_run_map.get_mut(&deliv.run_id) {
+      list.push(summary);
+    }
+    artifacts.push(LocalNotebookArtifact {
+      kind: kind_clean.to_string(),
+      deliverable: remapped_deliverable,
+      id: art_id,
+      run_id: new_run_id,
+      node_id: "imported".to_string(),
+      name: file_name,
+      path_or_url: file_path.display().to_string(),
+      mime_type: Some(mime_type),
+      created_at,
+      tenant_id: tenant.clone(),
+      size_bytes: i64::try_from(file_bytes.len()).ok(),
+      sha256: Some(sha),
+    });
+  }
+  for (fresh_id, dir, kind_str, summaries) in imported_run_map.into_values() {
+    engine.register_imported_run(
+      fresh_id,
+      &tenant,
+      format!("@imported:{kind_str}"),
+      dir,
+      notebook_id,
+      kind_str,
+      summaries,
+    );
+  }
+  let imported_deliverables = artifacts.len();
+
   let imported_sources = sources.len();
   let entry = NotebookEntry {
     notebook: notebook.clone(),
     sources,
+    raw_texts_by_source,
     chunks_by_source,
-    artifacts: Vec::new(),
+    artifacts,
     messages,
   };
 
@@ -4694,6 +5457,7 @@ async fn import_notebook(
       "notebook": notebook,
       "imported_sources": imported_sources,
       "imported_chunks": imported_chunks,
+      "imported_deliverables": imported_deliverables,
       "imported_messages": imported_messages,
     })),
   )
@@ -5548,9 +6312,49 @@ mod tests {
       .await
       .expect("import json");
     assert_eq!(imported["notebook"]["title"], "Desktop Cloned Notebook");
+    assert!(
+      imported["imported_deliverables"]
+        .as_u64()
+        .is_some_and(|n| n >= 1),
+      "desktop import must restore deliverables: {imported}"
+    );
     let imported_nb_id = imported["notebook"]["id"]
       .as_str()
       .expect("imported desktop id");
+    let imported_arts: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{imported_nb_id}/artifacts"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("list imported desktop artifacts")
+      .json()
+      .await
+      .expect("imported desktop artifacts json");
+    let imported_art0 = &imported_arts["artifacts"][0];
+    let remapped_cid = imported_art0["deliverable"]["content"]["rows"][0]["chunk_id"]
+      .as_str()
+      .expect("remapped desktop chunk_id");
+    assert_ne!(
+      remapped_cid, csv_chunk_id,
+      "imported deliverable chunk_id must remap onto cloned source UUID"
+    );
+    let synth_run_id = imported_art0["run_id"]
+      .as_str()
+      .expect("synthesized run_id");
+    let synth_file_id = imported_art0["id"]
+      .as_str()
+      .expect("synthesized artifact id");
+    let synth_dl = client
+      .get(format!(
+        "{restarted_url}/v1/runs/{synth_run_id}/artifacts/{synth_file_id}"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("download synthesized desktop artifact");
+    assert_eq!(synth_dl.status(), StatusCode::OK);
     let imported_hits: Value = client
       .get(format!(
         "{restarted_url}/v1/notebooks/{imported_nb_id}/search?q=BayOfFundy"
@@ -5818,6 +6622,165 @@ mod tests {
       .await
       .expect("search patched json");
     assert_eq!(surge_search["chunks"][0]["source_id"], json!(note_id));
+    let note_chunks_doc: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/sources/{note_id}/chunks"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("note chunks")
+      .json()
+      .await
+      .expect("note chunks json");
+    assert_eq!(
+      note_chunks_doc["raw_text"],
+      "BorealSurgeResonance amplifies winter spring tides."
+    );
+
+    // AG3: `.srt` subtitle ingestion + standalone Studio run attach (`POST /v1/notebooks/:id/artifacts`)
+    // + `local_engine` parity (`?status=bogus` -> 400, `:cancel` on terminal -> `cancelled: false`,
+    // UTF-8 `?filter=中文=1` -> 400 without panic).
+    let srt_payload =
+      b"1\n00:00:01,000 --> 00:00:04,500\n<i>EquinoctialSpringSurge</i> peaks at 16.8 meters.\n";
+    let srt_src: Value = client
+      .post(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/sources"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "kind": "file",
+        "filename": "lecture.srt",
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(srt_payload),
+      }))
+      .send()
+      .await
+      .expect("upload srt source")
+      .json()
+      .await
+      .expect("srt source json");
+    let srt_id = srt_src["id"].as_str().expect("srt id").to_string();
+    for _ in 0..40 {
+      let detail: Value = client
+        .get(format!("{restarted_url}/v1/notebooks/{notebook_id}"))
+        .header("X-Yanshi-Tenant", "studio-a")
+        .send()
+        .await
+        .expect("poll srt")
+        .json()
+        .await
+        .expect("poll srt json");
+      if detail["sources"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|s| s["id"] == srt_id))
+        .and_then(|s| s["status"].as_str())
+        == Some("ready")
+      {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let srt_search: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/search?q=EquinoctialSpringSurge"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("search srt")
+      .json()
+      .await
+      .expect("search srt json");
+    assert_eq!(srt_search["chunks"].as_array().map(Vec::len), Some(1));
+
+    let standalone_run_resp: Value = client
+      .post(format!("{restarted_url}/v1/runs"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "workflow": "name: standalone-brief\nnodes:\n  - id: tpl\n    type: template\n    parameters:\n      template: \"# Standalone Studio Brief\\n\\nSynthesized outside notebook.\"\n  - id: brief_md\n    type: render_markdown\n    dependencies: [\"tpl\"]\n    input_mapping:\n      markdown: \"{{ nodes.tpl.outputs.output }}\"\n    parameters:\n      format: md\n"
+      }))
+      .send()
+      .await
+      .expect("create standalone studio run")
+      .json()
+      .await
+      .expect("standalone studio run json");
+    let standalone_run_id = standalone_run_resp["run_id"]
+      .as_str()
+      .or_else(|| standalone_run_resp["id"].as_str())
+      .expect("standalone run id")
+      .to_string();
+    for _ in 0..80 {
+      let rd: Value = client
+        .get(format!("{restarted_url}/v1/runs/{standalone_run_id}"))
+        .header("X-Yanshi-Tenant", "studio-a")
+        .send()
+        .await
+        .expect("poll standalone run")
+        .json()
+        .await
+        .expect("poll standalone run json");
+      let st = rd["status"].as_str().unwrap_or_default();
+      if matches!(st, "succeeded" | "failed" | "cancelled") {
+        assert_eq!(st, "succeeded", "standalone run failed: {rd}");
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let attached_resp: Value = client
+      .post(format!(
+        "{restarted_url}/v1/notebooks/{imported_nb_id}/artifacts"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "run_id": standalone_run_id,
+        "kind": "briefing"
+      }))
+      .send()
+      .await
+      .expect("attach standalone run")
+      .json()
+      .await
+      .expect("attach standalone run json");
+    assert!(
+      attached_resp["attached_count"]
+        .as_u64()
+        .is_some_and(|n| n >= 1),
+      "attaching standalone studio run must register artifacts: {attached_resp}"
+    );
+
+    let bogus_runs = client
+      .get(format!("{restarted_url}/v1/runs?status=bogus"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("bogus status query");
+    assert_eq!(bogus_runs.status(), StatusCode::BAD_REQUEST);
+
+    let terminal_cancel: Value = client
+      .post(format!(
+        "{restarted_url}/v1/runs/{standalone_run_id}:cancel"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("cancel terminal run")
+      .json()
+      .await
+      .expect("cancel terminal run json");
+    assert_eq!(terminal_cancel["cancelled"], false);
+    assert_eq!(terminal_cancel["id"], standalone_run_id);
+    assert_eq!(terminal_cancel["run"]["id"], standalone_run_id);
+
+    let utf8_filter = client
+      .get(format!(
+        "{restarted_url}/v1/runs/{standalone_run_id}/events/history?filter=%E4%B8%AD%E6%96%87=1"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("utf8 filter query");
+    assert_eq!(utf8_filter.status(), StatusCode::BAD_REQUEST);
 
     let del_src = client
       .delete(format!(

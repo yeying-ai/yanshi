@@ -139,6 +139,10 @@ struct PersistedRunMeta {
   model: Option<String>,
   #[serde(default)]
   cost_limit_usd: Option<f64>,
+  #[serde(default)]
+  notebook_id: Option<Uuid>,
+  #[serde(default)]
+  notebook_kind: Option<String>,
 }
 
 pub(crate) type RunCompletionHook =
@@ -154,6 +158,8 @@ struct RunEntry {
   attempt_start_seq: i64,
   model: Option<String>,
   cost_limit_usd: Option<f64>,
+  notebook_id: Option<Uuid>,
+  notebook_kind: Option<String>,
   on_complete: Option<RunCompletionHook>,
 }
 
@@ -232,6 +238,8 @@ fn write_run_meta_sync(run_dir: &Path, entry: &RunEntry) -> std::io::Result<()> 
       .collect(),
     model: entry.model.clone(),
     cost_limit_usd: entry.cost_limit_usd,
+    notebook_id: entry.notebook_id,
+    notebook_kind: entry.notebook_kind.clone(),
   };
   let bytes = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
   let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
@@ -310,6 +318,8 @@ fn hydrate_runs_from_disk(base_dir: &Path) -> HashMap<Uuid, RunEntry> {
       attempt_start_seq,
       model: meta.model,
       cost_limit_usd: meta.cost_limit_usd,
+      notebook_id: meta.notebook_id,
+      notebook_kind: meta.notebook_kind,
       on_complete: None,
     };
     if needs_rewrite {
@@ -732,7 +742,7 @@ async fn list_runs(
   State(state): State<LocalEngineState>,
   headers: HeaderMap,
   Query(query): Query<ListRunsQuery>,
-) -> impl IntoResponse {
+) -> Response {
   let tenant = extract_tenant(&headers);
   let cap = query.limit.unwrap_or(20).clamp(1, 100);
   let offset = query.offset.unwrap_or(0);
@@ -741,6 +751,19 @@ async fn list_runs(
     .as_deref()
     .map(str::trim)
     .filter(|s| !s.is_empty());
+  if let Some(st) = status_filter
+    && !matches!(
+      st.to_ascii_lowercase().as_str(),
+      "queued" | "running" | "succeeded" | "failed" | "cancelled"
+    )
+  {
+    return error_json(
+      StatusCode::BAD_REQUEST,
+      &format!(
+        "invalid status filter '{st}'; expected queued, running, succeeded, failed, or cancelled"
+      ),
+    );
+  }
   let mut list: Vec<LocalRunRecord> = state
     .lock_runs()
     .values()
@@ -752,7 +775,7 @@ async fn list_runs(
     .collect();
   list.sort_by_key(|a| std::cmp::Reverse(a.started_at));
   let paged: Vec<LocalRunRecord> = list.into_iter().skip(offset).take(cap).collect();
-  Json(serde_json::json!({ "runs": paged }))
+  Json(serde_json::json!({ "runs": paged })).into_response()
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -775,6 +798,8 @@ struct CreateRunRequest {
   #[serde(default)]
   cost_limit_usd: Option<f64>,
   #[serde(default)]
+  max_concurrency: Option<usize>,
+  #[serde(default)]
   run_mode: RunMode,
   #[serde(default)]
   breakpoints: Vec<String>,
@@ -788,11 +813,137 @@ pub(crate) struct SpawnLocalRunParams {
   pub inputs: serde_json::Map<String, serde_json::Value>,
   pub model: Option<String>,
   pub cost_limit_usd: Option<f64>,
+  pub max_concurrency: Option<usize>,
   pub debug_controller: Option<FlowDebugController>,
+  pub notebook_id: Option<Uuid>,
+  pub notebook_kind: Option<String>,
   pub on_complete: Option<RunCompletionHook>,
 }
 
 impl LocalEngineState {
+  pub(crate) fn register_imported_run(
+    &self,
+    run_id: Uuid,
+    tenant_id: &str,
+    workflow: String,
+    run_dir: PathBuf,
+    notebook_id: Uuid,
+    notebook_kind: String,
+    artifacts: Vec<LocalArtifactSummary>,
+  ) {
+    let now = Utc::now();
+    let record = LocalRunRecord {
+      id: run_id,
+      workflow,
+      status: "succeeded".to_string(),
+      tenant_id: tenant_id.to_string(),
+      started_at: now,
+      finished_at: Some(now),
+      run_dir: Some(run_dir.display().to_string()),
+      error: None,
+    };
+    let (tx, _rx) = broadcast::channel(16);
+    let entry = RunEntry {
+      record,
+      events: Vec::new(),
+      artifacts,
+      tx,
+      cancel_token: FlowCancellationToken::new(),
+      debug_controller: None,
+      attempt_start_seq: 0,
+      model: None,
+      cost_limit_usd: None,
+      notebook_id: Some(notebook_id),
+      notebook_kind: Some(notebook_kind),
+      on_complete: None,
+    };
+    let _ = write_run_meta_sync(&run_dir, &entry);
+    self.lock_runs().insert(run_id, entry);
+  }
+
+  pub(crate) fn get_completed_run_for_attach(
+    &self,
+    tenant_id: &str,
+    run_id: Uuid,
+  ) -> Result<
+    (
+      LocalRunRecord,
+      Vec<LocalArtifactSummary>,
+      Option<serde_json::Value>,
+      Option<String>,
+    ),
+    (StatusCode, String),
+  > {
+    let (record, artifacts, events, nb_kind) = {
+      let guard = self.lock_runs();
+      let Some(entry) = guard
+        .get(&run_id)
+        .filter(|e| e.record.tenant_id == tenant_id)
+      else {
+        return Err((StatusCode::NOT_FOUND, format!("run {run_id} not found")));
+      };
+      if entry.record.status != "succeeded" {
+        return Err((
+          StatusCode::BAD_REQUEST,
+          format!(
+            "run {run_id} has status '{}'; only succeeded runs can be attached to a notebook",
+            entry.record.status
+          ),
+        ));
+      }
+      if entry.artifacts.is_empty() {
+        return Err((
+          StatusCode::BAD_REQUEST,
+          format!("run {run_id} produced no downloadable artifacts to attach"),
+        ));
+      }
+      (
+        entry.record.clone(),
+        entry.artifacts.clone(),
+        entry.events.clone(),
+        entry.notebook_kind.clone(),
+      )
+    };
+
+    let mut deliverable = None;
+    for ev in events.iter().rev() {
+      if (ev.kind == "node.output.captured" || ev.kind == "node_output_captured")
+        && ev.payload.get("node_id").and_then(|v| v.as_str()) == Some("deliverable")
+        && let Some(output) = ev.payload.get("output")
+      {
+        if let Some(inner) = output.get("deliverable").filter(|v| v.is_object()) {
+          deliverable = Some(inner.clone());
+          break;
+        }
+        if output.get("kind").is_some() && output.get("title").is_some() {
+          deliverable = Some(output.clone());
+          break;
+        }
+      }
+    }
+    if deliverable.is_none()
+      && let Some(ref dir_str) = record.run_dir
+    {
+      let deliv_dir = Path::new(dir_str).join("artifacts").join("deliverable");
+      if let Ok(rd) = std::fs::read_dir(deliv_dir) {
+        for item in rd.flatten() {
+          let p = item.path();
+          if p.extension().and_then(|e| e.to_str()) == Some("json")
+            && let Ok(bytes) = std::fs::read(&p)
+            && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && val.get("kind").is_some()
+            && val.get("title").is_some()
+          {
+            deliverable = Some(val);
+            break;
+          }
+        }
+      }
+    }
+
+    Ok((record, artifacts, deliverable, nb_kind))
+  }
+
   pub(crate) async fn spawn_workflow_run(
     &self,
     params: SpawnLocalRunParams,
@@ -826,6 +977,8 @@ impl LocalEngineState {
       attempt_start_seq: 0,
       model: params.model.clone(),
       cost_limit_usd: params.cost_limit_usd,
+      notebook_id: params.notebook_id,
+      notebook_kind: params.notebook_kind,
       on_complete: params.on_complete,
     };
     let _ = write_run_meta_sync(&run_dir, &entry);
@@ -842,6 +995,7 @@ impl LocalEngineState {
         params.inputs,
         params.model,
         params.cost_limit_usd,
+        params.max_concurrency,
         false,
         cancel_token,
         params.debug_controller,
@@ -868,6 +1022,9 @@ async fn create_run(
       StatusCode::BAD_REQUEST,
       "cost_limit_usd must be a finite number greater than 0",
     );
+  }
+  if matches!(req.max_concurrency, Some(0)) {
+    return error_json(StatusCode::BAD_REQUEST, "max_concurrency must be >= 1");
   }
   let header_tenant = extract_tenant(&headers);
   let resolved_tenant = match req
@@ -907,7 +1064,10 @@ async fn create_run(
       inputs: req.inputs,
       model: req.model,
       cost_limit_usd: req.cost_limit_usd,
+      max_concurrency: req.max_concurrency,
       debug_controller,
+      notebook_id: None,
+      notebook_kind: None,
       on_complete: None,
     })
     .await
@@ -967,6 +1127,7 @@ async fn execute_local_flow(
   raw_inputs: serde_json::Map<String, serde_json::Value>,
   model_override: Option<String>,
   cost_limit_usd: Option<f64>,
+  max_concurrency: Option<usize>,
   resume: bool,
   cancel_token: FlowCancellationToken,
   debug_controller: Option<FlowDebugController>,
@@ -985,7 +1146,8 @@ async fn execute_local_flow(
     };
     flow = flow.with_event_listener(Arc::new(listener));
 
-    let mut exec_cfg = FlowExecutionConfig::concurrent(8)
+    let concurrency = max_concurrency.unwrap_or(8).clamp(1, 32);
+    let mut exec_cfg = FlowExecutionConfig::concurrent(concurrency)
       .with_run_base_dir(base_dir.clone())
       .with_cancellation_token(cancel_token.clone())
       .with_question_handler(Arc::new(LocalRunQuestionHandler::new(
@@ -993,6 +1155,9 @@ async fn execute_local_flow(
         state.questions.clone(),
         cancel_token.clone(),
       )));
+    if let Some(ref m) = model_override {
+      exec_cfg = exec_cfg.with_model_override(m.clone());
+    }
     if let Some(limit) = flow_def
       .effective_cost_limit(cost_limit_usd)
       .map_err(anyhow::Error::msg)?
@@ -1013,9 +1178,15 @@ async fn execute_local_flow(
         .resume_with_config(
           &run_id.to_string(),
           &ResumePlanOptions::default(),
-          |recorded| match recorded.cost_limit_usd {
-            Some(limit) => exec_cfg.with_cost_limit_usd(limit),
-            None => exec_cfg,
+          |recorded| {
+            let mut merged = match recorded.cost_limit_usd {
+              Some(limit) => exec_cfg.with_cost_limit_usd(limit),
+              None => exec_cfg,
+            };
+            if let Some(saved_model) = recorded.model_override {
+              merged = merged.with_model_override(saved_model);
+            }
+            merged
           },
         )
         .await?
@@ -1089,26 +1260,24 @@ async fn execute_local_flow(
     .as_ref()
     .ok()
     .and_then(yanshi_config::content::extract_deliverable_from_state);
-  let completion_hook = state
-    .lock_runs()
-    .get(&run_id)
-    .and_then(|entry| entry.on_complete.clone());
-  if let Some(hook) = completion_hook {
-    hook(
-      run_id,
-      preview_status,
-      &discovered_artifacts,
-      extracted_deliverable.as_ref(),
-    );
-  }
 
   let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
-  {
+  let (completion_hook, persisted_nb, tenant_id, final_artifacts) = {
     let mut guard = state.lock_runs();
     if let Some(entry) = guard.get_mut(&run_id) {
       entry.debug_controller = None;
-      if !discovered_artifacts.is_empty() {
-        entry.artifacts = discovered_artifacts;
+      for candidate in discovered_artifacts {
+        if let Some(existing) = entry
+          .artifacts
+          .iter_mut()
+          .find(|a| a.file_path == candidate.file_path)
+        {
+          existing.size_bytes = candidate.size_bytes;
+          existing.sha256 = candidate.sha256;
+          existing.mime_type = candidate.mime_type;
+        } else {
+          entry.artifacts.push(candidate);
+        }
       }
       entry.record.finished_at = Some(Utc::now());
       match outcome {
@@ -1138,7 +1307,35 @@ async fn execute_local_flow(
         }
       }
       let _ = write_run_meta_sync(&run_dir, entry);
+      (
+        entry.on_complete.clone(),
+        entry.notebook_id.zip(entry.notebook_kind.clone()),
+        entry.record.tenant_id.clone(),
+        entry.artifacts.clone(),
+      )
+    } else {
+      (None, None, String::new(), Vec::new())
     }
+  };
+
+  if let Some(hook) = completion_hook {
+    hook(
+      run_id,
+      preview_status,
+      &final_artifacts,
+      extracted_deliverable.as_ref(),
+    );
+  } else if preview_status == "succeeded"
+    && let Some((nb_id, nb_kind)) = persisted_nb
+  {
+    state.notebooks().attach_run_artifacts(
+      &tenant_id,
+      nb_id,
+      &nb_kind,
+      run_id,
+      &final_artifacts,
+      extracted_deliverable.as_ref(),
+    );
   }
 
   if let Some(ev) = synthetic_to_persist {
@@ -1470,7 +1667,7 @@ async fn post_run_action(
     };
     let tenant = extract_tenant(&headers);
     let run_dir = state.base_dir.join(run_id.to_string());
-    let (record, synthetic_ev) = {
+    let (record, was_active, synthetic_ev) = {
       let mut guard = state.lock_runs();
       let Some(entry) = guard
         .get_mut(&run_id)
@@ -1478,28 +1675,33 @@ async fn post_run_action(
       else {
         return error_json(StatusCode::NOT_FOUND, "run not found");
       };
+      let was_active = !is_terminal_status(&entry.record.status);
       entry.cancel_token.cancel();
       state.questions.clear_run(run_id);
       if let Some(ctrl) = entry.debug_controller.take() {
         ctrl.abort();
       }
       let mut synthetic = None;
-      if !is_terminal_status(&entry.record.status) {
+      if was_active {
         entry.record.status = "cancelled".to_string();
         entry.record.finished_at = Some(Utc::now());
         synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
       }
       let _ = write_run_meta_sync(&run_dir, entry);
-      (entry.record.clone(), synthetic)
+      (entry.record.clone(), was_active, synthetic)
     };
     if let Some(ev) = synthetic_ev {
       let _ = append_run_event_jsonl_sync(&run_dir, &ev);
     }
-    return Json(serde_json::json!({
-      "run": record,
-      "cancelled": true,
-    }))
-    .into_response();
+    let mut payload = serde_json::to_value(&record).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = payload.as_object_mut() {
+      obj.insert(
+        "run".to_string(),
+        serde_json::to_value(&record).unwrap_or_default(),
+      );
+      obj.insert("cancelled".to_string(), serde_json::Value::Bool(was_active));
+    }
+    return Json(payload).into_response();
   }
 
   if let Some(raw_id) = raw_segment.strip_suffix(":resume") {
@@ -1599,6 +1801,7 @@ async fn post_run_action(
         serde_json::Map::new(),
         model_override,
         cost_limit_usd,
+        None,
         true,
         cancel_token,
         None,
@@ -1678,9 +1881,179 @@ async fn post_run_action(
   )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalFilterOp {
+  Gt,
+  Ge,
+  Lt,
+  Le,
+  Eq,
+  Ne,
+}
+
+#[derive(Debug, Clone)]
+enum LocalFilterClause {
+  KindEquals(String),
+  KindNotEquals(String),
+  KindContains(String),
+  Step { op: LocalFilterOp, threshold: i64 },
+}
+
+fn strip_prefix_ci_local<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+  let head = input.get(..prefix.len())?;
+  if head.eq_ignore_ascii_case(prefix) {
+    input.get(prefix.len()..)
+  } else {
+    None
+  }
+}
+
+fn split_and_local(input: &str) -> Vec<&str> {
+  let lower = input.to_ascii_lowercase();
+  let bytes = lower.as_bytes();
+  let mut out = Vec::new();
+  let mut start = 0usize;
+  let mut i = 0usize;
+  while i + 5 <= bytes.len() {
+    if bytes[i].is_ascii_whitespace()
+      && bytes[i + 1] == b'a'
+      && bytes[i + 2] == b'n'
+      && bytes[i + 3] == b'd'
+      && bytes[i + 4].is_ascii_whitespace()
+    {
+      out.push(&input[start..i]);
+      start = i + 5;
+      i = start;
+      continue;
+    }
+    i += 1;
+  }
+  out.push(&input[start..]);
+  out
+}
+
+fn parse_local_event_filter(raw: Option<&str>) -> Result<Vec<LocalFilterClause>, String> {
+  let Some(input) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+    return Ok(Vec::new());
+  };
+  let mut clauses = Vec::new();
+  for piece_raw in split_and_local(input) {
+    let piece = piece_raw.trim();
+    if piece.is_empty() {
+      return Err("empty clause between AND".to_string());
+    }
+    if let Some(rest) = strip_prefix_ci_local(piece, "kind") {
+      let rest = rest.trim_start();
+      if let Some(val) = rest.strip_prefix('~') {
+        let v = val.trim();
+        if v.is_empty() || v.contains(char::is_whitespace) {
+          return Err(format!(
+            "clause '{piece}': kind~ value must be a non-empty non-whitespace token"
+          ));
+        }
+        clauses.push(LocalFilterClause::KindContains(v.to_ascii_lowercase()));
+        continue;
+      }
+      if let Some(val) = rest.strip_prefix("!=") {
+        let v = val.trim();
+        if v.is_empty() || v.contains(char::is_whitespace) {
+          return Err(format!(
+            "clause '{piece}': kind!= value must be a non-empty non-whitespace token"
+          ));
+        }
+        clauses.push(LocalFilterClause::KindNotEquals(v.to_ascii_lowercase()));
+        continue;
+      }
+      if let Some(val) = rest.strip_prefix('=') {
+        let v = val.trim();
+        if v.is_empty() || v.contains(char::is_whitespace) {
+          return Err(format!(
+            "clause '{piece}': kind= value must be a non-empty non-whitespace token"
+          ));
+        }
+        clauses.push(LocalFilterClause::KindEquals(v.to_ascii_lowercase()));
+        continue;
+      }
+      return Err(format!(
+        "clause '{piece}': 'kind' must be followed by '=', '!=', or '~'"
+      ));
+    }
+    if let Some(rest) = strip_prefix_ci_local(piece, "step") {
+      let rest = rest.trim_start();
+      let ops = [
+        (">=", LocalFilterOp::Ge),
+        ("<=", LocalFilterOp::Le),
+        ("!=", LocalFilterOp::Ne),
+        (">", LocalFilterOp::Gt),
+        ("<", LocalFilterOp::Lt),
+        ("=", LocalFilterOp::Eq),
+      ];
+      let mut parsed_step = None;
+      for (sym, op) in ops {
+        if let Some(num) = rest.strip_prefix(sym) {
+          let threshold = num.trim().parse::<i64>().map_err(|e| {
+            format!(
+              "clause '{piece}': step threshold '{}' is not a valid i64: {e}",
+              num.trim()
+            )
+          })?;
+          parsed_step = Some(LocalFilterClause::Step { op, threshold });
+          break;
+        }
+      }
+      if let Some(cl) = parsed_step {
+        clauses.push(cl);
+        continue;
+      }
+      return Err(format!(
+        "clause '{piece}': 'step' must be followed by one of >=, <=, !=, >, <, ="
+      ));
+    }
+    return Err(format!(
+      "clause '{piece}' did not match kind=..., kind!=..., kind~..., or step<op>N"
+    ));
+  }
+  Ok(clauses)
+}
+
+fn matches_local_event(ev: &LocalStreamedEvent, clauses: &[LocalFilterClause]) -> bool {
+  if clauses.is_empty() {
+    return true;
+  }
+  let kind_lower = ev.kind.to_ascii_lowercase();
+  for clause in clauses {
+    match clause {
+      LocalFilterClause::KindEquals(v) if &kind_lower != v => return false,
+      LocalFilterClause::KindNotEquals(v) if &kind_lower == v => return false,
+      LocalFilterClause::KindContains(v) if !kind_lower.contains(v.as_str()) => return false,
+      LocalFilterClause::Step { op, threshold } => {
+        let step = ["step_index", "step", "seq"]
+          .iter()
+          .find_map(|k| ev.payload.get(*k).and_then(|v| v.as_i64()))
+          .unwrap_or(ev.seq);
+        let ok = match op {
+          LocalFilterOp::Gt => step > *threshold,
+          LocalFilterOp::Ge => step >= *threshold,
+          LocalFilterOp::Lt => step < *threshold,
+          LocalFilterOp::Le => step <= *threshold,
+          LocalFilterOp::Eq => step == *threshold,
+          LocalFilterOp::Ne => step != *threshold,
+        };
+        if !ok {
+          return false;
+        }
+      }
+      _ => {}
+    }
+  }
+  true
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct EventsQuery {
   after_seq: Option<i64>,
+  #[serde(default)]
+  filter: Option<String>,
 }
 
 async fn events_history(
@@ -1689,6 +2062,10 @@ async fn events_history(
   RoutePath(run_id): RoutePath<Uuid>,
   Query(query): Query<EventsQuery>,
 ) -> Response {
+  let clauses = match parse_local_event_filter(query.filter.as_deref()) {
+    Ok(c) => c,
+    Err(msg) => return error_json(StatusCode::BAD_REQUEST, &msg),
+  };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
   let guard = state.lock_runs();
@@ -1698,7 +2075,7 @@ async fn events_history(
   let filtered: Vec<LocalStreamedEvent> = entry
     .events
     .iter()
-    .filter(|e| e.seq > after)
+    .filter(|e| e.seq > after && matches_local_event(e, &clauses))
     .cloned()
     .collect();
   Json(filtered).into_response()
@@ -1710,34 +2087,40 @@ async fn stream_events(
   RoutePath(run_id): RoutePath<Uuid>,
   Query(query): Query<EventsQuery>,
 ) -> Response {
+  let clauses = match parse_local_event_filter(query.filter.as_deref()) {
+    Ok(c) => c,
+    Err(msg) => return error_json(StatusCode::BAD_REQUEST, &msg),
+  };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
-  let (backfill, rx, already_done) = {
+  let (backfill, last_backfill_seq, rx, already_done) = {
     let guard = state.lock_runs();
     let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
       return error_json(StatusCode::NOT_FOUND, "run not found");
     };
     let rx = entry.tx.subscribe();
-    let backfill: Vec<LocalStreamedEvent> = entry
-      .events
-      .iter()
-      .filter(|e| e.seq > after)
-      .cloned()
-      .collect();
+    let raw_after: Vec<&LocalStreamedEvent> =
+      entry.events.iter().filter(|e| e.seq > after).collect();
+    let last_seq = raw_after.last().map(|e| e.seq).unwrap_or(after);
     let attempt_start = entry.attempt_start_seq;
     let done = is_terminal_status(&entry.record.status)
-      || backfill
+      || raw_after
         .iter()
         .any(|e| e.seq >= attempt_start && is_terminal_event_kind(&e.kind));
-    (backfill, rx, done)
+    let backfill: Vec<LocalStreamedEvent> = raw_after
+      .into_iter()
+      .filter(|e| matches_local_event(e, &clauses))
+      .cloned()
+      .collect();
+    (backfill, last_seq, rx, done)
   };
 
-  let last_backfill_seq = backfill.last().map(|e| e.seq).unwrap_or(after);
   let backfill_stream = futures::stream::iter(backfill);
 
   let live_stream = if already_done {
     futures::future::Either::Left(futures::stream::empty())
   } else {
+    let clauses_live = clauses;
     let stream = BroadcastStream::new(rx)
       .filter_map(move |item| {
         let out = match item {
@@ -1754,7 +2137,8 @@ async fn stream_events(
           *terminated = true;
         }
         futures::future::ready(Some(ev))
-      });
+      })
+      .filter(move |ev| futures::future::ready(matches_local_event(ev, &clauses_live)));
     futures::future::Either::Right(stream)
   };
 

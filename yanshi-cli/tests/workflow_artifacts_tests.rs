@@ -144,13 +144,78 @@ fn run_without_output_dir_lists_artifacts_but_copies_nothing() {
   assert!(!fixture.work.path().join("out").exists());
 }
 
-#[test]
-fn output_dir_is_rejected_in_server_mode() {
+#[tokio::test]
+async fn output_dir_downloads_artifacts_in_server_mode() {
+  use axum::{
+    Json, Router,
+    routing::{get, post},
+  };
+  use serde_json::json;
+
   let fixture = Fixture::new();
-  fixture
-    .bare_command()
-    .args(["--server", "http://127.0.0.1:9", "--output-dir", "out"])
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("--output-dir is local-only"));
+  let run_id = "00000000-0000-0000-0000-000000000099";
+  let art_id = "00000000-0000-0000-0000-000000000077";
+  let payload_bytes = b"remote-artifact-bytes".to_vec();
+  let payload_for_get = payload_bytes.clone();
+
+  let app = Router::new()
+    .route(
+      "/v1/runs",
+      post(move || async move { Json(json!({ "run_id": run_id, "status": "queued" })) }),
+    )
+    .route(
+      "/v1/runs/:id",
+      get(move || async move { Json(json!({ "id": run_id, "status": "succeeded" })) }),
+    )
+    .route(
+      "/v1/runs/:id/artifacts",
+      get(move || async move {
+        Json(json!({
+          "run_id": run_id,
+          "artifacts": [{
+            "id": art_id,
+            "node_id": "synth",
+            "name": "1.wav",
+            "mime_type": "audio/wav",
+            "size_bytes": 21
+          }]
+        }))
+      }),
+    )
+    .route(
+      "/v1/runs/:id/artifacts/:aid",
+      get(move || {
+        let b = payload_for_get.clone();
+        async move { b }
+      }),
+    );
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  tokio::spawn(async move {
+    let _ = axum::serve(listener, app).await;
+  });
+
+  let out_dir = fixture.work.path().join("remote-out");
+  let server_url = format!("http://{addr}");
+  let mut cmd = fixture.bare_command();
+  cmd
+    .args(["--server", &server_url, "--output-dir"])
+    .arg(&out_dir);
+  tokio::task::spawn_blocking(move || {
+    cmd
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("Downloaded 1 artifact(s)"));
+  })
+  .await
+  .expect("join");
+
+  assert_eq!(
+    fs::read(out_dir.join("synth").join("1.wav")).expect("wav"),
+    payload_bytes
+  );
+  assert!(out_dir.join("artifacts.json").is_file());
 }
