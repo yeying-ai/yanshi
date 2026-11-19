@@ -1,11 +1,12 @@
 # Current Project Status
 
-Last updated: 2026-11-18 (Content Studio track **Y0–Y10** closed, plus the
-daily productivity, keynote & multi-paradigm creative studio suites — native
-pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst `.pdf` export,
-art-directed `illustration` node, 18 Studio catalogue workflows including
-`episodic_drama_studio`, `debate_podcast_show`, and `worldbuilding_bible`, and
-Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
+Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, and **AA**
+closed, plus the daily productivity, keynote & multi-paradigm creative studio
+suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst `.pdf`
+export, art-directed `illustration` node, 19 Studio catalogue workflows
+including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
+`worldbuilding_bible`, and Pingora production gateway; see `RoadMap.md` and
+`TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
 evaluations, roadmap notes, and TODO queues may explain how the project arrived
@@ -130,9 +131,11 @@ contracts.
 
 The short-term execution queue in `TODOs.md` (maintainer-local, gitignored) is
 currently **empty** — every segment through **X** (2026-10-07 evaluation fixes),
-**Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`), and
+**Y0–Y10** (the Content Studio reset specified by `RFC_CONTENT_STUDIO.md`),
 **Z** (2026-11-18 Notebook lifecycle closure, modality SSRF/gateway hardening &
-dogfooding refinements)
+dogfooding refinements), and **AA** (2026-11-19 `data_table` generator,
+persisted Notebook `Deliverable` citations, skill-run admission parity &
+`.docx`/`.csv`/`.tsv`/`.json` source ingestion)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts
@@ -147,14 +150,17 @@ has closed:
   domain checks + compile-error feedback loop), and `illustration` node
   (art-directed prompt refinement, 6 visual style presets, dark/light palette
   harmonization, bounded concurrent `SlideDeck` / batch generation).
-- **Y4–Y6** — 18 Studio catalogue workflows under `examples/generators/`
+- **Y4–Y6** — 19 Studio catalogue workflows under `examples/generators/`
   (`illustrated_slides`, `tech_slides_video`, `episodic_drama_studio`,
   `debate_podcast_show`, `worldbuilding_bible`, `slides`, `video_overview`,
-  `report`, `infographic`, `mindmap`, `circuit_diagram`, `audio_overview`,
-  `flashcards`, `quiz`, `repo_architecture`, `backend_project_planner`,
-  `paper_reader`, `video_summarizer`), `examples/applications/content-studio/`,
+  `report`, `infographic`, `data_table`, `mindmap`, `circuit_diagram`,
+  `audio_overview`, `flashcards`, `quiz`, `repo_architecture`,
+  `backend_project_planner`, `paper_reader`, `video_summarizer`),
+  `examples/applications/content-studio/`,
   persistent `notebooks` / `sources` / `source_chunks` / `notebook_artifacts`
-  with unified citations and `POST /v1/notebooks/{id}/generate`, plus inline
+  (with persisted `deliverable JSONB`, interactive citation lookup, and `.pdf` /
+  `.docx` / `.csv` / `.tsv` / `.json` / `.html` / `.md` / ASR `recording`
+  ingestion) and `POST /v1/notebooks/{id}/generate`, plus inline
   workflow `agent` HITL `ask_user` interrupt/resume and gateway-safe inline
   `multi_agent` (`blackboard` / `debate` / `handoff`) in gateway and Studio UI.
 - **Y7–Y10 & Z** — cost-budget approvals, `ToolEffect::Publish`, gateway reach

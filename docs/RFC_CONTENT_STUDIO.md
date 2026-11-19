@@ -277,12 +277,12 @@ dir. ffmpeg is never linked in.
 
 ## 6. Decision: notebook entity and index persistence
 
-Migration `0012_notebooks.sql`:
+Migration `0013_notebooks.sql` – `0015_notebook_artifact_deliverables.sql`:
 
 | Table | Columns (beyond `id`, `tenant_id`, timestamps) |
 |---|---|
 | `notebooks` | `title` |
-| `sources` | `notebook_id`, `kind` (`url` / `file` / `text` / `recording`), `status`, `sha256`, `origin` (URL or original filename), `error` |
+| `sources` | `notebook_id`, `kind` (`url` / `file` / `text` / `recording`), `status`, `sha256`, `origin` / `uri` (URL or original filename), `error` |
 | `source_chunks` | `source_id`, `notebook_id`, `chunk_id`, `ordinal`, `content`, `metadata JSONB` |
 | `notebook_artifacts` | `notebook_id`, `artifact_id`, `kind`, `deliverable JSONB` |
 
@@ -296,10 +296,11 @@ is no serialised index format and no Qdrant requirement.
 `VectorStoreKnowledgeBackend` with one collection per notebook remains an
 opt-in; its re-evaluate condition is in §8.
 
-Ingestion is a run, not a bespoke job: `POST /v1/notebooks/{id}/sources`
-submits an ingestion workflow (fetch with the gateway's SSRF filter → loader →
-chunk → insert chunks; `recording` sources pass through `asr` first) so
-progress and failures arrive on the same SSE stream as every other run.
+Ingestion: `POST /v1/notebooks/{id}/sources` fetches `url` sources through the
+gateway's SSRF filter, decodes uploaded `file` documents (`.txt`, `.md`, `.html`,
+`.pdf`, `.docx`, `.csv`, `.tsv`, `.json`), accepts pasted `text`, or transcribes
+uploaded `recording` audio via `asr`, chunks passages into `source_chunks`, and
+invalidates `NotebookIndexCache`.
 
 Generation against a notebook: `POST /v1/notebooks/{id}/generate`
 `{ kind, params }` selects the template, ranks ready chunks by BM25 relevance

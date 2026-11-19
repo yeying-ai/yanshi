@@ -81,6 +81,13 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Security
 
+- **Skill-run per-tenant admission parity, `run_dir` retention scoping, and `.docx` zip-bomb ceiling (`e186390`, `53a21bc`).**
+  `POST /v1/skills/{name}:run` now routes through `runs::admit_and_dispatch`
+  (enforcing `RunAdmissionRegistry` + `RunRepo::create_if_admitted` per-tenant
+  concurrency and submission-rate caps, persisting `runs.run_dir`, nesting
+  `[[workflows]]` sub-runs under `<run_base_dir>/<run_id>`, and checking
+  structured `inputs` via `GatewayPolicy::check_run_inputs`). Pure-Rust `.docx`
+  notebook ingestion caps uncompressed WordprocessingML XML reads at 16 MiB.
 - **Modality media-source SSRF defense and gateway host-path ceilings (`bd869f0`, `F-A4-1`).**
   `yanshi_nodes::common::utils` (`load_bytes_from_source` and `load_data_uri_*`)
   now fetches `http(s)://` audio and image URLs through `HttpTool::send_bytes`
@@ -123,6 +130,12 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Root-cause error reporting on gateway runs (`e186390`).**
+  `yanshi_server::runs::first_state_error` now delegates to
+  `yanshi_core::FlowStateExt::first_node_failure` instead of iterating
+  `HashMap<String, AsyncNodeResult>` in random hash order, preventing downstream
+  `DependencyNotMet` cascades from masking the upstream root-cause node failure
+  in `runs.error`.
 - **`MultiAgentNode` shared blackboard state, runtime prompt overrides & indirect image-source keys (`add28fa`, `0952590`).**
   `MultiAgentNode` previously omitted a shared `BlackboardStore` when building
   `BlackboardSupervisor` and ignored `input_mapping` `message` / `prompt`
@@ -374,6 +387,18 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Official `data_table` Studio generator, persisted Notebook `Deliverable` citations, and `.docx`/`.csv`/`.tsv`/`.json` source ingestion (`7d00992`, `330cf65`, `53a21bc`).**
+  Added `examples/generators/data_table.yml` (`DeliverableKind::DataTable`:
+  `.xlsx` + `.csv` + `.html` preview with per-row citations), registered across
+  `POST /v1/notebooks/{id}/generate` (12 source-grounded generators),
+  `examples/applications/content-studio`, and `/ui` (19 Studio catalogue
+  templates). Migration `0015_notebook_artifact_deliverables.sql` persists each
+  generator's `Deliverable` JSON on `notebook_artifacts` so
+  `GET /v1/notebooks/{id}/artifacts` exposes titles and interactive citation
+  chips in `/ui/notebooks` that open cited source chunks directly. Extended
+  notebook source ingestion with pure-Rust `.docx` (paragraphs + tables),
+  `.csv`, `.tsv`, and `.json` extraction, and added `inputs`, `model`, and
+  `cost_limit_usd` fields to `POST /v1/skills/{name}:run`.
 - **Notebook & source deletion lifecycle, citation chunk lookup, focus-ranked multi-source grounding, and Track Z SDK/CLI refinements (`2ce7375`, `f43a1cd`, `e3453ff`).**
   Added `SourceRepo::delete`, `DELETE /v1/notebooks/{id}`,
   `DELETE /v1/notebooks/{id}/sources/{source_id}` (both invalidating the

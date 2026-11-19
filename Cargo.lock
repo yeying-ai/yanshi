@@ -7316,6 +7316,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "csv",
  "dirs",
  "reqwest 0.12.24",
  "serde",
@@ -7609,6 +7610,7 @@ dependencies = [
  "axum",
  "base64 0.21.7",
  "chrono",
+ "csv",
  "dirs",
  "dotenvy",
  "filetime",

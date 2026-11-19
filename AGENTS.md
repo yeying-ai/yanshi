@@ -174,9 +174,10 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-18 (synced with Content Studio Y0–Y10 closure,
-18-template Studio catalogue incl. multi-paradigm creative & deliberative
-studios, gateway-safe inline `multi_agent`, `illustration` node, and pure-Rust
-native OOXML `.pptx` / `16:9` Typst `.pdf` slide rendering; earlier V4.1
-regeneration on 2026-08-08 aligned the 25-crate workspace layout with
-`CLAUDE.md` + `docs/CURRENT_STATUS.md`).
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 / Z / AA
+closure, 19-template Studio catalogue incl. `data_table` & multi-paradigm
+creative/deliberative studios, persisted Notebook `Deliverable` citations &
+`.docx`/`.csv`/`.tsv`/`.json` source ingestion, gateway-safe inline
+`multi_agent`, `illustration` node, and pure-Rust native OOXML `.pptx` / `16:9`
+Typst `.pdf` slide rendering; earlier V4.1 regeneration on 2026-08-08 aligned
+the 25-crate workspace layout with `CLAUDE.md` + `docs/CURRENT_STATUS.md`).

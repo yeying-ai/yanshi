@@ -6,9 +6,10 @@ from a closed menu of generators, and each generator is a hand-written
 workflow template.
 
 ```
-yanshi skill run → planner (ReAct) → 11 source-grounded generator tools
+yanshi skill run → planner (ReAct) → 12 source-grounded generator tools
   (report / mindmap / audio_overview / slides / flashcards / quiz / infographic /
-   video_overview / illustrated_slides / tech_slides_video / debate_podcast_show)
+   data_table / video_overview / illustrated_slides / tech_slides_video /
+   debate_podcast_show)
                                         │  (WorkflowTool over examples/generators/*.yml)
                                         └→ files → --output-dir/<tool>/<node>/<file>
 ```
@@ -47,8 +48,10 @@ content, citations, file names), not the runs' full state.
 ### On the gateway
 
 When the skill is in the gateway's skill index (`YANSHI_SKILLS_INDEX`),
-`POST /v1/skills/content-studio:run` with `{"input": "..."}` runs the same
-planner. Each generator call waits for approval at
+`POST /v1/skills/content-studio:run` with `{"input": "..."}` or structured
+`{"inputs": {"url": "https://example.org", "want": "report,data_table"}, "model": "..."}`
+runs the same planner under the gateway's per-tenant admission and `cost_limit_usd`
+controls. Each generator call waits for approval at
 `/v1/runs/{id}/approvals`, since the production profile does not treat a
 workflow tool as idempotent. The files then appear under
 `GET /v1/runs/{id}/artifacts`. The templates must pass the gateway policy,
