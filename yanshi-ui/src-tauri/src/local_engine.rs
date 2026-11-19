@@ -820,60 +820,60 @@ pub(crate) struct SpawnLocalRunParams {
   pub on_complete: Option<RunCompletionHook>,
 }
 
+pub(crate) struct ImportedRunRegistration {
+  pub run_id: Uuid,
+  pub tenant_id: String,
+  pub workflow: String,
+  pub run_dir: PathBuf,
+  pub notebook_id: Uuid,
+  pub notebook_kind: String,
+  pub artifacts: Vec<LocalArtifactSummary>,
+}
+
+pub(crate) struct CompletedRunForAttach {
+  pub record: LocalRunRecord,
+  pub artifacts: Vec<LocalArtifactSummary>,
+  pub deliverable: Option<serde_json::Value>,
+  pub notebook_kind: Option<String>,
+}
+
 impl LocalEngineState {
-  pub(crate) fn register_imported_run(
-    &self,
-    run_id: Uuid,
-    tenant_id: &str,
-    workflow: String,
-    run_dir: PathBuf,
-    notebook_id: Uuid,
-    notebook_kind: String,
-    artifacts: Vec<LocalArtifactSummary>,
-  ) {
+  pub(crate) fn register_imported_run(&self, reg: ImportedRunRegistration) {
     let now = Utc::now();
     let record = LocalRunRecord {
-      id: run_id,
-      workflow,
+      id: reg.run_id,
+      workflow: reg.workflow,
       status: "succeeded".to_string(),
-      tenant_id: tenant_id.to_string(),
+      tenant_id: reg.tenant_id,
       started_at: now,
       finished_at: Some(now),
-      run_dir: Some(run_dir.display().to_string()),
+      run_dir: Some(reg.run_dir.display().to_string()),
       error: None,
     };
     let (tx, _rx) = broadcast::channel(16);
     let entry = RunEntry {
       record,
       events: Vec::new(),
-      artifacts,
+      artifacts: reg.artifacts,
       tx,
       cancel_token: FlowCancellationToken::new(),
       debug_controller: None,
       attempt_start_seq: 0,
       model: None,
       cost_limit_usd: None,
-      notebook_id: Some(notebook_id),
-      notebook_kind: Some(notebook_kind),
+      notebook_id: Some(reg.notebook_id),
+      notebook_kind: Some(reg.notebook_kind),
       on_complete: None,
     };
-    let _ = write_run_meta_sync(&run_dir, &entry);
-    self.lock_runs().insert(run_id, entry);
+    let _ = write_run_meta_sync(&reg.run_dir, &entry);
+    self.lock_runs().insert(reg.run_id, entry);
   }
 
   pub(crate) fn get_completed_run_for_attach(
     &self,
     tenant_id: &str,
     run_id: Uuid,
-  ) -> Result<
-    (
-      LocalRunRecord,
-      Vec<LocalArtifactSummary>,
-      Option<serde_json::Value>,
-      Option<String>,
-    ),
-    (StatusCode, String),
-  > {
+  ) -> Result<CompletedRunForAttach, (StatusCode, String)> {
     let (record, artifacts, events, nb_kind) = {
       let guard = self.lock_runs();
       let Some(entry) = guard
@@ -941,7 +941,12 @@ impl LocalEngineState {
       }
     }
 
-    Ok((record, artifacts, deliverable, nb_kind))
+    Ok(CompletedRunForAttach {
+      record,
+      artifacts,
+      deliverable,
+      notebook_kind: nb_kind,
+    })
   }
 
   pub(crate) async fn spawn_workflow_run(

@@ -1,19 +1,22 @@
 # Current Project Status
 
 Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-**AC**, **AD**, **AE**, and **AF** closed, plus the daily productivity, keynote & multi-paradigm creative
+**AC**, **AD**, **AE**, **AF**, and **AG** closed, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
 `worldbuilding_bible`, persistent multi-turn source-grounded Notebook Q&A
 (`POST /v1/notebooks/{id}/ask` + `GET/DELETE /v1/notebooks/{id}/messages`) with
 `source_ids` scoping, Notebook Studio planner (`POST /v1/notebooks/{id}/plan`)
-& atomic multi-deliverable `generate-batch`, source rename/note edit (`PATCH`),
-failed source `:retry` & smart `arxiv.org`/`github.com` URL ingestion, per-source
+& atomic multi-deliverable `generate-batch`, standalone Studio run attachment
+(`POST /v1/notebooks/{id}/artifacts` / `yanshi notebook attach-run`), lossless
+`raw_text` source rename/note edit (`PATCH`), failed source `:retry` & smart
+`arxiv.org`/`openreview.net`/`github.com` & `.srt`/`.vtt` ingestion, per-source
 passage reader (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`), portable
-Notebook bundle export/import & one-click `artifacts.zip` archive, pure-Rust
-`.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion, interactive UI flashcards/quiz/sortable
-table viewers, first-class `yanshi notebook` CLI, 23-route 1:1 Tauri desktop
+Notebook bundle export/import with 100% `deliverables` restoration & one-click
+`artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion,
+interactive UI flashcards/quiz/sortable-table/audio-transcript/video-storyboard
+viewers, first-class `yanshi notebook` CLI, 24-route 1:1 Tauri desktop
 Notebook engine parity, and Pingora production gateway; see `RoadMap.md` and `TODOs.md`)
 
 This is the current authoritative status entrypoint for Yanshi. Historical
@@ -157,12 +160,19 @@ Playwright E2E, and `yanshi-core` / `yanshi-cli` Cargo manifest dependency pruni
 reader, `POST /v1/notebooks/{id}/plan` Studio planner, `POST /v1/notebooks/{id}/generate-batch`
 multi-deliverable batch generation across gateway/Tauri/CLI/UI, concurrent UI run
 tracking + terminal-status gallery sync, and 7/7 live Chromium Playwright E2E closure),
-and **AF** (2026-11-19 19-generator contract & `export_pdf=false` fixes, inline SVG
+**AF** (2026-11-19 19-generator contract & `export_pdf=false` fixes, inline SVG
 CSP & `?inline=1` artifact parity, `cleanup.rs` Notebook deliverable retention
 protection, persistent `notebook_messages` (`0016`), source `PATCH` rename/text
 re-chunking & `:retry`, smart `arxiv.org`/`github.com` URL ingestion, interactive
 UI flashcards/quiz/sortable-table viewers & custom-tenant preview auth, and CI
-`docs.yml`/`quality.yml`/`ui-e2e.yml` hardening)
+`docs.yml`/`quality.yml`/`ui-e2e.yml` hardening), and **AG** (2026-11-19 UTF-8
+CJK slice-panic elimination, runtime media-source `allowed_path_roots` confinement
+& `video_ingest` trusted-host gate, `:resume` model/budget/Notebook context
+persistence (`0017`) & idempotent artifact registration, portable `deliverables`
+restoration on `import`, lossless `raw_text` note editing, 24-route Studio→Notebook
+`POST /v1/notebooks/{id}/artifacts` + `yanshi notebook attach-run`, `workflow run --server`
+parity, interactive UI audio-transcript/video-storyboard viewers, and CI `dist/`
+freshness + `gateway-check` gates)
 has closed:
 
 - **Y0–Y2** — `RFC_CONTENT_STUDIO.md`, first-class `FlowValue::File` artifacts

@@ -4334,10 +4334,8 @@ async fn attach_notebook_run_artifacts(
     return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
   }
 
-  let (run_record, run_summaries, deliverable, run_nb_kind) = match engine
-    .get_completed_run_for_attach(&tenant, req.run_id)
-  {
-    Ok(quad) => quad,
+  let completed = match engine.get_completed_run_for_attach(&tenant, req.run_id) {
+    Ok(found) => found,
     Err((code, msg)) => return notebook_error_json(code, &msg),
   };
 
@@ -4348,7 +4346,8 @@ async fn attach_notebook_run_artifacts(
     .filter(|k| !k.is_empty())
     .map(str::to_string)
     .or_else(|| {
-      deliverable
+      completed
+        .deliverable
         .as_ref()
         .and_then(|d| d.get("kind"))
         .and_then(Value::as_str)
@@ -4356,9 +4355,9 @@ async fn attach_notebook_run_artifacts(
         .filter(|k| !k.is_empty())
         .map(str::to_string)
     })
-    .or_else(|| run_nb_kind)
+    .or(completed.notebook_kind)
     .or_else(|| {
-      yanshi_config::executor::parse_workflow_definition(&run_record.workflow)
+      yanshi_config::executor::parse_workflow_definition(&completed.record.workflow)
         .ok()
         .map(|d| d.name)
         .filter(|n| !n.trim().is_empty())
@@ -4370,8 +4369,8 @@ async fn attach_notebook_run_artifacts(
     id,
     &resolved_kind,
     req.run_id,
-    &run_summaries,
-    deliverable.as_ref(),
+    &completed.artifacts,
+    completed.deliverable.as_ref(),
   );
   let attached: Vec<LocalNotebookArtifact> = engine
     .notebooks()
@@ -5411,15 +5410,15 @@ async fn import_notebook(
     });
   }
   for (fresh_id, dir, kind_str, summaries) in imported_run_map.into_values() {
-    engine.register_imported_run(
-      fresh_id,
-      &tenant,
-      format!("@imported:{kind_str}"),
-      dir,
+    engine.register_imported_run(crate::local_engine::ImportedRunRegistration {
+      run_id: fresh_id,
+      tenant_id: tenant.clone(),
+      workflow: format!("@imported:{kind_str}"),
+      run_dir: dir,
       notebook_id,
-      kind_str,
-      summaries,
-    );
+      notebook_kind: kind_str,
+      artifacts: summaries,
+    });
   }
   let imported_deliverables = artifacts.len();
 

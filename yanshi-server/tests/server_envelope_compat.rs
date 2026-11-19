@@ -31,6 +31,10 @@ fn run(status: &str, finished_at: Option<&str>, error: Option<&str>) -> Run {
     error: error.map(ToString::to_string),
     events_retention_days: None,
     artifacts_retention_days: None,
+    model: None,
+    cost_limit_usd: None,
+    notebook_id: None,
+    notebook_kind: None,
   }
 }
 

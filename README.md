@@ -11,7 +11,7 @@
 
 **About the name.** In the *Liezi* (《列子·汤问》), the artificer Yanshi (偃师) presents King Mu of Zhou with a figure that sings, dances, and acts on its own — and, taken apart, turns out to be nothing but leather, wood, glue, and lacquer assembled by explicit structure, which "works again as before" once put back together. It is the oldest Chinese account of a built autonomous agent, and the principle behind this project: autonomous capabilities assembled from explicit, inspectable contracts (`Flow` graphs, `Tool` traits, `Skill` manifests) that can be traced, replayed, and recomposed.
 
-**Direction (Content Studio Y0–Y10 & Z–AF closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with a 19-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)), a multi-source Notebook workspace (`/v1/notebooks/*` + `yanshi notebook` CLI), and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows and multi-agent supervisors execute deterministically:
+**Direction (Content Studio Y0–Y10 & Z–AG closed).** Yanshi turns raw sources into finished, downloadable artifacts through a predictable five-stage pipeline — **Sources → Planner → Generators → Renderers → Artifacts** — paired with a 19-template built-in catalogue ([`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)), a 24-route multi-source Notebook workspace (`/v1/notebooks/*` + `yanshi notebook` CLI), and the cross-platform **`Yanshi Studio`** Web & Tauri v2 desktop app. LLMs plan the *content* (outlines, citations, slide visual routing, diagram source), while hand-authored, schema-validated DAG workflows and multi-agent supervisors execute deterministically:
 
 - **First-class media & artifacts**: `FlowValue::File` carries typed files across nodes with SHA-256 manifests, CLI `--output-dir` export, and streaming gateway downloads (`/v1/runs/{id}/artifacts`).
 - **Native editable slides & typesetting**: Pure-Rust OOXML `pptx_writer` emits genuinely editable PowerPoint shapes, `<a:tbl>` tables, `<p:cxnSp>` connectors, and speaker notes (not flat raster screenshots), alongside `16:9` widescreen Typst `.pdf` and interactive `.html` decks.
@@ -337,7 +337,7 @@ cargo test --workspace --all-features
 - **[Online Manual (`yanshi.dev/docs/`)](https://yanshi.dev/docs/)** & **[Docs Index](docs/README.md)**: Full mdBook documentation.
 - **[Content Studio Catalogue & Desktop](docs/STUDIO_CATALOGUE.md)**: All 19 built-in generators, slide visual routing presets, Web Studio, and `Yanshi Studio` desktop app.
 - **[Trial Guide (中文试用手册)](docs/TRIAL_GUIDE.md)** & **[Runnable Tutorials](docs/examples/runnable_tutorials_zh.md)**: Step-by-step hands-on walkthroughs from zero API keys to full Studio pipelines.
-- **[Current Project Status](docs/CURRENT_STATUS.md)** & **[RoadMap](RoadMap.md)**: Authoritative snapshot of closed tracks (`Y0–Y10`, `Z–AF`) and future re-evaluation triggers.
+- **[Current Project Status](docs/CURRENT_STATUS.md)** & **[RoadMap](RoadMap.md)**: Authoritative snapshot of closed tracks (`Y0–Y10`, `Z–AG`) and future re-evaluation triggers.
 
 ### Architecture, Contracts & Operations
 - **[Content Studio RFC](docs/RFC_CONTENT_STUDIO.md)**: Five-stage pipeline, `FlowValue::File` artifact contract, citation model, and renderer architecture.

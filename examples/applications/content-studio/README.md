@@ -59,6 +59,15 @@ so a skill whose workflow uses a host-reaching node is refused at submit
 time. The planner may pass only each template's declared inputs, as plain
 JSON values.
 
+### Multi-source Notebooks (`yanshi notebook` / `/v1/notebooks`)
+
+For multi-source projects (PDFs, `.docx`/`.xlsx`/`.pptx`/`.csv`, `.srt`/`.vtt`
+subtitles, audio recordings, `arxiv.org` papers, `github.com` repositories, and
+notes), use the 24-route Notebook API or `yanshi notebook` CLI (`create`,
+`add-source`, `ask`, `plan --execute`, `generate-batch`, `attach-run`,
+`export`, `import`, `download-artifacts`) — or `/ui/notebooks` in the browser
+and Tauri desktop app.
+
 ## Tests
 
 - CI: `cargo test -p yanshi-cli --test content_studio_cli_tests` scripts

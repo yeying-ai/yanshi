@@ -92,10 +92,11 @@ so the tool tier carries no capability dependencies.
   propagation, first-party OTLP/HTTP+JSON exporter (`otlp-http` feature,
   `OtlpHttpSpanSink`) — gRPC transport still deferred, bring your own
   `OtelSpanSink` for that.
-- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, 23-route `/v1/notebooks`
-  incl. persistent `/ask` `messages`, `plan`, `generate-batch`, source `PATCH`/`:retry`,
+- **Platform** — `yanshi-server` Axum gateway (`/v1/runs`, 24-route `/v1/notebooks`
+  incl. persistent `/ask` `messages`, `plan`, `generate-batch`, standalone Studio
+  run attachment `POST /v1/notebooks/{id}/artifacts`, source `PATCH`/`:retry`,
   and `source_ids`, SSE, skills, Harness sessions/approvals),
-  Postgres-backed `yanshi-db` (18 tables / 14 repos), per-tenant run admission
+  Postgres-backed `yanshi-db` (18 tables / 14 repos, migrations `0001`–`0017`), per-tenant run admission
   control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
   (gRPC `WorkerProtocol`, 7 node payload types), and a React/Vite Web UI
   embedded at `/ui` (`/ui/notebooks`, `/ui/studio`, `/ui/app`, `/ui/console`)
@@ -180,14 +181,16 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AF closure,
+**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AG closure,
 19-template Studio catalogue incl. `data_table` & multi-paradigm creative/deliberative
-studios, 23-route Notebook contract incl. persistent `messages`, source `PATCH`
-rename/note re-chunking & `:retry`, smart `arxiv.org`/`github.com` ingestion,
-`sources/{id}/chunks` passage reader, `plan` + `generate-batch`, portable
-`export`+`import`, `artifacts.zip`, `generate.cost_limit_usd`, `source_ids`
-scoping & multi-turn grounded `POST /v1/notebooks/{id}/ask`, interactive UI
-flashcards/quiz/sortable-table viewers, `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`
-source ingestion, 1:1 Tauri desktop local engine parity, first-class `yanshi notebook`
-CLI, gateway-safe inline `multi_agent`, `illustration` node, and pure-Rust native
-OOXML `.pptx` / `16:9` Typst `.pdf` slide rendering).
+studios, 24-route Notebook contract incl. persistent `messages`, portable
+`deliverables` restoration on `import`, `POST /v1/notebooks/{id}/artifacts` (`attach-run`),
+lossless `raw_text` source `PATCH` rename/note re-chunking & `:retry`, smart
+`arxiv.org`/`openreview.net`/`github.com` & `.srt`/`.vtt` ingestion,
+`sources/{id}/chunks` passage reader, `plan` + `generate-batch`, `artifacts.zip`,
+`generate.cost_limit_usd`, `source_ids` scoping & multi-turn grounded
+`POST /v1/notebooks/{id}/ask`, interactive UI flashcards/quiz/sortable-table/audio-transcript/video-storyboard
+viewers, `.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json` source ingestion, 1:1 Tauri
+desktop local engine parity, first-class `yanshi notebook` CLI, gateway-safe
+inline `multi_agent`, `illustration` node, and pure-Rust native OOXML `.pptx` /
+`16:9` Typst `.pdf` slide rendering).

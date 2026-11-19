@@ -89,27 +89,37 @@ jobs:
       - name: Resolve
         id: resolve
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          REF_NAME_VAL: ${{ github.ref_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          GITHUB_SHA_VAL: ${{ github.sha }}
+          WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WF_EVENT: ${{ github.event.workflow_run.event }}
+          WF_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             # Manual dispatch is the human override path — always allowed
             # to run regardless of quality.yml's state. `dry_run` (default
             # true) is the only thing gating an actual GHCR push / GitHub
             # Release publish; the build/package jobs always run so the
             # matrix can be validated on a non-tag branch.
-            REF="${{ inputs.ref }}"
+            REF="${INPUT_REF}"
             if [[ -z "${REF}" ]]; then
-              REF="${{ github.ref_name }}"
+              REF="${REF_NAME_VAL}"
             fi
             REF="${REF#refs/tags/}"
             echo "should_release=true" >> "${GITHUB_OUTPUT}"
-            if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
               echo "should_publish=false" >> "${GITHUB_OUTPUT}"
             else
               echo "should_publish=true" >> "${GITHUB_OUTPUT}"
             fi
-            echo "ref_sha=${{ github.sha }}" >> "${GITHUB_OUTPUT}"
+            echo "ref_sha=${GITHUB_SHA_VAL}" >> "${GITHUB_OUTPUT}"
             echo "tag_name=${REF}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -121,10 +131,10 @@ jobs:
           # ref looks like a real release tag. `head_branch` on a
           # workflow_run event carries the tag name for a tag-triggered
           # upstream run (despite the "branch" naming).
-          CONCLUSION="${{ github.event.workflow_run.conclusion }}"
-          TRIGGER_EVENT="${{ github.event.workflow_run.event }}"
-          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
-          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          CONCLUSION="${WF_CONCLUSION}"
+          TRIGGER_EVENT="${WF_EVENT}"
+          HEAD_BRANCH="${WF_HEAD_BRANCH}"
+          HEAD_SHA="${WF_HEAD_SHA}"
 
           echo "workflow_run: conclusion=${CONCLUSION} event=${TRIGGER_EVENT} head_branch=${HEAD_BRANCH} head_sha=${HEAD_SHA}"
 
@@ -195,18 +205,19 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build yanshi (release)
-        # Default features (`llm`, `http`, `file`, `template`) — same as
-        # `cargo install yanshi-cli` would land for a fresh user.
-        # Skip `plugin` + `rag` features — they're opt-in and pull
-        # heavier deps. Tag-published binary stays minimal; users who
-        # need rag/plugin can `cargo install --features rag,plugin`.
+        # Default features (`plugin`, `rag`, plus built-in workflow, LLM,
+        # Notebook, Harness, and Studio nodes) — same surface as a fresh
+        # `cargo install yanshi-cli`. Keep optional `mcp` workflow-node
+        # feature opt-in (`cargo install yanshi-cli --features mcp`).
         run: cargo build --release -p yanshi-cli --bin yanshi
 
       - name: Package tarball
         shell: bash
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          ARCHIVE="yanshi-${{ matrix.target }}.tar.gz"
+          ARCHIVE="yanshi-${MATRIX_TARGET}.tar.gz"
           tar -czf "${ARCHIVE}" -C target/release yanshi
           # Compute sha256 alongside the archive so the release page
           # carries an integrity reference for every binary.
@@ -252,9 +263,11 @@ jobs:
       - name: Resolve image tag
         id: tag
         shell: bash
+        env:
+          RESOLVED_TAG_NAME: ${{ needs.resolve-release-context.outputs.tag_name }}
         run: |
           set -euo pipefail
-          REF_NAME="${{ needs.resolve-release-context.outputs.tag_name }}"
+          REF_NAME="${RESOLVED_TAG_NAME}"
           echo "tag=${REF_NAME}" >> "${GITHUB_OUTPUT}"
           # `latest` only on stable releases — pre-release tags
           # (`v1.0.0-rc.1`, `v0.3.0-alpha`, etc.) keep `latest`
@@ -280,12 +293,16 @@ jobs:
       - name: Compute image refs
         id: refs
         shell: bash
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          STEP_TAG: ${{ steps.tag.outputs.tag }}
+          STEP_IS_PRERELEASE: ${{ steps.tag.outputs.is_prerelease }}
         run: |
           set -euo pipefail
-          OWNER_LOWER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          OWNER_LOWER="$(printf '%s' "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')"
           BASE="ghcr.io/${OWNER_LOWER}/yanshi-server"
-          REFS="${BASE}:${{ steps.tag.outputs.tag }}"
-          if [[ "${{ steps.tag.outputs.is_prerelease }}" != "true" ]]; then
+          REFS="${BASE}:${STEP_TAG}"
+          if [[ "${STEP_IS_PRERELEASE}" != "true" ]]; then
             REFS+=$'\n'"${BASE}:latest"
           fi
           # Multi-line outputs need the heredoc form.

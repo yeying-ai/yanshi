@@ -94,10 +94,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run live LLM consistency suite
+        env:
+          PROVIDERS_INPUT: ${{ inputs.providers }}
         run: |
           # cargo test treats positional args as substring filters (any-match).
           # An empty `inputs.providers` runs the full suite; otherwise we feed
-          # each comma-separated token as its own filter token.
-          FILTERS="$(echo "${{ inputs.providers }}" | tr ',' ' ')"
+          # each comma-separated token as its own filter token without shell eval.
+          read -r -a FILTER_ARGS <<< "${PROVIDERS_INPUT//,/ }"
           cargo test -p yanshi-llm --test provider_consistency_live -- \
-            --nocapture --test-threads=1 ${FILTERS}
+            --nocapture --test-threads=1 "${FILTER_ARGS[@]}"

@@ -80,10 +80,11 @@ Then open:
   `/v1/notebooks/{id}/ask` & `/v1/notebooks/{id}/messages` (`GET`/`DELETE`),
   `/v1/notebooks/{id}/plan`, `/v1/notebooks/{id}/generate` &
   `/v1/notebooks/{id}/generate-batch` (with optional `cost_limit_usd`),
-  `/v1/notebooks/{id}/artifacts` (`GET`/`DELETE`), & `/v1/notebooks/{id}/artifacts.zip` —
-  23-route multi-source notebook contract (ingestion, source rename/note edit/retry,
-  full passage reading, portable bundle export/import, `source_ids` scoping,
-  persistent multi-turn cited Q&A, AI Studio planning & batch generation, and
+  `/v1/notebooks/{id}/artifacts` (`GET`/`POST`/`DELETE`), & `/v1/notebooks/{id}/artifacts.zip` —
+  24-route multi-source notebook contract (ingestion, lossless `raw_text` source
+  rename/note edit/retry, full passage reading, portable bundle export/import with
+  `deliverables` restoration, `source_ids` scoping, persistent multi-turn cited Q&A,
+  AI Studio planning & batch generation, standalone Studio run attachment, and
   `.zip` archive download) served identically by `yanshi-server` and the Tauri
   desktop `local_notebooks.rs` engine.
 - `GET /v1/preferences` & `PUT /v1/preferences` — durable tenant-scoped UI

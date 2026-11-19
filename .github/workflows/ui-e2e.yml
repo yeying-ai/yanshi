@@ -161,9 +161,10 @@ jobs:
         working-directory: yanshi-ui
         env:
           CI: "1"
+          SPEC_FILTER: ${{ github.event.inputs.spec_filter }}
         run: |
-          if [ -n "${{ github.event.inputs.spec_filter }}" ]; then
-            npx playwright test -g "${{ github.event.inputs.spec_filter }}"
+          if [ -n "${SPEC_FILTER:-}" ]; then
+            npx playwright test -g "${SPEC_FILTER}"
           else
             npx playwright test
           fi

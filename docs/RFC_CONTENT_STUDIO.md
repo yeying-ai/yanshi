@@ -277,12 +277,12 @@ dir. ffmpeg is never linked in.
 
 ## 6. Decision: notebook entity and index persistence
 
-Migration `0013_notebooks.sql` – `0016_notebook_messages.sql`:
+Migration `0013_notebooks.sql` – `0017_run_resume_context_and_source_content.sql`:
 
 | Table | Columns (beyond `id`, `tenant_id`, timestamps) |
 |---|---|
 | `notebooks` | `title` |
-| `sources` | `notebook_id`, `kind` (`url` / `file` / `text` / `recording`), `status`, `sha256`, `origin` / `uri` (URL or original filename), `error` |
+| `sources` | `notebook_id`, `kind` (`url` / `file` / `text` / `recording`), `status`, `sha256`, `origin` / `uri` (URL or original filename), `raw_content`, `error` |
 | `source_chunks` | `source_id`, `notebook_id`, `chunk_id`, `ordinal`, `content`, `metadata JSONB` |
 | `notebook_artifacts` | `notebook_id`, `artifact_id`, `kind`, `deliverable JSONB` |
 | `notebook_messages` | `notebook_id`, `question`, `answer`, `model`, `citations JSONB`, `used_chunk_count` |
@@ -332,19 +332,25 @@ Generation & grounded Q&A against a notebook:
   concurrency admission and `GatewayPolicy`), shares the `ready_chunks` fetch,
   and splits `cost_limit_usd` evenly across dispatched runs.
 - `GET /v1/notebooks/{id}/export` exports a portable `NotebookExportBundle`
-  (`version: 1`, `notebook`, `sources` + ordered `chunks`, `deliverables` +
-  citations, and a cited `markdown_brief` research dossier), and
-  `POST /v1/notebooks/import` imports a bundle into a fresh notebook with
-  remapped `source_id`s and `<new_source_id>:<ordinal>` `chunk_id`s (immediately
-  searchable via BM25 with zero schema migrations or primary-key collisions).
+  (`version: 1`, `notebook`, `sources` + `raw_text` + ordered `chunks`,
+  `deliverables` + citations, `messages`, and a cited `markdown_brief` research
+  dossier), and `POST /v1/notebooks/import` imports a bundle into a fresh
+  notebook with remapped `source_id`s, exact `<old_chunk_id> -> <new_source_id>:<ordinal>`
+  citation remapping, and full `deliverables` restoration (synthesizing viewable
+  primary files so imported flashcards, quizzes, tables, briefings, and podcasts
+  remain immediately inspectable alongside BM25 search).
 - `GET /v1/notebooks/{id}/search?q=&top_k=&source_ids=` runs BM25 passage search
   (scoped to `source_ids` when specified), `PATCH /v1/notebooks/{id}` `{ title }`
   renames an owned notebook, `PATCH /v1/notebooks/{id}/sources/{source_id}`
-  `{ title?, text? }` renames any source or re-chunks an inline `text` note in
-  place, `POST /v1/notebooks/{id}/sources/{source_id}:retry` re-runs ingestion on
+  `{ title?, text? }` renames any source or losslessly edits/re-chunks an inline
+  `text` note (`raw_text` preserved across overlap chunking),
+  `POST /v1/notebooks/{id}/sources/{source_id}:retry` re-runs ingestion on
   a `failed` URL source, `GET /v1/notebooks/{id}/sources/{source_id}/chunks`
-  lists ordered passages extracted from a single source, `GET /v1/notebooks/{id}/artifacts`
-  lists attached deliverables with citations, `GET /v1/notebooks/{id}/artifacts.zip`
+  lists ordered passages (plus `raw_text` for notes) extracted from a single source,
+  `GET /v1/notebooks/{id}/artifacts` lists attached deliverables with citations,
+  `POST /v1/notebooks/{id}/artifacts` `{ run_id, kind? }` attaches a completed
+  Studio run's primary/preview deliverables to a notebook,
+  `GET /v1/notebooks/{id}/artifacts.zip`
   streams all attached deliverables together with `BRIEFING.md` and
   `notebook_artifacts.json`, `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`
   detaches an individual deliverable link, `GET /v1/notebooks/{id}/chunks/{chunk_id}`
@@ -354,7 +360,7 @@ Generation & grounded Q&A against a notebook:
   `notebook_artifacts`-linked deliverables exempted from `cleanup.rs` retention
   sweeps until detached).
 - The Tauri desktop local engine (`yanshi-ui/src-tauri/src/local_notebooks.rs`)
-  mirrors this entire 23-route contract offline on local JSON bundles, and
+  mirrors this entire 24-route contract offline on local JSON bundles, and
   `yanshi notebook` exposes it as a first-class CLI command suite.
 
 ## 7. Cost, resume and governance (summary; detail in `TODOs.md` Y2 / Y7)

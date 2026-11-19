@@ -1,6 +1,6 @@
 # Yanshi Roadmap
 
-Last updated: 2026-11-17
+Last updated: 2026-11-19
 
 This roadmap is forward-looking only. For implemented behavior and current
 stability boundaries, see:
@@ -82,9 +82,10 @@ Three access modes, in this priority order:
 
 ## Completed Track — Y: Content Studio (closed 2026-11-16)
 
-Tracked task-by-task in `TODOs.md` § Y (Y0–Y10 all `DONE`, plus the 18-template
+Tracked task-by-task in `TODOs.md` § Y & Z–AG (Y0–Y10 and Z–AG all `DONE`, plus the 19-template
 Studio catalogue — spanning daily productivity, keynote presenter video, and
-multi-paradigm creative/deliberative studios — and native OOXML slide upgrade):
+multi-paradigm creative/deliberative studios — 24-route Notebook API + CLI +
+1:1 Tauri desktop engine, and native OOXML slide upgrade):
 
 | Stage | Goal | Done when |
 |---|---|---|

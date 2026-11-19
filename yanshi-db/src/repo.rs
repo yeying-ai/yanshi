@@ -133,7 +133,7 @@ pub trait RunRepo: Send + Sync {
 /// from an actual `DbError` (a real infrastructure failure).
 #[derive(Debug, Clone)]
 pub enum AdmissionOutcome {
-  Admitted(Run),
+  Admitted(Box<Run>),
   ConcurrencyLimitExceeded { current: i64, limit: i64 },
   RateLimited { window_count: i64, limit: i64 },
 }
@@ -594,7 +594,7 @@ impl RunRepo for PgRunRepo {
     .await?;
 
     tx.commit().await?;
-    Ok(AdmissionOutcome::Admitted(row))
+    Ok(AdmissionOutcome::Admitted(Box::new(row)))
   }
 
   async fn set_resume_context(

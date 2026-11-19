@@ -1872,7 +1872,7 @@ pub(crate) async fn admit_and_dispatch_with_guard(
     )
     .await?;
   let mut run = match admission_outcome {
-    yanshi_db::AdmissionOutcome::Admitted(run) => run,
+    yanshi_db::AdmissionOutcome::Admitted(run) => *run,
     yanshi_db::AdmissionOutcome::ConcurrencyLimitExceeded { current, limit } => {
       return Err(ApiError::TooManyRequests(format!(
         "tenant '{tenant_id}' has reached the concurrent-run limit ({current} running, limit {limit})"

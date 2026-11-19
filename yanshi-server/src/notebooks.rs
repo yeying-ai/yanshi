@@ -4990,12 +4990,11 @@ pub async fn import_notebook(
 
   for (idx, deliv) in validated.deliverables.into_iter().enumerate() {
     let is_text = is_synthesizable_text_deliverable(&deliv.name, deliv.mime_type.as_deref());
-    if !is_text {
-      if runs_with_text_sibling.contains(&deliv.old_run_id)
-        || !fallback_emitted_runs.insert(deliv.old_run_id)
-      {
-        continue;
-      }
+    if !is_text
+      && (runs_with_text_sibling.contains(&deliv.old_run_id)
+        || !fallback_emitted_runs.insert(deliv.old_run_id))
+    {
+      continue;
     }
 
     let (new_run_id, run_dir) = if let Some(existing) = imported_run_map.get(&deliv.old_run_id) {

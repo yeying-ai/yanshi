@@ -156,6 +156,7 @@ jobs:
           test -s dist/assets/styles.css
           cmp -s dist/assets/app.js dist/ui/assets/app.js
           cmp -s dist/assets/styles.css dist/ui/assets/styles.css
+          git diff --exit-code -- dist
 
   tauri-desktop-check:
     # AF5: `yanshi-ui/src-tauri` is excluded from the root workspace so
@@ -183,6 +184,28 @@ jobs:
         run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Run desktop local-engine & notebook tests
         run: cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --test-threads=1
+
+  gateway-check:
+    # AG5: `crates/gateway` is an isolated Cargo workspace so Pingora's
+    # OpenSSL native dependencies stay out of the main workspace's L0–L4
+    # dependency graph. Gate fmt + clippy + unit tests explicitly here.
+    name: yanshi-gateway (Pingora fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install OpenSSL & CMake build headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake pkg-config libssl-dev g++
+      - name: Format check gateway crate
+        run: cargo fmt --manifest-path crates/gateway/Cargo.toml --check
+      - name: Clippy gateway crate
+        run: cargo clippy --manifest-path crates/gateway/Cargo.toml --all-targets -- -D warnings
+      - name: Test gateway crate
+        run: cargo test --manifest-path crates/gateway/Cargo.toml
 
   clippy-lib-deny:
     # Q5.1: enforce no `unwrap()` / `expect()` in production library
@@ -722,6 +745,7 @@ jobs:
       - check-changelog
       - ui-tests
       - tauri-desktop-check
+      - gateway-check
       - cargo-audit
       - linux-sandbox-check
       - proto-validate
@@ -748,6 +772,7 @@ jobs:
           echo "check-changelog: ${{ needs.check-changelog.result }}"
           echo "ui-tests: ${{ needs.ui-tests.result }}"
           echo "tauri-desktop-check: ${{ needs.tauri-desktop-check.result }}"
+          echo "gateway-check: ${{ needs.gateway-check.result }}"
           echo "cargo-audit: ${{ needs.cargo-audit.result }}"
           echo "linux-sandbox-check: ${{ needs.linux-sandbox-check.result }}"
           echo "proto-validate: ${{ needs.proto-validate.result }}"
@@ -770,6 +795,7 @@ jobs:
           test "${{ needs.check-changelog.result }}" = "success"
           test "${{ needs.ui-tests.result }}" = "success"
           test "${{ needs.tauri-desktop-check.result }}" = "success"
+          test "${{ needs.gateway-check.result }}" = "success"
           test "${{ needs.cargo-audit.result }}" = "success"
           test "${{ needs.linux-sandbox-check.result }}" = "success"
           test "${{ needs.proto-validate.result }}" = "success"

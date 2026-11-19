@@ -11,7 +11,7 @@
 
 **名字由来。** 《列子·汤问》记载能工巧匠**偃师**向周穆王献上能歌善舞的机关人；将其拆解开来，不过是革、木、胶、漆等构件按精密结构拼接而成，重新合拢后又“活动如初”。这是中国古籍中关于自主智能体最早的工程记载，也是本项目的核心理念：**以显式、可拆解、可审计的结构契约（`Flow` 有向无环图、`Tool` 契约、`Skill` 能力包）组装智能体与多模态流水线，让每一次运行都可追踪、可重放、可重组。**
 
-**产品定位（Content Studio Y0–Y10 及 Z–AF 已收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **19 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）、多源研究笔记本工作台（`/v1/notebooks/*` 与 `yanshi notebook` CLI）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
+**产品定位（Content Studio Y0–Y10 及 Z–AG 已收官）。** Yanshi 将多模态内容生产收敛为可预测、可测试的五阶段确定性流水线 —— **Sources（素材摄取）→ Planner（内容规划）→ Generators（结构化生成）→ Renderers（确定性渲染）→ Artifacts（交付产物）**，内置 **19 套开箱即用生成器模板**（[`docs/STUDIO_CATALOGUE.md`](docs/STUDIO_CATALOGUE.md)）、24 路由多源研究笔记本工作台（`/v1/notebooks/*` 与 `yanshi notebook` CLI）以及跨平台 **`Yanshi Studio`** Web 与 Tauri v2 桌面端应用。LLM 与多智能体监督器负责规划与博弈打磨*内容本身*（大纲、角色设定锁、多轮辩论、图表源码），由经过严格 Schema 校验的确定性 DAG 模板驱动执行：
 
 - **一等公民媒体与交付物契约**：`FlowValue::File` 在节点间类型安全地传递多媒体与文档产物，自动生成 SHA-256 校验清单，支持 CLI `--output-dir` 落盘导出与网关 `/v1/runs/{id}/artifacts` 流式下载。
 - **纯 Rust 原生可编辑幻灯片与出版级排版**：内置纯 Rust OOXML `pptx_writer`，直接输出 PowerPoint / Keynote / WPS 原生可编辑形状、`<a:tbl>` 表格、`<p:cxnSp>` 连接线与演讲者备注（绝非整页截图贴图），同时输出 `16:9` 宽屏 Typst `.pdf` 与离线交互 `.html`。
@@ -337,7 +337,7 @@ cargo test --workspace --all-features
 - **[在线完整手册（`yanshi.dev/docs/`）](https://yanshi.dev/docs/)** 与 **[文档总索引](docs/README.md)**：基于 mdBook 构建的完整技术文档库。
 - **[Content Studio 模板图谱与桌面端指南](docs/STUDIO_CATALOGUE.md)**：19 套内置生成器详解、幻灯片视觉路由预设、Web Studio 与桌面端使用说明。
 - **[Yanshi 试用手册（中文）](docs/TRIAL_GUIDE.md)** 与 **[可运行中文教程](docs/examples/runnable_tutorials_zh.md)**：从零 API Key Mock 体验到真实多模态产出的分步实操指南。
-- **[当前项目状态（`CURRENT_STATUS.md`）](docs/CURRENT_STATUS.md)** 与 **[路线图（`RoadMap.md`）](RoadMap.md)**：已收官里程碑（`Y0–Y10`、`Z–AF`）与后续演进评估条件。
+- **[当前项目状态（`CURRENT_STATUS.md`）](docs/CURRENT_STATUS.md)** 与 **[路线图（`RoadMap.md`）](RoadMap.md)**：已收官里程碑（`Y0–Y10`、`Z–AG`）与后续演进评估条件。
 
 ### 架构设计、契约规范与生产运维
 - **[Content Studio RFC](docs/RFC_CONTENT_STUDIO.md)**：五阶段流水线、`FlowValue::File` 产物契约、原文引文溯源模型与渲染器策略。

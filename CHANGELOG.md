@@ -81,6 +81,21 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Security
 
+- **Runtime media-source path confinement (`allowed_path_roots`), `video_ingest` trusted-host gate, Pingora port-80 `Host` validation, and GitHub Actions `env:` input binding (`77af4f1`).**
+  `FlowExecutionConfig::allowed_path_roots` now confines local filesystem reads
+  across `yanshi_nodes::common::utils` (`load_bytes_from_source` / `load_data_uri_*`),
+  `AsrNode`, `TextToVideoNode` (which also fetches `http(s)://` reference images
+  through SSRF-pinned `HttpTool::send_bytes`), `pdf_extract`, `repo_snapshot`, and
+  `video_ingest` to the run artifact directory plus `YANSHI_GATEWAY_PATH_ROOTS`
+  when running inside `yanshi-server`. On the gateway, `GatewayPolicy` now inspects
+  indirect `Reach::MediaSource` runtime `inputs` (closing `input_mapping` host-path
+  smuggling) and gates `video_ingest` so `yt-dlp` may only run against trusted
+  public video platforms (`youtube.com`, `youtu.be`, `bilibili.com`, `b23.tv`,
+  `vimeo.com`) unless `video_ingest` is explicitly whitelisted in
+  `YANSHI_GATEWAY_HOST_NODE_TYPES`. `crates/gateway` rejects malformed port-80
+  `Host` headers before issuing `301` HTTPS redirects, and `.github/workflows`
+  (`ui-e2e.yml`, `llm-live.yml`, `release.yml`) bind `inputs.*` / `github.event.*`
+  through `env:` blocks instead of direct shell script interpolation.
 - **Inline SVG preview CSP, `X-Content-Type-Options: nosniff`, and Tauri `/v1/runs/{id}*` tenant isolation (`80d4b91`).**
   `GET /v1/runs/{id}/artifacts/{artifact_id}/preview` and
   `GET /v1/runs/{id}/artifacts/{artifact_id}?inline=1` on both `yanshi-server`
@@ -139,6 +154,22 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **UTF-8 CJK byte-slice panics, `:resume` context & idempotent artifact registration (`0017`), `tts-1` / pricing defaults, lossless `raw_text` note editing, and CLI/doctor parity (`77af4f1`, `3afc74f`, `d92912e`, `2cad1e9`).**
+  Eliminated all 6 UTF-8 multi-byte slice panics across `events_filter.rs`
+  (where `?filter=中文=1` panicked SSE/history workers), `web_search.rs`,
+  `figure.rs`, `rag/search.rs`, `skills/validator.rs`, and `model_fetcher.rs`.
+  Added migration `0017_run_resume_context_and_source_content.sql` so
+  `POST /v1/runs/{id}:resume` restores `model`, `cost_limit_usd`, and Notebook
+  `deliverable` attachment while `register_run_artifacts` skips already-registered
+  artifact paths idempotently (and filters Notebook attachment to `primary`/`preview`
+  files). Registered `tts-1`/`tts-1-hd` in `openai.yml`, added OpenAI modality
+  rates & `/etc/yanshi/pricing.yml` fallback + `Dockerfile` `YANSHI_PRICING_TABLE`,
+  fixed MP3 TTS duration estimation and `pptx_writer.rs` `data:` image SHA-256
+  deduplication, persisted `yanshi.model_override` in `Checkpoint` metadata for
+  `yanshi workflow resume`, wired `--input`/`--model`/`--cost-limit-usd`/`--output-dir`
+  and non-zero failure exit codes in `yanshi workflow run --server`, and fixed
+  `yanshi doctor --check-installations` text output, `mcp.toml` parse-error status
+  promotion, and remote HTTPS proxy preservation.
 - **Studio 19-generator `Deliverable.kind` & `export_pdf=false` contracts, Notebook deliverable retention protection, custom-tenant UI media auth, and CI workflow gates (`80d4b91`, `9489ebc`).**
   Fixed 4 Studio generators (`backend_project_planner`, `paper_reader`,
   `repo_architecture`, `video_summarizer`) to emit schema-registered
@@ -449,6 +480,18 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Portable Notebook `deliverables` import restoration, 24th Notebook route (`POST /v1/notebooks/{id}/artifacts` / `attach-run`), `.srt`/`.vtt` & OpenReview/arXiv-HTML ingestion, interactive audio/video viewers, and CI `dist/`/`gateway-check` gates (`3afc74f`, `d92912e`, `2cad1e9`).**
+  `POST /v1/notebooks/import` (on both `yanshi-server` and Tauri `local_notebooks.rs`)
+  now restores exported `deliverables` with recursive `<old_chunk_id>` →
+  `<new_source_id>:<ordinal>` citation remapping and synthesized viewable files.
+  Added `POST /v1/notebooks/{id}/artifacts` (24th Notebook route), `yanshi notebook attach-run`,
+  and the `"📥 存入笔记本"` workflow bridge in `/ui/studio` so completed Studio runs
+  can be attached directly into any notebook; added `.srt`/`.vtt` subtitle source
+  ingestion plus `arxiv.org/html/*`, `openreview.net/forum?id=*`, and slash-branch
+  `github.com` URL ingestion; added interactive `audio_overview` spoken-turn
+  transcript and `video_overview` scene-storyboard viewers with `[chunk_id]`
+  provenance jumps in `NotebookDeliverableViewer.tsx`; and added `git diff --exit-code -- dist`
+  plus `gateway-check` (`crates/gateway`) to `quality.yml`'s 23-job `release-gate`.
 - **Persistent Notebook `/ask` message history (`0016`), source rename/note edit (`PATCH`) & `:retry`, smart `arxiv.org`/`github.com` URL ingestion, and interactive UI deliverable viewers (`d5111db`, `a21120b`, `9489ebc`).**
   Added migration `0016_notebook_messages.sql` and `NotebookMessageRepo` so
   `POST /v1/notebooks/{id}/ask` automatically persists Q&A turns with verified

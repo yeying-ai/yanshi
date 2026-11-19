@@ -400,7 +400,7 @@ async fn run_repo_create_if_admitted_enforces_concurrency_and_self_heals() {
     .await
     .expect("first admission call succeeds");
   let first_run = match first {
-    AdmissionOutcome::Admitted(run) => run,
+    AdmissionOutcome::Admitted(run) => *run,
     other => panic!("expected Admitted, got {other:?}"),
   };
 
