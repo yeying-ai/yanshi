@@ -78,6 +78,18 @@ pub struct Run {
   pub events_retention_days: Option<i32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub artifacts_retention_days: Option<i32>,
+  #[sqlx(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<String>,
+  #[sqlx(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cost_limit_usd: Option<f64>,
+  #[sqlx(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub notebook_id: Option<Uuid>,
+  #[sqlx(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub notebook_kind: Option<String>,
 }
 
 /// Input for creating a new run via [`crate::repo::RunRepo::create`].

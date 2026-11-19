@@ -71,8 +71,19 @@ pub async fn register_run_artifacts(
   state: &HashMap<String, AsyncNodeResult>,
   base_dir: &Path,
 ) -> Result<usize, yanshi_db::DbError> {
+  let existing_paths: std::collections::HashSet<String> = repos
+    .artifacts
+    .list_for_run(run_id)
+    .await?
+    .into_iter()
+    .map(|a| a.path_or_url)
+    .collect();
   let mut registered = 0;
   for output in collect_file_outputs(state, base_dir) {
+    let path_str = output.path.to_string_lossy().to_string();
+    if existing_paths.contains(&path_str) {
+      continue;
+    }
     let (size_bytes, sha256) = match size_and_sha256(&output.path).await {
       Ok(v) => v,
       Err(err) => {
@@ -98,7 +109,7 @@ pub async fn register_run_artifacts(
         run_id,
         node_id: output.node_id,
         name,
-        path_or_url: output.path.to_string_lossy().to_string(),
+        path_or_url: path_str,
         mime_type: output.mime_type,
         tenant_id: Some(tenant_id.to_string()),
         size_bytes: Some(size_bytes as i64),
@@ -111,6 +122,45 @@ pub async fn register_run_artifacts(
     tracing::info!(run_id = %run_id, artifacts = registered, "run artifacts registered");
   }
   Ok(registered)
+}
+
+/// Filter run artifacts down to curated `primary` / `preview` deliverables when
+/// `deliverable.files` declares roles (`RFC_CONTENT_STUDIO.md` §4.3), avoiding
+/// 20-card Notebook gallery floods from intermediate `asset` raster frames while
+/// falling back to all run artifacts when no `primary`/`preview` match exists.
+pub fn select_notebook_deliverable_artifacts<'a>(
+  artifacts: &'a [yanshi_db::Artifact],
+  deliverable: Option<&serde_json::Value>,
+) -> Vec<&'a yanshi_db::Artifact> {
+  if let Some(files) = deliverable
+    .and_then(|d| d.get("files"))
+    .and_then(|f| f.as_array())
+  {
+    let curated: std::collections::HashSet<(&str, &str)> = files
+      .iter()
+      .filter(|entry| {
+        matches!(
+          entry.get("role").and_then(|r| r.as_str()),
+          Some("primary" | "preview")
+        )
+      })
+      .filter_map(|entry| {
+        let node_id = entry.get("node_id")?.as_str()?;
+        let name = entry.get("name")?.as_str()?;
+        Some((node_id, name))
+      })
+      .collect();
+    if !curated.is_empty() {
+      let matched: Vec<&'a yanshi_db::Artifact> = artifacts
+        .iter()
+        .filter(|a| curated.contains(&(a.node_id.as_str(), a.name.as_str())))
+        .collect();
+      if !matched.is_empty() {
+        return matched;
+      }
+    }
+  }
+  artifacts.iter().collect()
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────
@@ -856,5 +906,42 @@ mod tests {
     assert!(is_inline_query(Some("true")));
     assert!(!is_inline_query(Some("0")));
     assert!(!is_inline_query(None));
+  }
+
+  #[test]
+  fn select_notebook_deliverable_artifacts_keeps_primary_and_preview_only() {
+    let mk = |node_id: &str, name: &str| yanshi_db::Artifact {
+      id: Uuid::new_v4(),
+      run_id: Uuid::new_v4(),
+      node_id: node_id.to_string(),
+      name: name.to_string(),
+      path_or_url: format!("/tmp/{node_id}/{name}"),
+      mime_type: Some("application/octet-stream".to_string()),
+      created_at: chrono::Utc::now(),
+      tenant_id: "default".to_string(),
+      size_bytes: Some(128),
+      sha256: Some("abc".to_string()),
+    };
+    let all = vec![
+      mk("slides_render", "1.html"),
+      mk("slides_render", "2.pptx"),
+      mk("slides_render", "frame_01.png"),
+      mk("illustrate", "1.png"),
+    ];
+    let deliv = serde_json::json!({
+      "kind": "slides",
+      "title": "Deck",
+      "files": [
+        {"node_id": "slides_render", "name": "1.html", "role": "preview"},
+        {"node_id": "slides_render", "name": "2.pptx", "role": "primary"},
+        {"node_id": "illustrate", "name": "1.png", "role": "asset"}
+      ]
+    });
+    let picked = select_notebook_deliverable_artifacts(&all, Some(&deliv));
+    let names: Vec<&str> = picked.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, vec!["1.html", "2.pptx"]);
+
+    let fallback = select_notebook_deliverable_artifacts(&all, None);
+    assert_eq!(fallback.len(), 4);
   }
 }

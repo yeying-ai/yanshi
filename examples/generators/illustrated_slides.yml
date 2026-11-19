@@ -415,7 +415,7 @@ nodes:
           "kind": "slides",
           "title": {{ deck.title | json_encode() }},
           "content": {"slides": {{ deck.slides | json_encode() }}},
-          "citations": [],
+          "citations": [{% set_global first_cit = true %}{% for c in chunks | default(value=[]) %}{% if loop.index0 < 12 and c.chunk_id and c.content %}{% if not first_cit %},{% endif %}{% set_global first_cit = false %}{"source_id": {{ c.source_id | default(value="") | json_encode() }}, "chunk_id": {{ c.chunk_id | json_encode() }}, "quote": {{ c.content | truncate(length=280) | json_encode() }}}{% endif %}{% endfor %}],
           "files": [
             {"node_id": "slides_render", "name": {{ html | split(pat="/") | last | json_encode() }}, "mime_type": "text/html", "role": "preview"},
             {"node_id": "arch_figure", "name": {{ arch_svg | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% for img in painted %},

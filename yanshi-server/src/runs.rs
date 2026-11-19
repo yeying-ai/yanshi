@@ -975,7 +975,11 @@ async fn flow_execute(ctx: &RunContext) -> Result<(), anyhow_like::FlowRunError>
     if let Some(link) = &ctx.notebook {
       use yanshi_db::{ArtifactRepo as _, NotebookRepo as _};
       let deliverable = extract_run_deliverable(&state);
-      for artifact in ctx.repos.artifacts.list_for_run(ctx.run_id).await? {
+      let run_artifacts = ctx.repos.artifacts.list_for_run(ctx.run_id).await?;
+      for artifact in crate::artifacts::select_notebook_deliverable_artifacts(
+        &run_artifacts,
+        deliverable.as_ref(),
+      ) {
         ctx
           .repos
           .notebooks
@@ -1867,7 +1871,7 @@ pub(crate) async fn admit_and_dispatch_with_guard(
       state.run_admission_registry.window().as_secs() as i64,
     )
     .await?;
-  let run = match admission_outcome {
+  let mut run = match admission_outcome {
     yanshi_db::AdmissionOutcome::Admitted(run) => run,
     yanshi_db::AdmissionOutcome::ConcurrencyLimitExceeded { current, limit } => {
       return Err(ApiError::TooManyRequests(format!(
@@ -1883,6 +1887,23 @@ pub(crate) async fn admit_and_dispatch_with_guard(
       )));
     }
   };
+  if options.model.is_some() || options.cost_limit_usd.is_some() || options.notebook.is_some() {
+    state
+      .repos
+      .runs
+      .set_resume_context(
+        run_id,
+        options.model.as_deref(),
+        options.cost_limit_usd,
+        options.notebook.as_ref().map(|n| n.notebook_id),
+        options.notebook.as_ref().map(|n| n.kind.as_str()),
+      )
+      .await?;
+    run.model = options.model.clone();
+    run.cost_limit_usd = options.cost_limit_usd;
+    run.notebook_id = options.notebook.as_ref().map(|n| n.notebook_id);
+    run.notebook_kind = options.notebook.as_ref().map(|n| n.kind.clone());
+  }
 
   let debug_controller = if options.run_mode == RunMode::Debug {
     Some(FlowDebugController::new(
@@ -2210,6 +2231,11 @@ async fn resume_run(
     )));
   }
 
+  let restored_notebook = run
+    .notebook_id
+    .zip(run.notebook_kind.clone())
+    .map(|(notebook_id, kind)| NotebookLink { notebook_id, kind });
+
   dispatch_run(
     &state,
     state.executor.clone(),
@@ -2218,11 +2244,11 @@ async fn resume_run(
       workflow: run.workflow,
       tenant_id: run.tenant_id,
       run_base_dir,
-      cost_limit_usd: None,
+      cost_limit_usd: run.cost_limit_usd,
       resume: true,
       inputs: serde_json::Map::new(),
-      model: None,
-      notebook: None,
+      model: run.model,
+      notebook: restored_notebook,
       skill_dir: None,
       debug_controller: None,
       max_concurrency: None,

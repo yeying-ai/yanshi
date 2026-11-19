@@ -15,7 +15,7 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
-use yanshi_db::{Database, EventRepo, RunRepo, SourceChunkRepo};
+use yanshi_db::{ArtifactRepo, Database, EventRepo, RunRepo, SourceChunkRepo};
 use yanshi_server::{AppState, create_router, tenant::TENANT_HEADER};
 
 const MOCK_REGISTRY: &str = "models:\n  mock-model:\n    vendor: mock\n    type: text\n    model_id: mock-model\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n";
@@ -207,6 +207,17 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     ]
   })
   .to_string();
+  let recovered_cards_reply = json!({
+    "title": "Recovered Cards",
+    "items": [
+      {
+        "front": "Q1",
+        "back": "A1",
+        "chunk_id": chunk
+      }
+    ]
+  })
+  .to_string();
   let replies = json!([
     json!({"title": "Tides", "sections": [{"heading": "Cause", "brief": "why"}, {"heading": "Rhythm", "brief": "how often"}]}).to_string(),
     section("The moon pulls the sea.", "Tides are caused by the gravitational pull of the moon."),
@@ -214,6 +225,8 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
     plan_reply,
     dual_study_reply.clone(),
     dual_study_reply,
+    "not-valid-json-first-attempt",
+    recovered_cards_reply,
   ]);
   // SAFETY: still before the first model call in this process.
   unsafe { std::env::set_var("YANSHI_MOCK_RESPONSES", replies.to_string()) };
@@ -673,5 +686,149 @@ async fn a_notebook_generates_a_cited_report_with_downloadable_files() {
   assert!(
     final_arts.iter().any(|a| a["kind"] == "quiz"),
     "batch must attach quiz deliverable: {final_arts:?}"
+  );
+
+  // AG2: Verify `POST /v1/runs/{id}:resume` preserves `(model, cost_limit_usd, notebook_id, notebook_kind)`
+  // and does not duplicate already-registered `artifacts` rows.
+  let resume_nb_resp = call(
+    &state,
+    "POST",
+    "/v1/notebooks",
+    &tenant,
+    Some(json!({ "title": "Resume Recovery NB" })),
+  )
+  .await;
+  assert_eq!(resume_nb_resp.0, StatusCode::OK);
+  let resume_nb_id: Uuid = json_of(&resume_nb_resp.1)["id"]
+    .as_str()
+    .expect("nb id")
+    .parse()
+    .expect("uuid");
+  let (_, src_bytes) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{resume_nb_id}/sources"),
+    &tenant,
+    Some(json!({ "kind": "text", "text": "Resumable notebook source text about syzygy tides." })),
+  )
+  .await;
+  let _resume_src_id = json_of(&src_bytes)["id"]
+    .as_str()
+    .expect("src id")
+    .to_string();
+  for _ in 0..100 {
+    let (_, nb_bytes) = call(
+      &state,
+      "GET",
+      &format!("/v1/notebooks/{resume_nb_id}"),
+      &tenant,
+      None,
+    )
+    .await;
+    if json_of(&nb_bytes)["sources"][0]["status"] == "ready" {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+
+  // First queued mock response is deliberately malformed JSON so `flashcards`
+  // fails after `context` completes; `:resume` then consumes `recovered_cards_reply`.
+  let (code, gen_fail_bytes) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{resume_nb_id}/generate"),
+    &tenant,
+    Some(json!({
+      "kind": "flashcards",
+      "model": "mock-model",
+      "cost_limit_usd": 3.0,
+      "params": { "count": 1 }
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK);
+  let failed_run_id: Uuid = json_of(&gen_fail_bytes)["run_id"]
+    .as_str()
+    .expect("run_id")
+    .parse()
+    .expect("uuid");
+  for _ in 0..200 {
+    let r = state
+      .repos
+      .runs
+      .get(failed_run_id)
+      .await
+      .expect("get")
+      .expect("row");
+    if r.status == "failed" || r.status == "succeeded" {
+      assert_eq!(
+        r.status, "failed",
+        "first attempt must fail on invalid JSON"
+      );
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+
+  let (code, resume_bytes) = call(
+    &state,
+    "POST",
+    &format!("/v1/runs/{failed_run_id}:resume"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::OK,
+    "resume failed: {}",
+    String::from_utf8_lossy(&resume_bytes)
+  );
+  for _ in 0..200 {
+    let r = state
+      .repos
+      .runs
+      .get(failed_run_id)
+      .await
+      .expect("get")
+      .expect("row");
+    if r.status == "succeeded" || r.status == "failed" {
+      assert_eq!(r.status, "succeeded", "resumed run error: {:?}", r.error);
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+
+  let run_arts = state
+    .repos
+    .artifacts
+    .list_for_run(failed_run_id)
+    .await
+    .expect("list run artifacts");
+  assert_eq!(
+    run_arts.len(),
+    1,
+    "idempotent register_run_artifacts must not duplicate rows on :resume"
+  );
+  let (_, resumed_nb_arts_bytes) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{resume_nb_id}/artifacts"),
+    &tenant,
+    None,
+  )
+  .await;
+  let resumed_nb_arts = json_of(&resumed_nb_arts_bytes)["artifacts"]
+    .as_array()
+    .cloned()
+    .expect("resumed notebook artifacts");
+  assert_eq!(
+    resumed_nb_arts.len(),
+    1,
+    ":resume must restore NotebookLink and attach recovered flashcards deliverable: {resumed_nb_arts:?}"
+  );
+  assert_eq!(
+    resumed_nb_arts[0]["deliverable"]["title"],
+    "Recovered Cards"
   );
 }

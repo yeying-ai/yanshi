@@ -1666,3 +1666,81 @@ async fn notebook_and_source_repos_are_tenant_scoped() {
       .is_empty()
   );
 }
+
+#[tokio::test]
+async fn run_resume_context_and_source_raw_content_roundtrip() {
+  use yanshi_db::{NewSource, NotebookRepo, SourceKind, SourceRepo};
+  let Some(db) = fresh_db().await else {
+    return;
+  };
+  let repos = Repositories::from_pool(db.pool.clone());
+  let tenant = format!("tenant-ag2-{}", Uuid::new_v4());
+  let nb = repos
+    .notebooks
+    .create(&tenant, "Resume Context NB")
+    .await
+    .expect("create notebook");
+  let src = repos
+    .sources
+    .create(NewSource {
+      notebook_id: nb.id,
+      tenant_id: tenant.clone(),
+      kind: SourceKind::Text,
+      title: "Raw Note".to_string(),
+      uri: None,
+    })
+    .await
+    .expect("create source")
+    .expect("source row");
+  repos
+    .sources
+    .set_raw_content(&tenant, nb.id, src.id, "Exact verbatim note body")
+    .await
+    .expect("set raw content");
+  let fetched_src = repos
+    .sources
+    .get(&tenant, src.id)
+    .await
+    .expect("get source")
+    .expect("exists");
+  assert_eq!(
+    fetched_src.raw_content.as_deref(),
+    Some("Exact verbatim note body")
+  );
+
+  let run_id = Uuid::new_v4();
+  repos
+    .runs
+    .create(NewRun {
+      id: run_id,
+      workflow: "name: test\nnodes: []".to_string(),
+      status: RunStatus::Queued,
+      run_dir: None,
+      tenant_id: tenant.clone(),
+      events_retention_days: None,
+      artifacts_retention_days: None,
+    })
+    .await
+    .expect("create run");
+  repos
+    .runs
+    .set_resume_context(
+      run_id,
+      Some("mock-model"),
+      Some(3.5),
+      Some(nb.id),
+      Some("report"),
+    )
+    .await
+    .expect("set resume context");
+  let fetched_run = repos
+    .runs
+    .get(run_id)
+    .await
+    .expect("get run")
+    .expect("run exists");
+  assert_eq!(fetched_run.model.as_deref(), Some("mock-model"));
+  assert_eq!(fetched_run.cost_limit_usd, Some(3.5));
+  assert_eq!(fetched_run.notebook_id, Some(nb.id));
+  assert_eq!(fetched_run.notebook_kind.as_deref(), Some("report"));
+}

@@ -13,7 +13,7 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
-use yanshi_db::Database;
+use yanshi_db::{ArtifactRepo, Database, RunRepo};
 use yanshi_server::{AppState, create_router, tenant::TENANT_HEADER};
 
 async fn state() -> Option<AppState> {
@@ -841,6 +841,151 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert_eq!(code, StatusCode::OK, "{retried_src}");
   let _ = settled_sources(&state, &tenant, &id).await;
 
+  // AG2: Verify `raw_text` lossless note retrieval + `.vtt` subtitle upload + Studio run attachment (`POST /v1/notebooks/{id}/artifacts`).
+  let (code, edited_chunks_env) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{id}/sources/{text_source_id}/chunks"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{edited_chunks_env}");
+  assert_eq!(
+    edited_chunks_env["raw_text"],
+    "KingTideSyzygy alignment amplifies gravitational tidal range along continental shelves.",
+    "GET /sources/:id/chunks must return lossless raw_text for text notes"
+  );
+
+  let vtt_b64 = base64::Engine::encode(
+    &base64::engine::general_purpose::STANDARD,
+    b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nSevernEstuary funnel resonance reaches fourteen meters.\n",
+  );
+  let (code, vtt_src) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/sources"),
+    &tenant,
+    Some(json!({
+      "kind": "file",
+      "filename": "lecture.vtt",
+      "content_base64": vtt_b64,
+      "title": "Severn Lecture Subtitles"
+    })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{vtt_src}");
+  let _ = settled_sources(&state, &tenant, &id).await;
+
+  let studio_run_id = Uuid::new_v4();
+  let studio_run_dir = tempfile::tempdir().expect("studio run dir");
+  let studio_html_path = studio_run_dir.path().join("cards.html");
+  std::fs::write(&studio_html_path, b"<html><body>Flashcards</body></html>").expect("write html");
+  let cited_text_cid = format!("{text_source_id}:0");
+  let studio_deliv_state: yanshi_core::async_node::AsyncNodeResult =
+    Ok(std::collections::HashMap::from([(
+      "deliverable".to_string(),
+      yanshi_core::value::FlowValue::Json(json!({
+        "deliverable": {
+          "kind": "flashcards",
+          "title": "Syzygy Flashcards",
+          "content": {
+            "items": [{
+              "front": "What maximizes amplitude?",
+              "back": "Syzygy alignment",
+              "chunk_id": cited_text_cid
+            }]
+          },
+          "citations": [{
+            "source_id": text_source_id,
+            "chunk_id": cited_text_cid,
+            "quote": "Syzygy gravitational alignment maximizes tidal amplitude"
+          }],
+          "files": [{
+            "node_id": "page",
+            "name": "cards.html",
+            "mime_type": "text/html",
+            "role": "primary"
+          }]
+        }
+      })),
+    )]));
+  std::fs::write(
+    studio_run_dir.path().join("deliverable_outputs.json"),
+    serde_json::to_vec(&studio_deliv_state).expect("json"),
+  )
+  .expect("write deliverable_outputs.json");
+  state
+    .repos
+    .runs
+    .create(yanshi_db::NewRun {
+      id: studio_run_id,
+      workflow: "name: flashcards\nnodes: []".to_string(),
+      status: yanshi_db::RunStatus::Succeeded,
+      run_dir: Some(studio_run_dir.path().display().to_string()),
+      tenant_id: tenant.clone(),
+      events_retention_days: None,
+      artifacts_retention_days: None,
+    })
+    .await
+    .expect("create studio run");
+  state
+    .repos
+    .artifacts
+    .create(yanshi_db::NewArtifact {
+      id: Uuid::new_v4(),
+      run_id: studio_run_id,
+      node_id: "page".to_string(),
+      name: "cards.html".to_string(),
+      path_or_url: studio_html_path.display().to_string(),
+      mime_type: Some("text/html".to_string()),
+      tenant_id: Some(tenant.clone()),
+      size_bytes: Some(36),
+      sha256: Some("00".repeat(32)),
+    })
+    .await
+    .expect("create studio artifact");
+  state
+    .repos
+    .artifacts
+    .create(yanshi_db::NewArtifact {
+      id: Uuid::new_v4(),
+      run_id: studio_run_id,
+      node_id: "illustrate".to_string(),
+      name: "raw_asset.png".to_string(),
+      path_or_url: studio_html_path.display().to_string(),
+      mime_type: Some("image/png".to_string()),
+      tenant_id: Some(tenant.clone()),
+      size_bytes: Some(36),
+      sha256: Some("11".repeat(32)),
+    })
+    .await
+    .expect("create intermediate studio asset");
+
+  let (code, _) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/artifacts"),
+    &other,
+    Some(json!({ "run_id": studio_run_id })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::NOT_FOUND, "cross-tenant attach must 404");
+
+  let (code, attached_res) = call(
+    &state,
+    "POST",
+    &format!("/v1/notebooks/{id}/artifacts"),
+    &tenant,
+    Some(json!({ "run_id": studio_run_id })),
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{attached_res}");
+  assert_eq!(
+    attached_res["attached_count"], 1,
+    "must attach primary cards.html and skip intermediate asset: {attached_res}"
+  );
+
   // AD1: Export portable NotebookExportBundle and re-import twice in the same tenant
   // + once in another tenant without `source_chunks` PK collision, immediately searchable.
   let (code, _) = call(
@@ -863,7 +1008,12 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   .await;
   assert_eq!(code, StatusCode::OK, "{exported_bundle}");
   assert_eq!(exported_bundle["version"], 1);
-  assert_eq!(exported_bundle["sources"].as_array().map(Vec::len), Some(8));
+  assert_eq!(exported_bundle["sources"].as_array().map(Vec::len), Some(9));
+  assert_eq!(
+    exported_bundle["deliverables"].as_array().map(Vec::len),
+    Some(1),
+    "exported bundle must include attached flashcards deliverable"
+  );
   assert_eq!(
     exported_bundle["messages"].as_array().map(Vec::len),
     Some(2),
@@ -872,7 +1022,7 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   assert!(
     exported_bundle["markdown_brief"]
       .as_str()
-      .is_some_and(|md| md.contains("## Sources (8)") && md.contains("## Grounded Q&A (2)")),
+      .is_some_and(|md| md.contains("## Sources (9)") && md.contains("## Grounded Q&A (2)")),
     "export must include markdown_brief with Q&A history: {exported_bundle}"
   );
 
@@ -897,7 +1047,11 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
   )
   .await;
   assert_eq!(code, StatusCode::OK, "{imported_1}");
-  assert_eq!(imported_1["imported_sources"], 8);
+  assert_eq!(imported_1["imported_sources"], 9);
+  assert_eq!(
+    imported_1["imported_deliverables"], 1,
+    "import must restore exported deliverables: {imported_1}"
+  );
   assert!(
     imported_1["imported_chunks"]
       .as_u64()
@@ -932,6 +1086,35 @@ async fn sources_are_ingested_searchable_and_survive_a_restart() {
     code,
     StatusCode::OK,
     "imported message citation chunk_id must resolve in imported notebook: {resolved_chunk}"
+  );
+  let (code, imported_arts) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_id_1}/artifacts"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(code, StatusCode::OK, "{imported_arts}");
+  let imp_art_arr = imported_arts["artifacts"]
+    .as_array()
+    .expect("imported artifacts");
+  assert_eq!(imp_art_arr.len(), 1);
+  let imp_item_cid = imp_art_arr[0]["deliverable"]["content"]["items"][0]["chunk_id"]
+    .as_str()
+    .expect("remapped deliverable item chunk_id");
+  let (code, resolved_deliv_chunk) = call(
+    &state,
+    "GET",
+    &format!("/v1/notebooks/{imported_id_1}/chunks/{imp_item_cid}"),
+    &tenant,
+    None,
+  )
+  .await;
+  assert_eq!(
+    code,
+    StatusCode::OK,
+    "imported deliverable nested chunk_id must resolve in imported notebook: {resolved_deliv_chunk}"
   );
   let (code, cleared_msgs) = call(
     &state,

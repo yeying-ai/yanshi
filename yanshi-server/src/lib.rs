@@ -729,7 +729,7 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route(
       "/v1/notebooks/:id/artifacts",
-      get(notebooks::list_notebook_artifacts),
+      get(notebooks::list_notebook_artifacts).post(notebooks::attach_notebook_run_artifacts),
     )
     .route(
       "/v1/notebooks/:id/artifacts.zip",

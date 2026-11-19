@@ -111,6 +111,20 @@ pub trait RunRepo: Send + Sync {
     max_per_window: i64,
     window_seconds: i64,
   ) -> Result<AdmissionOutcome, DbError>;
+
+  /// Persist optional execution overrides and Notebook link metadata so
+  /// `POST /v1/runs/{id}:resume` restores `model`, `cost_limit_usd`, and
+  /// `(notebook_id, notebook_kind)` across restarts or replicas.
+  async fn set_resume_context(
+    &self,
+    _id: Uuid,
+    _model: Option<&str>,
+    _cost_limit_usd: Option<f64>,
+    _notebook_id: Option<Uuid>,
+    _notebook_kind: Option<&str>,
+  ) -> Result<(), DbError> {
+    Ok(())
+  }
 }
 
 /// Result of [`RunRepo::create_if_admitted`] — three-way instead of a
@@ -313,16 +327,17 @@ pub struct PgRunRepo {
   pub read_pool: PgPool,
 }
 
+const RUN_COLUMNS: &str = "id, workflow, status, started_at, finished_at, run_dir, tenant_id, error, events_retention_days, artifacts_retention_days, model, cost_limit_usd, notebook_id, notebook_kind";
+
 #[async_trait]
 impl RunRepo for PgRunRepo {
   async fn create(&self, run: NewRun) -> Result<Run, DbError> {
-    let row = sqlx::query_as::<_, Run>(
+    let row = sqlx::query_as::<_, Run>(&format!(
       r#"INSERT INTO runs (id, workflow, status, run_dir, tenant_id,
                            events_retention_days, artifacts_retention_days)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, workflow, status, started_at, finished_at, run_dir,
-                   tenant_id, error, events_retention_days, artifacts_retention_days"#,
-    )
+         RETURNING {RUN_COLUMNS}"#
+    ))
     .bind(run.id)
     .bind(&run.workflow)
     .bind(run.status.as_str())
@@ -336,14 +351,10 @@ impl RunRepo for PgRunRepo {
   }
 
   async fn get(&self, id: Uuid) -> Result<Option<Run>, DbError> {
-    let row = sqlx::query_as::<_, Run>(
-      r#"SELECT id, workflow, status, started_at, finished_at, run_dir,
-                tenant_id, error, events_retention_days, artifacts_retention_days
-         FROM runs WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(&self.read_pool)
-    .await?;
+    let row = sqlx::query_as::<_, Run>(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = $1"))
+      .bind(id)
+      .fetch_optional(&self.read_pool)
+      .await?;
     Ok(row)
   }
 
@@ -419,14 +430,13 @@ impl RunRepo for PgRunRepo {
     // the optimizer can pick the right index without needing to read a
     // NULL parameter at runtime.
     let rows = if let Some(status) = status {
-      sqlx::query_as::<_, Run>(
-        r#"SELECT id, workflow, status, started_at, finished_at, run_dir, tenant_id, error,
-                  events_retention_days, artifacts_retention_days
+      sqlx::query_as::<_, Run>(&format!(
+        r#"SELECT {RUN_COLUMNS}
            FROM runs
            WHERE tenant_id = $1 AND status = $2
            ORDER BY started_at DESC
-           LIMIT $3 OFFSET $4"#,
-      )
+           LIMIT $3 OFFSET $4"#
+      ))
       .bind(tenant_id)
       .bind(status)
       .bind(limit)
@@ -434,14 +444,13 @@ impl RunRepo for PgRunRepo {
       .fetch_all(&self.read_pool)
       .await?
     } else {
-      sqlx::query_as::<_, Run>(
-        r#"SELECT id, workflow, status, started_at, finished_at, run_dir, tenant_id, error,
-                  events_retention_days, artifacts_retention_days
+      sqlx::query_as::<_, Run>(&format!(
+        r#"SELECT {RUN_COLUMNS}
            FROM runs
            WHERE tenant_id = $1
            ORDER BY started_at DESC
-           LIMIT $2 OFFSET $3"#,
-      )
+           LIMIT $2 OFFSET $3"#
+      ))
       .bind(tenant_id)
       .bind(limit)
       .bind(offset)
@@ -482,15 +491,14 @@ impl RunRepo for PgRunRepo {
 
   async fn reclaim_expired_leases(&self) -> Result<Vec<Run>, DbError> {
     Ok(
-      sqlx::query_as::<_, Run>(
+      sqlx::query_as::<_, Run>(&format!(
         r#"UPDATE runs
            SET status = 'failed',
                finished_at = NOW(),
                error = 'lease expired: the gateway replica running this run stopped'
            WHERE status IN ('queued', 'running') AND lease_expires_at < NOW()
-           RETURNING id, workflow, status, started_at, finished_at, run_dir,
-                     tenant_id, error, events_retention_days, artifacts_retention_days"#,
-      )
+           RETURNING {RUN_COLUMNS}"#
+      ))
       .fetch_all(&self.pool)
       .await?,
     )
@@ -569,13 +577,12 @@ impl RunRepo for PgRunRepo {
       });
     }
 
-    let row = sqlx::query_as::<_, Run>(
+    let row = sqlx::query_as::<_, Run>(&format!(
       r#"INSERT INTO runs (id, workflow, status, run_dir, tenant_id,
                            events_retention_days, artifacts_retention_days)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, workflow, status, started_at, finished_at, run_dir,
-                   tenant_id, error, events_retention_days, artifacts_retention_days"#,
-    )
+         RETURNING {RUN_COLUMNS}"#
+    ))
     .bind(run.id)
     .bind(&run.workflow)
     .bind(run.status.as_str())
@@ -588,6 +595,32 @@ impl RunRepo for PgRunRepo {
 
     tx.commit().await?;
     Ok(AdmissionOutcome::Admitted(row))
+  }
+
+  async fn set_resume_context(
+    &self,
+    id: Uuid,
+    model: Option<&str>,
+    cost_limit_usd: Option<f64>,
+    notebook_id: Option<Uuid>,
+    notebook_kind: Option<&str>,
+  ) -> Result<(), DbError> {
+    sqlx::query(
+      r#"UPDATE runs
+         SET model = COALESCE($2, model),
+             cost_limit_usd = COALESCE($3, cost_limit_usd),
+             notebook_id = COALESCE($4, notebook_id),
+             notebook_kind = COALESCE($5, notebook_kind)
+         WHERE id = $1"#,
+    )
+    .bind(id)
+    .bind(model)
+    .bind(cost_limit_usd)
+    .bind(notebook_id)
+    .bind(notebook_kind)
+    .execute(&self.pool)
+    .await?;
+    Ok(())
   }
 }
 

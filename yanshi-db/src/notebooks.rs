@@ -78,6 +78,9 @@ pub struct Source {
   pub status: String,
   pub error: Option<String>,
   pub sha256: Option<String>,
+  #[sqlx(default)]
+  #[serde(skip)]
+  pub raw_content: Option<String>,
   pub created_at: DateTime<Utc>,
   pub updated_at: DateTime<Utc>,
 }
@@ -201,6 +204,18 @@ pub trait SourceRepo: Send + Sync {
     notebook_id: Uuid,
     source_id: Uuid,
   ) -> Result<bool, DbError>;
+
+  /// Persist the lossless raw text of a `text` note source so future inline
+  /// edits never have to concatenate overlapping `source_chunks`.
+  async fn set_raw_content(
+    &self,
+    _tenant_id: &str,
+    _notebook_id: Uuid,
+    _source_id: Uuid,
+    _raw_content: &str,
+  ) -> Result<(), DbError> {
+    Ok(())
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -216,8 +231,7 @@ pub struct PgSourceRepo {
 }
 
 const NOTEBOOK_COLUMNS: &str = "id, tenant_id, title, created_at, updated_at";
-const SOURCE_COLUMNS: &str =
-  "id, notebook_id, tenant_id, kind, title, uri, status, error, sha256, created_at, updated_at";
+const SOURCE_COLUMNS: &str = "id, notebook_id, tenant_id, kind, title, uri, status, error, sha256, raw_content, created_at, updated_at";
 
 #[async_trait]
 impl NotebookRepo for PgNotebookRepo {
@@ -510,6 +524,25 @@ impl SourceRepo for PgSourceRepo {
         .await?
         .rows_affected();
     Ok(deleted == 1)
+  }
+
+  async fn set_raw_content(
+    &self,
+    tenant_id: &str,
+    notebook_id: Uuid,
+    source_id: Uuid,
+    raw_content: &str,
+  ) -> Result<(), DbError> {
+    sqlx::query(
+      "UPDATE sources SET raw_content = $4 WHERE id = $1 AND notebook_id = $2 AND tenant_id = $3",
+    )
+    .bind(source_id)
+    .bind(notebook_id)
+    .bind(tenant_id)
+    .bind(raw_content)
+    .execute(&self.pool)
+    .await?;
+    Ok(())
   }
 }
 

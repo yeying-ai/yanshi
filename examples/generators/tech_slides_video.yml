@@ -713,7 +713,7 @@ nodes:
             "seconds": {{ seconds | json_encode() }},
             "presenter_mode": {{ presenter_mode | json_encode() }}
           },
-          "citations": [],
+          "citations": [{% set_global first_cit = true %}{% for c in chunks | default(value=[]) %}{% if loop.index0 < 12 and c.chunk_id and c.content %}{% if not first_cit %},{% endif %}{% set_global first_cit = false %}{"source_id": {{ c.source_id | default(value="") | json_encode() }}, "chunk_id": {{ c.chunk_id | json_encode() }}, "quote": {{ c.content | truncate(length=280) | json_encode() }}}{% endif %}{% endfor %}],
           "files": [
             {"node_id": "film", "name": {{ mp4 | split(pat="/") | last | json_encode() }}, "mime_type": "video/mp4", "role": "primary"},
             {"node_id": "film", "name": {{ srt | split(pat="/") | last | json_encode() }}, "mime_type": "application/x-subrip", "role": "asset"}{% if vtt is defined and vtt %},

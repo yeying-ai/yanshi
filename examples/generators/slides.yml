@@ -258,7 +258,7 @@ nodes:
           "kind": "slides",
           "title": {{ plan.title | json_encode() }},
           "content": {"slides": {{ plan.slides | json_encode() }}},
-          "citations": [],
+          "citations": [{% set_global first_cit = true %}{% for c in chunks | default(value=[]) %}{% if loop.index0 < 12 and c.chunk_id and c.content %}{% if not first_cit %},{% endif %}{% set_global first_cit = false %}{"source_id": {{ c.source_id | default(value="") | json_encode() }}, "chunk_id": {{ c.chunk_id | json_encode() }}, "quote": {{ c.content | truncate(length=280) | json_encode() }}}{% endif %}{% endfor %}],
           "files": [
             {"node_id": {% if use_native %}"deck_pptx"{% else %}"ref_pptx"{% endif %}, "name": {{ out_pptx | split(pat="/") | last | json_encode() }}, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "role": "primary"}{% for r in drawn %}{% if r.fig.Ok %},
             {"node_id": "fig", "name": {{ r.fig.Ok.fig_svg.path | split(pat="/") | last | json_encode() }}, "mime_type": "image/svg+xml", "role": "asset"}{% endif %}{% endfor %}{% for img in painted %},
