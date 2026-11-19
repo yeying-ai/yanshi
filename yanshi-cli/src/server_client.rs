@@ -373,6 +373,22 @@ impl ServerClient {
     expect_success(response).await
   }
 
+  /// `PATCH /v1/notebooks/{id}` — rename an existing notebook.
+  pub async fn rename_notebook(&self, notebook_id: &str, title: &str) -> Result<Value> {
+    let path = format!("/v1/notebooks/{}", encode_uri_segment(notebook_id));
+    let body = serde_json::json!({ "title": title });
+    let response = self
+      .http
+      .patch(self.url(&path))
+      .headers(self.auth_headers())
+      .header(CONTENT_TYPE, "application/json")
+      .body(body.to_string())
+      .send()
+      .await
+      .context("failed to PATCH /v1/notebooks/{id}")?;
+    expect_success(response).await
+  }
+
   /// `DELETE /v1/notebooks/{id}` — delete a notebook (`204 No Content`).
   pub async fn delete_notebook(&self, notebook_id: &str) -> Result<()> {
     let path = format!("/v1/notebooks/{}", encode_uri_segment(notebook_id));
@@ -516,6 +532,23 @@ impl ServerClient {
       .await
       .context("failed to GET /v1/notebooks/{id}/artifacts")?;
     expect_success(response).await
+  }
+
+  /// `DELETE /v1/notebooks/{id}/artifacts/{artifact_id}` — detach an artifact (`204 No Content`).
+  pub async fn delete_notebook_artifact(&self, notebook_id: &str, artifact_id: &str) -> Result<()> {
+    let path = format!(
+      "/v1/notebooks/{}/artifacts/{}",
+      encode_uri_segment(notebook_id),
+      encode_uri_segment(artifact_id)
+    );
+    let response = self
+      .http
+      .delete(self.url(&path))
+      .headers(self.auth_headers())
+      .send()
+      .await
+      .context("failed to DELETE /v1/notebooks/{id}/artifacts/{artifact_id}")?;
+    expect_empty_success(response).await
   }
 
   /// `GET /v1/runs/{id}/artifacts` — list artifacts produced by a run.

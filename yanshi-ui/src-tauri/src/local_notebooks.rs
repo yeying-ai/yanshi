@@ -5,14 +5,16 @@
 //! - `POST   /v1/notebooks`
 //! - `GET    /v1/notebooks`
 //! - `GET    /v1/notebooks/:id`
+//! - `PATCH  /v1/notebooks/:id`
 //! - `DELETE /v1/notebooks/:id`
 //! - `POST   /v1/notebooks/:id/sources` (`url` | `text` | `file` | `recording`)
 //! - `DELETE /v1/notebooks/:id/sources/:source_id`
 //! - `GET    /v1/notebooks/:id/chunks/:chunk_id`
 //! - `GET    /v1/notebooks/:id/search?q=&top_k=&source_ids=`
-//! - `POST   /v1/notebooks/:id/ask`
+//! - `POST   /v1/notebooks/:id/ask` (including multi-turn `history`)
 //! - `POST   /v1/notebooks/:id/generate` (all 12 compiled-in Studio generators)
 //! - `GET    /v1/notebooks/:id/artifacts` (including `deliverable` JSON)
+//! - `DELETE /v1/notebooks/:id/artifacts/:artifact_id`
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -44,8 +46,11 @@ use crate::local_engine::{
 
 /// Uploaded / pasted sources larger than 10 MiB are refused at submit.
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
-/// Uncompressed XML read ceiling when unpacking `.docx` archives (zip-bomb guard).
-const MAX_DOCX_XML_BYTES: usize = 16 * 1024 * 1024;
+/// Uncompressed XML read ceiling when unpacking `.docx` / `.xlsx` / `.pptx` archives (zip-bomb guard).
+const MAX_OOXML_XML_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum prior Q&A turns retained in multi-turn grounded `/ask`.
+const MAX_ASK_HISTORY_TURNS: usize = 8;
+const MAX_ASK_TURN_CHARS: usize = 2_000;
 /// Paragraph chunking target size and overlap (characters), matching `yanshi-server`.
 const CHUNK_SIZE: usize = 1200;
 const CHUNK_OVERLAP: usize = 150;
@@ -406,7 +411,9 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
     .route("/v1/notebooks", get(list_notebooks).post(create_notebook))
     .route(
       "/v1/notebooks/:id",
-      get(get_notebook).delete(delete_notebook),
+      get(get_notebook)
+        .patch(update_notebook)
+        .delete(delete_notebook),
     )
     .route(
       "/v1/notebooks/:id/sources",
@@ -424,6 +431,10 @@ pub fn build_notebooks_router(engine: LocalEngineState) -> Router {
     .route("/v1/notebooks/:id/ask", post(ask_notebook))
     .route("/v1/notebooks/:id/generate", post(generate_from_notebook))
     .route("/v1/notebooks/:id/artifacts", get(list_notebook_artifacts))
+    .route(
+      "/v1/notebooks/:id/artifacts/:artifact_id",
+      delete(delete_notebook_artifact),
+    )
     .with_state(engine)
 }
 
@@ -486,6 +497,11 @@ async fn list_notebooks(State(engine): State<LocalEngineState>, headers: HeaderM
   (StatusCode::OK, Json(json!({ "notebooks": list }))).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateNotebookRequest {
+  title: String,
+}
+
 async fn get_notebook(
   State(engine): State<LocalEngineState>,
   headers: HeaderMap,
@@ -506,6 +522,37 @@ async fn get_notebook(
     })),
   )
     .into_response()
+}
+
+async fn update_notebook(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath(id): RoutePath<Uuid>,
+  Json(req): Json<UpdateNotebookRequest>,
+) -> Response {
+  let title = req.title.trim();
+  if title.is_empty() {
+    return notebook_error_json(StatusCode::BAD_REQUEST, "title must not be empty");
+  }
+  let tenant = extract_tenant(&headers);
+  let notebooks = engine.notebooks();
+  let nb_dir = notebooks.notebook_dir(id);
+  let mut guard = notebooks.lock_entries();
+  let Some(entry) = guard
+    .get_mut(&id)
+    .filter(|e| e.notebook.tenant_id == tenant)
+  else {
+    return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+  };
+  entry.notebook.title = title.to_string();
+  entry.notebook.updated_at = Utc::now();
+  if let Err(err) = write_notebook_bundle_sync(&nb_dir, entry) {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to persist notebook rename: {err}"),
+    );
+  }
+  (StatusCode::OK, Json(entry.notebook.clone())).into_response()
 }
 
 async fn delete_notebook(
@@ -648,6 +695,8 @@ enum BytesFormat {
   Html,
   Pdf,
   Docx,
+  Xlsx,
+  Pptx,
   Csv,
   Tsv,
   Json,
@@ -747,6 +796,8 @@ async fn add_source(
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
         "pdf" => BytesFormat::Pdf,
         "docx" => BytesFormat::Docx,
+        "xlsx" => BytesFormat::Xlsx,
+        "pptx" => BytesFormat::Pptx,
         "csv" => BytesFormat::Csv,
         "tsv" => BytesFormat::Tsv,
         "json" => BytesFormat::Json,
@@ -754,7 +805,7 @@ async fn add_source(
           return notebook_error_json(
             StatusCode::BAD_REQUEST,
             &format!(
-              "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .csv, .tsv or .json"
+              "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv or .json"
             ),
           );
         }
@@ -780,10 +831,14 @@ async fn add_source(
           "uploaded .pdf file does not start with a %PDF- header",
         );
       }
-      if format == BytesFormat::Docx && !bytes.starts_with(b"PK\x03\x04") {
+      if matches!(
+        format,
+        BytesFormat::Docx | BytesFormat::Xlsx | BytesFormat::Pptx
+      ) && !bytes.starts_with(b"PK\x03\x04")
+      {
         return notebook_error_json(
           StatusCode::BAD_REQUEST,
-          "uploaded .docx file is not a valid ZIP archive",
+          &format!("uploaded .{extension} file is not a valid ZIP archive"),
         );
       }
       let resolved_title = title
@@ -817,7 +872,7 @@ async fn add_source(
         .unwrap_or_default();
       if !matches!(
         extension.as_str(),
-        "mp3" | "wav" | "m4a" | "ogg" | "flac" | "webm" | "aac"
+        "mp3" | "wav" | "m4a" | "ogg" | "flac" | "webm" | "aac" | "mp4"
       ) {
         return notebook_error_json(
           StatusCode::BAD_REQUEST,
@@ -1022,6 +1077,8 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
     BytesFormat::Html => extract_html_text(&bytes).await,
     BytesFormat::Pdf => extract_pdf_text(&bytes).await,
     BytesFormat::Docx => docx_text(&bytes),
+    BytesFormat::Xlsx => xlsx_text(&bytes),
+    BytesFormat::Pptx => pptx_text(&bytes),
     BytesFormat::Csv => delimited_text(&bytes, b','),
     BytesFormat::Tsv => delimited_text(&bytes, b'\t'),
     BytesFormat::Json => json_text(&bytes),
@@ -1029,6 +1086,35 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
       String::from_utf8(bytes).map_err(|_| "the source is not UTF-8 text".to_string())
     }
   }
+}
+
+fn sniff_ooxml_zip_format(bytes: &[u8], ext: Option<&str>) -> Option<BytesFormat> {
+  if !bytes.starts_with(b"PK\x03\x04") {
+    return None;
+  }
+  match ext {
+    Some("docx") => return Some(BytesFormat::Docx),
+    Some("xlsx") => return Some(BytesFormat::Xlsx),
+    Some("pptx") => return Some(BytesFormat::Pptx),
+    _ => {}
+  }
+  let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+  for name in archive.file_names() {
+    let Ok(name) = name else {
+      continue;
+    };
+    let name: &str = name.as_ref();
+    if name == "word/document.xml" {
+      return Some(BytesFormat::Docx);
+    }
+    if name == "xl/workbook.xml" || name.starts_with("xl/worksheets/sheet") {
+      return Some(BytesFormat::Xlsx);
+    }
+    if name == "ppt/presentation.xml" || name.starts_with("ppt/slides/slide") {
+      return Some(BytesFormat::Pptx);
+    }
+  }
+  None
 }
 
 fn url_path_extension(raw_url: &str) -> Option<String> {
@@ -1065,8 +1151,8 @@ async fn fetch_source_url(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   let ext = url_path_extension(url);
   let format = if bytes.starts_with(b"%PDF-") {
     BytesFormat::Pdf
-  } else if bytes.starts_with(b"PK\x03\x04") && ext.as_deref() == Some("docx") {
-    BytesFormat::Docx
+  } else if let Some(ooxml) = sniff_ooxml_zip_format(&bytes, ext.as_deref()) {
+    ooxml
   } else {
     let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
     let lowered = sample.trim_start().to_ascii_lowercase();
@@ -1139,43 +1225,54 @@ async fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
     .map_err(|err| format!("extracting PDF text: {err}"))
 }
 
-fn docx_text(bytes: &[u8]) -> Result<String, String> {
+fn read_zip_xml_bounded(
+  archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+  entry_name: &str,
+  budget_remaining: &mut usize,
+  label: &str,
+) -> Result<Option<String>, String> {
   use std::io::Read as _;
+  let mut entry = match archive.by_name(entry_name) {
+    Ok(file) => file,
+    Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+    Err(e) => return Err(format!("reading {entry_name} failed: {e}")),
+  };
+  let mut xml_bytes = Vec::new();
+  entry
+    .by_ref()
+    .take((*budget_remaining as u64).saturating_add(1))
+    .read_to_end(&mut xml_bytes)
+    .map_err(|e| format!("decompressing {entry_name} failed: {e}"))?;
+  if xml_bytes.len() > *budget_remaining {
+    return Err(format!(
+      "{label} uncompressed XML exceeds {MAX_OOXML_XML_BYTES} bytes safety limit"
+    ));
+  }
+  *budget_remaining -= xml_bytes.len();
+  String::from_utf8(xml_bytes)
+    .map(Some)
+    .map_err(|_| format!("{entry_name} is not valid UTF-8 XML"))
+}
+
+fn docx_text(bytes: &[u8]) -> Result<String, String> {
   let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
     .map_err(|e| format!("invalid DOCX archive: {e}"))?;
 
-  let mut budget_remaining = MAX_DOCX_XML_BYTES;
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
   let mut sections: Vec<String> = Vec::new();
   for entry_name in [
     "word/document.xml",
     "word/footnotes.xml",
     "word/endnotes.xml",
   ] {
-    let mut entry = match archive.by_name(entry_name) {
-      Ok(file) => file,
-      Err(zip::result::ZipError::FileNotFound) => {
-        if entry_name == "word/document.xml" {
-          return Err("invalid DOCX archive: missing word/document.xml".to_string());
-        }
-        continue;
+    let Some(xml) = read_zip_xml_bounded(&mut archive, entry_name, &mut budget_remaining, "DOCX")?
+    else {
+      if entry_name == "word/document.xml" {
+        return Err("invalid DOCX archive: missing word/document.xml".to_string());
       }
-      Err(e) => return Err(format!("reading {entry_name} failed: {e}")),
+      continue;
     };
-    let mut xml_bytes = Vec::new();
-    entry
-      .by_ref()
-      .take((budget_remaining as u64).saturating_add(1))
-      .read_to_end(&mut xml_bytes)
-      .map_err(|e| format!("decompressing {entry_name} failed: {e}"))?;
-    if xml_bytes.len() > budget_remaining {
-      return Err(format!(
-        "DOCX uncompressed XML exceeds {MAX_DOCX_XML_BYTES} bytes safety limit"
-      ));
-    }
-    budget_remaining -= xml_bytes.len();
-    let xml =
-      String::from_utf8(xml_bytes).map_err(|_| format!("{entry_name} is not valid UTF-8 XML"))?;
-    let extracted = extract_wordprocessingml_text(&xml);
+    let extracted = extract_ooxml_rich_text(&xml);
     if !extracted.trim().is_empty() {
       sections.push(extracted);
     }
@@ -1183,7 +1280,411 @@ fn docx_text(bytes: &[u8]) -> Result<String, String> {
   Ok(sections.join("\n\n"))
 }
 
-fn extract_wordprocessingml_text(xml: &str) -> String {
+fn pptx_text(bytes: &[u8]) -> Result<String, String> {
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    .map_err(|e| format!("invalid PPTX archive: {e}"))?;
+
+  let mut slide_entries: Vec<(usize, String)> = archive
+    .file_names()
+    .filter_map(|name| {
+      let name = name.ok()?;
+      let stem = name
+        .as_ref()
+        .strip_prefix("ppt/slides/slide")?
+        .strip_suffix(".xml")?;
+      let num = stem.parse::<usize>().ok()?;
+      Some((num, name.into_owned()))
+    })
+    .collect();
+  if slide_entries.is_empty() {
+    return Err("invalid PPTX archive: missing ppt/slides/slide*.xml".to_string());
+  }
+  slide_entries.sort_by_key(|(num, _)| *num);
+
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
+  let mut slides_out: Vec<String> = Vec::new();
+  for (slide_num, entry_name) in slide_entries {
+    let Some(slide_xml) =
+      read_zip_xml_bounded(&mut archive, &entry_name, &mut budget_remaining, "PPTX")?
+    else {
+      continue;
+    };
+    let body = extract_ooxml_rich_text(&slide_xml);
+    let notes_entry = format!("ppt/notesSlides/notesSlide{slide_num}.xml");
+    let notes = read_zip_xml_bounded(&mut archive, &notes_entry, &mut budget_remaining, "PPTX")?
+      .map(|xml| extract_ooxml_rich_text(&xml))
+      .unwrap_or_default();
+    let cleaned_notes: Vec<&str> = notes
+      .lines()
+      .map(str::trim)
+      .filter(|line| !line.is_empty() && line.parse::<usize>().ok() != Some(slide_num))
+      .collect();
+
+    if body.trim().is_empty() && cleaned_notes.is_empty() {
+      continue;
+    }
+    let mut section = format!("Slide {slide_num}:");
+    if !body.trim().is_empty() {
+      section.push('\n');
+      section.push_str(body.trim());
+    }
+    if !cleaned_notes.is_empty() {
+      section.push_str("\nSpeaker notes: ");
+      section.push_str(&cleaned_notes.join(" "));
+    }
+    slides_out.push(section);
+  }
+  Ok(slides_out.join("\n\n"))
+}
+
+fn xlsx_text(bytes: &[u8]) -> Result<String, String> {
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+    .map_err(|e| format!("invalid XLSX archive: {e}"))?;
+
+  let mut budget_remaining = MAX_OOXML_XML_BYTES;
+  let shared_strings = match read_zip_xml_bounded(
+    &mut archive,
+    "xl/sharedStrings.xml",
+    &mut budget_remaining,
+    "XLSX",
+  )? {
+    Some(xml) => parse_xlsx_shared_strings(&xml),
+    None => Vec::new(),
+  };
+
+  let sheet_titles = match read_zip_xml_bounded(
+    &mut archive,
+    "xl/workbook.xml",
+    &mut budget_remaining,
+    "XLSX",
+  )? {
+    Some(xml) => parse_xlsx_sheet_titles(&xml),
+    None => Vec::new(),
+  };
+
+  let mut sheet_entries: Vec<(usize, String)> = archive
+    .file_names()
+    .filter_map(|name| {
+      let name = name.ok()?;
+      let stem = name
+        .as_ref()
+        .strip_prefix("xl/worksheets/sheet")?
+        .strip_suffix(".xml")?;
+      let num = stem.parse::<usize>().ok()?;
+      Some((num, name.into_owned()))
+    })
+    .collect();
+  if sheet_entries.is_empty() {
+    return Err("invalid XLSX archive: missing xl/worksheets/sheet*.xml".to_string());
+  }
+  sheet_entries.sort_by_key(|(num, _)| *num);
+
+  let mut sections: Vec<String> = Vec::new();
+  for (pos, (sheet_num, entry_name)) in sheet_entries.into_iter().enumerate() {
+    let Some(sheet_xml) =
+      read_zip_xml_bounded(&mut archive, &entry_name, &mut budget_remaining, "XLSX")?
+    else {
+      continue;
+    };
+    let rows = parse_xlsx_sheet_rows(&sheet_xml, &shared_strings);
+    if rows.is_empty() {
+      continue;
+    }
+    let sheet_title = sheet_titles
+      .get(pos)
+      .cloned()
+      .unwrap_or_else(|| format!("Sheet{sheet_num}"));
+    sections.push(format_xlsx_sheet_rows(&sheet_title, &rows));
+  }
+  Ok(sections.join("\n\n"))
+}
+
+fn xml_attr_value(tag_body: &str, attr_name: &str) -> Option<String> {
+  let mut rest = tag_body;
+  while let Some(eq_idx) = rest.find('=') {
+    let before = rest[..eq_idx].trim_end();
+    let key = before
+      .rsplit_once(char::is_whitespace)
+      .map_or(before, |(_, k)| k);
+    let after = rest[eq_idx + 1..].trim_start();
+    let Some(quote) = after.chars().next().filter(|&c| c == '"' || c == '\'') else {
+      rest = after;
+      continue;
+    };
+    let val_rest = &after[quote.len_utf8()..];
+    let Some(end_idx) = val_rest.find(quote) else {
+      break;
+    };
+    if key == attr_name {
+      return Some(decode_xml_entities(&val_rest[..end_idx]));
+    }
+    rest = &val_rest[end_idx + quote.len_utf8()..];
+  }
+  None
+}
+
+fn parse_xlsx_shared_strings(xml: &str) -> Vec<String> {
+  let mut items = Vec::new();
+  let mut current = String::new();
+  let mut in_si = false;
+  let mut in_t = false;
+  let mut phonetic_depth: usize = 0;
+
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    if in_si && in_t && phonetic_depth == 0 && lt > 0 {
+      current.push_str(&decode_xml_entities(&rest[..lt]));
+    }
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let is_closing = raw_tag.starts_with('/');
+    let is_self_closing = raw_tag.ends_with('/');
+    let tag_body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+    let local = tag_name.rsplit_once(':').map_or(tag_name, |(_, l)| l);
+    match (local, is_closing, is_self_closing) {
+      ("si", false, false) => {
+        in_si = true;
+        current.clear();
+      }
+      ("si", false, true) => {
+        items.push(String::new());
+      }
+      ("si", true, _) => {
+        if in_si {
+          items.push(current.clone());
+        }
+        in_si = false;
+        in_t = false;
+        current.clear();
+      }
+      ("rPh", false, false) => phonetic_depth += 1,
+      ("rPh", true, _) => phonetic_depth = phonetic_depth.saturating_sub(1),
+      ("t", false, false) if in_si => in_t = true,
+      ("t", true, _) => in_t = false,
+      _ => {}
+    }
+  }
+  items
+}
+
+fn parse_xlsx_sheet_titles(xml: &str) -> Vec<String> {
+  let mut titles = Vec::new();
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('/') || raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let tag_body = raw_tag.trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+    let local = tag_name.rsplit_once(':').map_or(tag_name, |(_, l)| l);
+    if local == "sheet"
+      && let Some(name) = xml_attr_value(tag_body, "name")
+      && !name.trim().is_empty()
+    {
+      titles.push(name.trim().to_string());
+    }
+  }
+  titles
+}
+
+fn xlsx_col_index_from_ref(cell_ref: &str) -> Option<usize> {
+  let letters: String = cell_ref
+    .chars()
+    .take_while(char::is_ascii_alphabetic)
+    .collect();
+  if letters.is_empty() {
+    return None;
+  }
+  let mut idx: usize = 0;
+  for ch in letters.chars() {
+    let digit = (ch.to_ascii_uppercase() as u8).saturating_sub(b'A') as usize + 1;
+    idx = idx.saturating_mul(26).saturating_add(digit);
+  }
+  idx.checked_sub(1)
+}
+
+fn xlsx_col_letters(mut col_idx: usize) -> String {
+  let mut chars = Vec::new();
+  loop {
+    chars.push((b'A' + (col_idx % 26) as u8) as char);
+    if col_idx < 26 {
+      break;
+    }
+    col_idx = col_idx / 26 - 1;
+  }
+  chars.into_iter().rev().collect()
+}
+
+fn parse_xlsx_sheet_rows(xml: &str, shared_strings: &[String]) -> Vec<Vec<(usize, String)>> {
+  let mut rows: Vec<Vec<(usize, String)>> = Vec::new();
+  let mut current_row: Vec<(usize, String)> = Vec::new();
+  let mut in_row = false;
+  let mut in_cell = false;
+  let mut next_col_idx: usize = 0;
+  let mut cell_col_idx: usize = 0;
+  let mut cell_type = String::new();
+  let mut in_v = false;
+  let mut in_is_t = false;
+  let mut cell_v = String::new();
+  let mut cell_inline = String::new();
+
+  let mut rest = xml;
+  while let Some(lt) = rest.find('<') {
+    if in_cell && lt > 0 {
+      if in_v {
+        cell_v.push_str(&decode_xml_entities(&rest[..lt]));
+      } else if in_is_t {
+        cell_inline.push_str(&decode_xml_entities(&rest[..lt]));
+      }
+    }
+    rest = &rest[lt + 1..];
+    let Some(gt) = rest.find('>') else {
+      break;
+    };
+    let raw_tag = rest[..gt].trim();
+    rest = &rest[gt + 1..];
+    if raw_tag.starts_with('?') || raw_tag.starts_with('!') {
+      continue;
+    }
+    let is_closing = raw_tag.starts_with('/');
+    let is_self_closing = raw_tag.ends_with('/');
+    let tag_body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
+    let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
+    let local = tag_name.rsplit_once(':').map_or(tag_name, |(_, l)| l);
+
+    match (local, is_closing, is_self_closing) {
+      ("row", false, false) => {
+        in_row = true;
+        current_row.clear();
+        next_col_idx = 0;
+      }
+      ("row", true, _) => {
+        if in_row && !current_row.is_empty() {
+          rows.push(std::mem::take(&mut current_row));
+        }
+        in_row = false;
+      }
+      ("c", false, false) if in_row => {
+        in_cell = true;
+        cell_col_idx = xml_attr_value(tag_body, "r")
+          .and_then(|r| xlsx_col_index_from_ref(&r))
+          .unwrap_or(next_col_idx);
+        next_col_idx = cell_col_idx + 1;
+        cell_type = xml_attr_value(tag_body, "t").unwrap_or_default();
+        cell_v.clear();
+        cell_inline.clear();
+      }
+      ("c", false, true) if in_row => {
+        let col = xml_attr_value(tag_body, "r")
+          .and_then(|r| xlsx_col_index_from_ref(&r))
+          .unwrap_or(next_col_idx);
+        next_col_idx = col + 1;
+      }
+      ("c", true, _) if in_cell => {
+        let resolved = match cell_type.as_str() {
+          "s" => cell_v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|idx| shared_strings.get(idx).cloned())
+            .unwrap_or_default(),
+          "inlineStr" => cell_inline.clone(),
+          "b" => match cell_v.trim() {
+            "1" => "true".to_string(),
+            "0" => "false".to_string(),
+            other => other.to_string(),
+          },
+          _ => cell_v.clone(),
+        };
+        let trimmed = resolved.trim();
+        if !trimmed.is_empty() {
+          current_row.push((cell_col_idx, trimmed.to_string()));
+        }
+        in_cell = false;
+        in_v = false;
+        in_is_t = false;
+      }
+      ("v", false, false) if in_cell => in_v = true,
+      ("v", true, _) => in_v = false,
+      ("t", false, false) if in_cell => in_is_t = true,
+      ("t", true, _) => in_is_t = false,
+      _ => {}
+    }
+  }
+  rows
+}
+
+fn format_xlsx_sheet_rows(sheet_title: &str, rows: &[Vec<(usize, String)>]) -> String {
+  let max_col = rows
+    .iter()
+    .flat_map(|r| r.iter().map(|(col, _)| *col))
+    .max()
+    .unwrap_or(0);
+  if rows.len() == 1 {
+    let pairs: Vec<String> = rows[0]
+      .iter()
+      .map(|(col, val)| format!("{}: {val}", xlsx_col_letters(*col)))
+      .collect();
+    return format!("Sheet: {sheet_title}\nRow 1: {}", pairs.join(" | "));
+  }
+
+  let mut headers = vec![String::new(); max_col + 1];
+  for (col, val) in &rows[0] {
+    if let Some(slot) = headers.get_mut(*col) {
+      *slot = val.clone();
+    }
+  }
+  for (col_idx, slot) in headers.iter_mut().enumerate() {
+    if slot.trim().is_empty() {
+      *slot = format!("col_{}", xlsx_col_letters(col_idx));
+    }
+  }
+
+  let mut blocks = vec![format!(
+    "Sheet: {sheet_title}\nColumns: {}",
+    headers.join(" | ")
+  )];
+  let mut current_group: Vec<String> = Vec::new();
+  for (row_idx, row) in rows[1..].iter().enumerate() {
+    let pairs: Vec<String> = row
+      .iter()
+      .map(|(col, val)| {
+        let label = headers
+          .get(*col)
+          .cloned()
+          .unwrap_or_else(|| format!("col_{}", xlsx_col_letters(*col)));
+        format!("{label}: {val}")
+      })
+      .collect();
+    if !pairs.is_empty() {
+      current_group.push(format!("Row {}: {}", row_idx + 1, pairs.join(" | ")));
+      if current_group.len() >= 10 {
+        blocks.push(current_group.join("\n"));
+        current_group.clear();
+      }
+    }
+  }
+  if !current_group.is_empty() {
+    blocks.push(current_group.join("\n"));
+  }
+  blocks.join("\n\n")
+}
+
+fn extract_ooxml_rich_text(xml: &str) -> String {
   let mut blocks: Vec<String> = Vec::new();
   let mut current_para = String::new();
   let mut in_text_run = false;
@@ -1211,11 +1712,11 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
     let tag_name = tag_body.split_whitespace().next().unwrap_or_default();
 
     match (tag_name, is_closing, is_self_closing) {
-      ("w:t" | "t", false, false) => in_text_run = true,
-      ("w:t" | "t", true, _) => in_text_run = false,
-      ("w:tab", false, _) => current_para.push('\t'),
-      ("w:br" | "w:cr", false, _) => current_para.push('\n'),
-      ("w:tbl", false, false) => {
+      ("w:t" | "a:t" | "t", false, false) => in_text_run = true,
+      ("w:t" | "a:t" | "t", true, _) => in_text_run = false,
+      ("w:tab" | "a:tab", false, _) => current_para.push('\t'),
+      ("w:br" | "w:cr" | "a:br", false, _) => current_para.push('\n'),
+      ("w:tbl" | "a:tbl", false, false) => {
         let trimmed = current_para.trim();
         if !trimmed.is_empty() {
           blocks.push(trimmed.to_string());
@@ -1223,13 +1724,13 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
         current_para.clear();
         table_depth += 1;
       }
-      ("w:tbl", true, _) => table_depth = table_depth.saturating_sub(1),
-      ("w:tr", false, false) if table_depth > 0 => current_row.clear(),
-      ("w:tc", false, false) if table_depth > 0 => {
+      ("w:tbl" | "a:tbl", true, _) => table_depth = table_depth.saturating_sub(1),
+      ("w:tr" | "a:tr", false, false) if table_depth > 0 => current_row.clear(),
+      ("w:tc" | "a:tc", false, false) if table_depth > 0 => {
         current_cell_paras.clear();
         current_para.clear();
       }
-      ("w:p", true, _) => {
+      ("w:p" | "a:p", true, _) => {
         let trimmed = current_para.trim();
         if !trimmed.is_empty() {
           if table_depth > 0 {
@@ -1240,11 +1741,11 @@ fn extract_wordprocessingml_text(xml: &str) -> String {
         }
         current_para.clear();
       }
-      ("w:tc", true, _) if table_depth > 0 => {
+      ("w:tc" | "a:tc", true, _) if table_depth > 0 => {
         current_row.push(current_cell_paras.join(" "));
         current_cell_paras.clear();
       }
-      ("w:tr", true, _) if table_depth > 0 => {
+      ("w:tr" | "a:tr", true, _) if table_depth > 0 => {
         if current_row.iter().any(|c| !c.trim().is_empty()) {
           blocks.push(format!("| {} |", current_row.join(" | ")));
         }
@@ -1633,9 +2134,19 @@ async fn search_notebook(
   (StatusCode::OK, Json(json!({ "chunks": hits }))).into_response()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NotebookConversationTurn {
+  #[serde(default)]
+  question: String,
+  #[serde(default)]
+  answer: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AskNotebookRequest {
   question: String,
+  #[serde(default)]
+  history: Vec<NotebookConversationTurn>,
   #[serde(default)]
   source_ids: Option<Vec<Uuid>>,
   #[serde(default)]
@@ -1763,6 +2274,64 @@ fn extract_json_object(reply: &str) -> Result<Value, String> {
   Err("model reply did not contain valid JSON".to_string())
 }
 
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+  s.trim().chars().take(max_chars).collect()
+}
+
+fn normalize_ask_history(raw: &[NotebookConversationTurn]) -> Vec<NotebookConversationTurn> {
+  let cleaned: Vec<NotebookConversationTurn> = raw
+    .iter()
+    .filter_map(|turn| {
+      let question = truncate_chars(&turn.question, MAX_ASK_TURN_CHARS);
+      let answer = truncate_chars(&turn.answer, MAX_ASK_TURN_CHARS);
+      if question.is_empty() && answer.is_empty() {
+        None
+      } else {
+        Some(NotebookConversationTurn { question, answer })
+      }
+    })
+    .collect();
+  let skip = cleaned.len().saturating_sub(MAX_ASK_HISTORY_TURNS);
+  cleaned.into_iter().skip(skip).collect()
+}
+
+fn build_ask_retrieval_hint(question: &str, history: &[NotebookConversationTurn]) -> String {
+  let recent_skip = history.len().saturating_sub(2);
+  let mut parts: Vec<String> = Vec::with_capacity(5);
+  for turn in history.iter().skip(recent_skip) {
+    if !turn.question.is_empty() {
+      parts.push(truncate_chars(&turn.question, 240));
+    }
+    if !turn.answer.is_empty() {
+      parts.push(truncate_chars(&turn.answer, 240));
+    }
+  }
+  parts.push(question.trim().to_string());
+  parts.join(" ")
+}
+
+fn format_ask_history_block(history: &[NotebookConversationTurn]) -> String {
+  if history.is_empty() {
+    return String::new();
+  }
+  let turns = history
+    .iter()
+    .enumerate()
+    .map(|(idx, turn)| {
+      format!(
+        "Turn {}:\nUser: {}\nAssistant: {}",
+        idx + 1,
+        turn.question,
+        turn.answer
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n");
+  format!(
+    "Prior conversation context (use ONLY to resolve follow-up references; every factual claim MUST still be grounded in Source passages below):\n{turns}\n\n"
+  )
+}
+
 async fn ask_notebook(
   State(engine): State<LocalEngineState>,
   headers: HeaderMap,
@@ -1801,8 +2370,10 @@ async fn ask_notebook(
     return notebook_error_json(StatusCode::BAD_REQUEST, &msg);
   }
 
+  let history = normalize_ask_history(&req.history);
+  let retrieval_hint = build_ask_retrieval_hint(&question, &history);
   let mut selected =
-    select_chunks_for_generate(ready_chunks, Some(&question), GENERATE_CHUNK_BUDGET).await;
+    select_chunks_for_generate(ready_chunks, Some(&retrieval_hint), GENERATE_CHUNK_BUDGET).await;
   if let Some(limit) = req.top_k.map(|k| k.clamp(1, 50))
     && selected.len() > limit
   {
@@ -1821,10 +2392,12 @@ async fn ask_notebook(
 
   let schema = grounded_answer_schema();
   let schema_str = serde_json::to_string(&schema).unwrap_or_default();
+  let history_block = format_ask_history_block(&history);
   let prompt = format!(
     "Answer the user's question strictly using ONLY the notebook source passages below. \
      If the passages do not contain enough evidence, state clearly what is missing rather than guessing. \
      Cite every supporting passage by its exact `chunk_id` and a verbatim `quote` copied from that passage.\n\n\
+     {history_block}\
      Question: {question}\n\n\
      Source passages:\n{formatted_passages}\n\n\
      Output ONLY valid JSON strictly conforming to this JSON Schema (no markdown fences, no extra prose):\n{schema_str}"
@@ -2155,6 +2728,37 @@ async fn list_notebook_artifacts(
     .into_response()
 }
 
+async fn delete_notebook_artifact(
+  State(engine): State<LocalEngineState>,
+  headers: HeaderMap,
+  RoutePath((notebook_id, artifact_id)): RoutePath<(Uuid, Uuid)>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let notebooks = engine.notebooks();
+  let nb_dir = notebooks.notebook_dir(notebook_id);
+  let mut guard = notebooks.lock_entries();
+  let Some(entry) = guard
+    .get_mut(&notebook_id)
+    .filter(|e| e.notebook.tenant_id == tenant)
+  else {
+    return notebook_error_json(
+      StatusCode::NOT_FOUND,
+      &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
+    );
+  };
+  let before = entry.artifacts.len();
+  entry.artifacts.retain(|a| a.id != artifact_id);
+  if entry.artifacts.len() == before {
+    return notebook_error_json(
+      StatusCode::NOT_FOUND,
+      &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
+    );
+  }
+  entry.notebook.updated_at = Utc::now();
+  let _ = write_notebook_bundle_sync(&nb_dir, entry);
+  StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -2249,7 +2853,7 @@ mod tests {
     let notebook_id = created["id"].as_str().expect("notebook id").to_string();
     assert_eq!(created["title"], "Oceanography Notes");
 
-    // Tenant isolation check (`studio-b` cannot read or delete `studio-a`'s notebook)
+    // Tenant isolation check (`studio-b` cannot read, rename, or delete `studio-a`'s notebook)
     let cross_tenant = client
       .get(format!("{base_url}/v1/notebooks/{notebook_id}"))
       .header("X-Yanshi-Tenant", "studio-b")
@@ -2257,6 +2861,25 @@ mod tests {
       .await
       .expect("cross tenant get");
     assert_eq!(cross_tenant.status(), StatusCode::NOT_FOUND);
+    let cross_rename = client
+      .patch(format!("{base_url}/v1/notebooks/{notebook_id}"))
+      .header("X-Yanshi-Tenant", "studio-b")
+      .json(&json!({ "title": "Intruder" }))
+      .send()
+      .await
+      .expect("cross tenant rename");
+    assert_eq!(cross_rename.status(), StatusCode::NOT_FOUND);
+    let renamed: Value = client
+      .patch(format!("{base_url}/v1/notebooks/{notebook_id}"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({ "title": "Oceanography & Estuarine Notes" }))
+      .send()
+      .await
+      .expect("owner rename")
+      .json()
+      .await
+      .expect("renamed json");
+    assert_eq!(renamed["title"], "Oceanography & Estuarine Notes");
     let cross_delete = client
       .delete(format!("{base_url}/v1/notebooks/{notebook_id}"))
       .header("X-Yanshi-Tenant", "studio-b")
@@ -2330,6 +2953,78 @@ mod tests {
       .await
       .expect("csv src json");
 
+    let xlsx_bytes = {
+      use std::io::Write as _;
+      let mut cursor = std::io::Cursor::new(Vec::new());
+      {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("xl/workbook.xml", opts).expect("start");
+        zip
+          .write_all(
+            br#"<workbook><sheets><sheet name="Harmonics" sheetId="1"/></sheets></workbook>"#,
+          )
+          .expect("write");
+        zip.start_file("xl/sharedStrings.xml", opts).expect("start");
+        zip
+          .write_all(br#"<sst><si><t>Constituent</t></si><si><t>PeriodH</t></si><si><t>SemidiurnalM2</t></si></sst>"#)
+          .expect("write");
+        zip
+          .start_file("xl/worksheets/sheet1.xml", opts)
+          .expect("start");
+        zip
+          .write_all(
+            br#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>12.42</v></c></row></sheetData></worksheet>"#,
+          )
+          .expect("write");
+        zip.finish().expect("finish");
+      }
+      cursor.into_inner()
+    };
+    let xlsx_res = client
+      .post(format!("{base_url}/v1/notebooks/{notebook_id}/sources"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "kind": "file",
+        "filename": "harmonics.xlsx",
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(&xlsx_bytes),
+      }))
+      .send()
+      .await
+      .expect("add xlsx source");
+    assert_eq!(xlsx_res.status(), StatusCode::OK);
+
+    let pptx_bytes = {
+      use std::io::Write as _;
+      let mut cursor = std::io::Cursor::new(Vec::new());
+      {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip
+          .start_file("ppt/slides/slide1.xml", opts)
+          .expect("start");
+        zip
+          .write_all(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Estuarine KelvinWave Dynamics</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+          )
+          .expect("write");
+        zip.finish().expect("finish");
+      }
+      cursor.into_inner()
+    };
+    let pptx_res = client
+      .post(format!("{base_url}/v1/notebooks/{notebook_id}/sources"))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .json(&json!({
+        "kind": "file",
+        "filename": "kelvin.pptx",
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(&pptx_bytes),
+      }))
+      .send()
+      .await
+      .expect("add pptx source");
+    assert_eq!(pptx_res.status(), StatusCode::OK);
+
     let wav_bytes = yanshi_llm::providers::mock_media::silent_wav(150);
     let rec_res = client
       .post(format!("{base_url}/v1/notebooks/{notebook_id}/sources"))
@@ -2358,13 +3053,48 @@ mod tests {
         .await
         .expect("detail json");
       let sources = detail["sources"].as_array().expect("sources array");
-      if sources.len() == 5 && sources.iter().all(|s| s["status"] == "ready") {
+      if sources.len() == 7 && sources.iter().all(|s| s["status"] == "ready") {
         all_ready = true;
         break;
       }
       tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(all_ready, "all 5 desktop sources must reach ready");
+    assert!(all_ready, "all 7 desktop sources must reach ready");
+
+    let xlsx_search: Value = client
+      .get(format!(
+        "{base_url}/v1/notebooks/{notebook_id}/search?q=SemidiurnalM2"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("xlsx search")
+      .json()
+      .await
+      .expect("xlsx search json");
+    assert!(
+      xlsx_search["chunks"]
+        .as_array()
+        .is_some_and(|c| !c.is_empty()),
+      "xlsx must be searchable: {xlsx_search}"
+    );
+    let pptx_search: Value = client
+      .get(format!(
+        "{base_url}/v1/notebooks/{notebook_id}/search?q=KelvinWave"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("pptx search")
+      .json()
+      .await
+      .expect("pptx search json");
+    assert!(
+      pptx_search["chunks"]
+        .as_array()
+        .is_some_and(|c| !c.is_empty()),
+      "pptx must be searchable: {pptx_search}"
+    );
 
     // 3. Scoped BM25 search + chunk lookup
     let csv_id = csv_src["id"].as_str().expect("csv id");
@@ -2561,6 +3291,43 @@ mod tests {
     assert_eq!(
       arts_after_restart["artifacts"][0]["deliverable"]["title"],
       "Macrotidal Basin Metrics"
+    );
+    let first_art_id = arts_after_restart["artifacts"][0]["id"]
+      .as_str()
+      .expect("first art id")
+      .to_string();
+    let cross_detach = client
+      .delete(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts/{first_art_id}"
+      ))
+      .header("X-Yanshi-Tenant", "studio-b")
+      .send()
+      .await
+      .expect("cross-tenant detach");
+    assert_eq!(cross_detach.status(), StatusCode::NOT_FOUND);
+    let owner_detach = client
+      .delete(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts/{first_art_id}"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("owner detach");
+    assert_eq!(owner_detach.status(), StatusCode::NO_CONTENT);
+    let arts_after_detach: Value = client
+      .get(format!(
+        "{restarted_url}/v1/notebooks/{notebook_id}/artifacts"
+      ))
+      .header("X-Yanshi-Tenant", "studio-a")
+      .send()
+      .await
+      .expect("arts after detach")
+      .json()
+      .await
+      .expect("arts after detach json");
+    assert_eq!(
+      arts_after_detach["artifacts"].as_array().map(Vec::len),
+      Some(2)
     );
 
     let del_src = client

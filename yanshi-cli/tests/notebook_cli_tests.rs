@@ -100,6 +100,15 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
           }))
         }
       })
+      .patch(|Path(id): Path<String>, Json(body): Json<Value>| async move {
+        Json(json!({
+          "id": id,
+          "tenant_id": "cli-team",
+          "title": body["title"],
+          "created_at": "2026-11-19T00:00:00Z",
+          "updated_at": "2026-11-19T00:01:00Z"
+        }))
+      })
       .delete(|| async { StatusCode::NO_CONTENT }),
     )
     .route(
@@ -193,6 +202,10 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
     .route(
       "/v1/notebooks/:id/sources/:source_id",
       delete(|| async { StatusCode::NO_CONTENT }),
+    )
+    .route(
+      "/v1/notebooks/:id/artifacts/:artifact_id",
+      delete(|| async { StatusCode::NO_CONTENT }),
     );
 
   let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -229,11 +242,19 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
     })
   };
 
-  // 1. Create notebook
+  // 1. Create & rename notebook
   let created = bin_run(vec!["create".into(), "Tidal Research".into()])
     .await
     .expect("join");
   assert_eq!(created["id"], nb_id);
+  let renamed = bin_run(vec![
+    "rename".into(),
+    nb_id.clone(),
+    "Macrotidal Estuaries".into(),
+  ])
+  .await
+  .expect("join");
+  assert_eq!(renamed["title"], "Macrotidal Estuaries");
 
   // 2. Upload CSV with `--wait`
   let added = bin_run(vec![
@@ -261,7 +282,8 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
   .expect("join");
   assert_eq!(hits["chunks"].as_array().map(Vec::len), Some(1));
 
-  // 4. Grounded `ask` with `--source-id`
+  // 4. Grounded `ask` with `--source-id` and `--history-file` multi-turn persistence
+  let history_path = temp.path().join("chat-history.json");
   let ask = bin_run(vec![
     "ask".into(),
     nb_id.clone(),
@@ -270,6 +292,8 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
     "mock-ask".into(),
     "--source-id".into(),
     src_id.clone(),
+    "--history-file".into(),
+    history_path.display().to_string(),
   ])
   .await
   .expect("join");
@@ -280,6 +304,29 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
       .contains("16.3 m")
   );
   assert_eq!(ask["citations"].as_array().map(Vec::len), Some(1));
+  let saved_turns: Vec<Value> =
+    serde_json::from_str(&std::fs::read_to_string(&history_path).expect("history json"))
+      .expect("parse turns");
+  assert_eq!(saved_turns.len(), 1);
+  assert_eq!(saved_turns[0]["question"], "What is the peak range?");
+
+  let _ask2 = bin_run(vec![
+    "ask".into(),
+    nb_id.clone(),
+    "Which basin has that peak?".into(),
+    "--model".into(),
+    "mock-ask".into(),
+    "--source-id".into(),
+    src_id.clone(),
+    "--history-file".into(),
+    history_path.display().to_string(),
+  ])
+  .await
+  .expect("join");
+  let saved_turns2: Vec<Value> =
+    serde_json::from_str(&std::fs::read_to_string(&history_path).expect("history json 2"))
+      .expect("parse turns 2");
+  assert_eq!(saved_turns2.len(), 2);
 
   // 5. `generate` with `--input max_rows=10` and `--output-dir`
   let generated = bin_run(vec![
@@ -303,7 +350,11 @@ async fn notebook_cli_drives_sources_ask_and_generate_output_dir_over_loopback()
   assert!(downloaded_csv.contains("Bay of Fundy,16.3"));
   assert!(out_dir.join("artifacts.json").is_file());
 
-  // 6. Remove source & delete notebook
+  // 6. Remove artifact, remove source & delete notebook
+  let removed_art = bin_run(vec!["remove-artifact".into(), nb_id.clone(), art_id])
+    .await
+    .expect("join");
+  assert_eq!(removed_art["deleted"], true);
   let removed = bin_run(vec!["remove-source".into(), nb_id.clone(), src_id])
     .await
     .expect("join");

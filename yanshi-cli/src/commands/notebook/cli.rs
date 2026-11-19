@@ -58,12 +58,19 @@ pub enum NotebookCommands {
     /// Notebook UUID
     notebook_id: String,
   },
+  /// Rename an existing notebook
+  Rename {
+    /// Notebook UUID
+    notebook_id: String,
+    /// New notebook title
+    title: String,
+  },
   /// Delete a notebook and all of its sources, chunks, and artifact links
   Delete {
     /// Notebook UUID
     notebook_id: String,
   },
-  /// Add a URL, pasted text, local document (.pdf/.docx/.csv/.tsv/.json/.md/.txt/.html), or audio recording
+  /// Add a URL, pasted text, local document (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html), or audio recording
   AddSource {
     /// Notebook UUID
     notebook_id: String,
@@ -73,7 +80,7 @@ pub enum NotebookCommands {
     /// Inline text note
     #[arg(long, conflicts_with_all = ["url", "file", "recording"])]
     text: Option<String>,
-    /// Local document file path (`.pdf`, `.docx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`)
+    /// Local document file path (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`)
     #[arg(long, value_name = "PATH", conflicts_with_all = ["url", "text", "recording"])]
     file: Option<PathBuf>,
     /// Local audio recording file path (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.webm`, `.aac`)
@@ -137,6 +144,9 @@ pub enum NotebookCommands {
     /// Restrict grounding to specific source UUIDs (repeatable)
     #[arg(long = "source-id", value_name = "UUID")]
     source_ids: Vec<String>,
+    /// Optional JSON file persisting multi-turn `{question, answer}` history across CLI calls
+    #[arg(long, value_name = "PATH")]
+    history_file: Option<PathBuf>,
   },
   /// Launch one of the 12 Studio deliverable generators against notebook sources
   Generate {
@@ -167,6 +177,13 @@ pub enum NotebookCommands {
   Artifacts {
     /// Notebook UUID
     notebook_id: String,
+  },
+  /// Detach an artifact from a notebook (`DELETE /v1/notebooks/{id}/artifacts/{artifact_id}`)
+  RemoveArtifact {
+    /// Notebook UUID
+    notebook_id: String,
+    /// Artifact UUID
+    artifact_id: String,
   },
 }
 
@@ -272,6 +289,18 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
             err_suffix
           );
         }
+      }
+    }
+    NotebookCommands::Rename { notebook_id, title } => {
+      let updated = client.rename_notebook(&notebook_id, &title).await?;
+      if json_mode {
+        println!("{}", serde_json::to_string_pretty(&updated)?);
+      } else {
+        println!(
+          "Renamed notebook {} -> {}",
+          updated["id"].as_str().unwrap_or(&notebook_id),
+          updated["title"].as_str().unwrap_or(&title)
+        );
       }
     }
     NotebookCommands::Delete { notebook_id } => {
@@ -417,9 +446,24 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
       model,
       top_k,
       source_ids,
+      history_file,
     } => {
+      let mut prior_turns: Vec<Value> = if let Some(path) = &history_file
+        && path.exists()
+      {
+        let raw = std::fs::read_to_string(path)
+          .with_context(|| format!("failed to read history file {}", path.display()))?;
+        serde_json::from_str::<Vec<Value>>(&raw)
+          .with_context(|| format!("history file {} must be a JSON array", path.display()))?
+      } else {
+        Vec::new()
+      };
+
       let mut body = serde_json::Map::new();
-      body.insert("question".to_string(), Value::String(question));
+      body.insert("question".to_string(), Value::String(question.clone()));
+      if !prior_turns.is_empty() {
+        body.insert("history".to_string(), Value::Array(prior_turns.clone()));
+      }
       if let Some(m) = model.filter(|s| !s.trim().is_empty()) {
         body.insert("model".to_string(), Value::String(m));
       }
@@ -435,6 +479,22 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
       let ans = client
         .ask_notebook(&notebook_id, &Value::Object(body))
         .await?;
+
+      if let Some(path) = &history_file {
+        prior_turns.push(json!({
+          "question": question,
+          "answer": ans["answer"].as_str().unwrap_or(""),
+        }));
+        let skip = prior_turns.len().saturating_sub(8);
+        let bounded: Vec<Value> = prior_turns.into_iter().skip(skip).collect();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+          std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&bounded)?)
+          .with_context(|| format!("failed to write history file {}", path.display()))?;
+      }
+
       if json_mode {
         println!("{}", serde_json::to_string_pretty(&ans)?);
       } else {
@@ -617,6 +677,26 @@ pub async fn dispatch(args: NotebookArgs) -> Result<()> {
             );
           }
         }
+      }
+    }
+    NotebookCommands::RemoveArtifact {
+      notebook_id,
+      artifact_id,
+    } => {
+      client
+        .delete_notebook_artifact(&notebook_id, &artifact_id)
+        .await?;
+      if json_mode {
+        println!(
+          "{}",
+          serde_json::to_string_pretty(&json!({
+            "deleted": true,
+            "notebook_id": notebook_id,
+            "artifact_id": artifact_id,
+          }))?
+        );
+      } else {
+        println!("Removed artifact {artifact_id} from notebook {notebook_id}");
       }
     }
   }
