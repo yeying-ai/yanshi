@@ -283,6 +283,12 @@ impl ConfigUpdater {
       "google" => self.is_google_multimodal(model_id),
       "moonshot" => model_id.contains("vision"),
       "dashscope" => self.is_qwen_multimodal(model_id),
+      "deepseek" => {
+        model_id == "deepseek-flash"
+          || model_id.starts_with("deepseek-flash-")
+          || model_id.contains("vl")
+          || model_id.contains("vision")
+      }
       "step" => {
         model_id.contains("v-")
           || model_id.contains("-v")

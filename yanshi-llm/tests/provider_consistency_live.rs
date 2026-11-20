@@ -112,7 +112,11 @@ const LIVE_PROVIDER_PROFILES: &[LiveProviderProfile] = &[
   },
   LiveProviderProfile {
     name: "deepseek",
-    capabilities: &[LiveCapability::Llm],
+    capabilities: &[
+      LiveCapability::Llm,
+      LiveCapability::Multimodal,
+      LiveCapability::Audio,
+    ],
   },
   LiveProviderProfile {
     name: "minimax",
@@ -1586,26 +1590,23 @@ async fn dashscope_live_text_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deepseek_live_text_path() {
-  // DeepSeek (https://api.deepseek.com) is OpenAI-compatible.
-  // `deepseek-chat` is on DeepSeek's deprecation list (2026-07-24);
-  // `deepseek-v4-flash` is the current cheapest V4 model per the API
-  // docs. Override at workflow level via
-  // `YANSHI_LIVE_DEEPSEEK_TEXT_MODEL` when the lineup shifts again.
+  // DeepSeek (https://api.deepseek.com) serves `deepseek-flash` (V4.1-Flash,
+  // 1M context, text+image) and `deepseek-v4-pro`. Override at workflow level
+  // via `YANSHI_LIVE_DEEPSEEK_TEXT_MODEL` when the lineup shifts again.
   let _guard = deepseek_live_lock().lock().await;
   let Some((api_key, base_url)) = deepseek_live_context(LiveCapability::Llm).await else {
     return;
   };
   let provider =
     OpenAIProvider::with_client(no_proxy_client(), &api_key, base_url).expect("deepseek provider");
-  let model = live_text_model("deepseek", "deepseek-v4-flash");
+  let model = live_text_model("deepseek", "deepseek-flash");
+  let mut req = provider_request(&model);
+  req.thinking = Some(ThinkingConfig::Disabled);
 
-  let response = tokio::time::timeout(
-    Duration::from_secs(30),
-    provider.execute(&provider_request(&model)),
-  )
-  .await
-  .unwrap_or_else(|_| panic!("deepseek: live text request timed out after 30s"))
-  .unwrap_or_else(|e| panic!("deepseek: live text request failed: {e}"));
+  let response = tokio::time::timeout(Duration::from_secs(30), provider.execute(&req))
+    .await
+    .unwrap_or_else(|_| panic!("deepseek: live text request timed out after 30s"))
+    .unwrap_or_else(|e| panic!("deepseek: live text request failed: {e}"));
 
   assert_text_non_empty(&response.content);
   assert_usage_populated(&response.usage, "deepseek");
@@ -1614,6 +1615,93 @@ async fn deepseek_live_text_path() {
     Some(StopReason::Stop),
     "deepseek: expected StopReason::Stop on a single-turn text completion"
   );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deepseek_live_vision_path() {
+  let _guard = deepseek_live_lock().lock().await;
+  let Some((api_key, base_url)) = deepseek_live_context(LiveCapability::Multimodal).await else {
+    return;
+  };
+  let provider =
+    OpenAIProvider::with_client(no_proxy_client(), &api_key, base_url).expect("deepseek provider");
+  let model = live_model("deepseek", "VISION", "deepseek-flash");
+  let mut req = provider_vision_request(&model);
+  req.thinking = Some(ThinkingConfig::Disabled);
+
+  let response = tokio::time::timeout(Duration::from_secs(30), provider.execute(&req))
+    .await
+    .unwrap_or_else(|_| panic!("deepseek: live vision request timed out after 30s"))
+    .unwrap_or_else(|e| panic!("deepseek: live vision request failed: {e}"));
+
+  assert_text_non_empty(&response.content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deepseek_tts_and_asr_via_modality_dispatcher() {
+  let _guard = deepseek_live_lock().lock().await;
+  let Some((api_key, _)) = deepseek_live_context(LiveCapability::Audio).await else {
+    return;
+  };
+  // SAFETY: tests serialize DeepSeek live access behind `deepseek_live_lock`.
+  unsafe {
+    std::env::set_var("DEEPSEEK_API_KEY", api_key);
+  }
+  let hermetic_yaml = r#"
+models:
+  deepseek-tts:
+    vendor: deepseek
+    type: tts
+    accepts: [text]
+  deepseek-asr:
+    vendor: deepseek
+    type: asr
+    accepts: [audio]
+"#;
+  yanshi_llm::ModelRegistry::global()
+    .load_config_from_yaml(hermetic_yaml)
+    .await
+    .expect("seed hermetic deepseek speech entries");
+
+  let tts_provider = Yanshi::tts("deepseek-tts")
+    .await
+    .expect("deepseek-tts resolves through dispatcher");
+  assert_eq!(tts_provider.name(), "deepseek");
+  let tts_resp = tokio::time::timeout(
+    Duration::from_secs(30),
+    tts_provider.synthesize(yanshi_llm::TtsRequest {
+      model: "deepseek-tts".to_string(),
+      input: "Hello from DeepSeek.".to_string(),
+      voice: "stella".to_string(),
+      ..Default::default()
+    }),
+  )
+  .await
+  .unwrap_or_else(|_| panic!("deepseek TTS timed out after 30s"))
+  .unwrap_or_else(|e| panic!("deepseek TTS failed: {e}"));
+  assert!(!tts_resp.audio.is_empty(), "deepseek TTS audio empty");
+  assert_eq!(tts_resp.mime_type, "audio/wav");
+
+  let asr_provider = Yanshi::asr("deepseek-asr")
+    .await
+    .expect("deepseek-asr resolves through dispatcher");
+  assert_eq!(asr_provider.name(), "deepseek");
+  let asr_resp = tokio::time::timeout(
+    Duration::from_secs(30),
+    asr_provider.transcribe(yanshi_llm::AsrRequest {
+      model: "deepseek-asr".to_string(),
+      audio_data: tts_resp.audio,
+      filename: "speech.wav".to_string(),
+      response_format: "json".to_string(),
+      language: None,
+      temperature: None,
+      prompt: None,
+    }),
+  )
+  .await
+  .unwrap_or_else(|_| panic!("deepseek ASR timed out after 30s"))
+  .unwrap_or_else(|e| panic!("deepseek ASR failed: {e}"));
+  assert!(!asr_resp.text.trim().is_empty(), "deepseek ASR text empty");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1710,6 +1798,14 @@ fn live_provider_profiles_probe_supported_capabilities() {
     LiveCapability::Multimodal
   ));
   assert!(!provider_supports_capability("glm", LiveCapability::Audio));
+  assert!(provider_supports_capability(
+    "deepseek",
+    LiveCapability::Multimodal
+  ));
+  assert!(provider_supports_capability(
+    "deepseek",
+    LiveCapability::Audio
+  ));
   assert!(!provider_supports_capability(
     "unknown",
     LiveCapability::Llm

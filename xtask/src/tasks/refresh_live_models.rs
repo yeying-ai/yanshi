@@ -101,7 +101,7 @@ const REFRESH_LIVE_MODELS_PROBES: &[LiveModelProbe] = &[
   LiveModelProbe {
     name: "deepseek",
     key_envs: &["DEEPSEEK_API_KEY"],
-    default_text_model: "deepseek-v4-flash",
+    default_text_model: "deepseek-flash",
     endpoint: LiveModelsEndpoint::OpenAICompat("https://api.deepseek.com/v1/models"),
   },
   LiveModelProbe {

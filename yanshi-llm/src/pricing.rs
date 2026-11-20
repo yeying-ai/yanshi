@@ -307,9 +307,12 @@ models:
     let path = manifest_dir.join("../config/pricing.prod.yml");
     let table = PricingTable::load_from_yaml(&path).expect("pricing.prod.yml parses");
     assert!(table.default.is_some());
+    assert!(table.models.contains_key("deepseek-flash"));
     assert!(table.models.contains_key("deepseek-chat"));
     assert!(table.models.contains_key("gemini-2.5-flash"));
     assert!(table.models.contains_key("glm-4-flash"));
+    assert!(table.lookup("deepseek-tts").cost_for_speech(1000, None) > 0.0);
+    assert!(table.lookup("deepseek-asr").cost_for_seconds(5.0) > 0.0);
     for video_model in [
       "veo-3.1-fast-generate-001",
       "veo-3.1-generate-001",

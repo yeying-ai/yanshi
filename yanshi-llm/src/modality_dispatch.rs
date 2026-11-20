@@ -22,6 +22,7 @@ use crate::{
   model_types::ModelType,
   providers::{
     dashscope_media::DashScopeMediaProvider,
+    deepseek_media::DeepSeekMediaProvider,
     glm_images::GlmImageProvider,
     google_media::GoogleMediaProvider,
     google_veo::GoogleVeoClient,
@@ -108,6 +109,12 @@ fn build_openai_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn A
 }
 fn build_glm_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
   Ok(Box::new(OpenAIAsrProvider::new_glm(api_key, base_url)?))
+}
+fn build_deepseek_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
+  Ok(Box::new(DeepSeekMediaProvider::new(api_key, base_url)?))
+}
+fn build_deepseek_tts(api_key: &str, base_url: Option<String>) -> Result<Box<dyn TtsProvider>> {
+  Ok(Box::new(DeepSeekMediaProvider::new(api_key, base_url)?))
 }
 fn build_google_asr(api_key: &str, base_url: Option<String>) -> Result<Box<dyn AsrProvider>> {
   Ok(Box::new(GoogleMediaProvider::new(api_key, base_url)?))
@@ -244,6 +251,7 @@ const ASR_PROVIDERS: &[(&str, Ctor<dyn AsrProvider>)] = &[
   ("openai", build_openai_asr),
   ("google", build_google_asr),
   ("glm", build_glm_asr),
+  ("deepseek", build_deepseek_asr),
   ("mock", build_mock_asr),
 ];
 const TTS_PROVIDERS: &[(&str, Ctor<dyn TtsProvider>)] = &[
@@ -253,6 +261,7 @@ const TTS_PROVIDERS: &[(&str, Ctor<dyn TtsProvider>)] = &[
   ("google", build_google_tts),
   ("dashscope", build_dashscope_tts),
   ("minimax", build_minimax_tts),
+  ("deepseek", build_deepseek_tts),
   ("mock", build_mock_tts),
 ];
 const TEXT2IMAGE_PROVIDERS: &[(&str, Ctor<dyn Text2ImageProvider>)] = &[
@@ -530,6 +539,7 @@ mod tests {
       implemented_modalities_for("glm"),
       vec!["ASR", "text-to-image"]
     );
+    assert_eq!(implemented_modalities_for("deepseek"), vec!["ASR", "TTS"]);
   }
 
   #[test]

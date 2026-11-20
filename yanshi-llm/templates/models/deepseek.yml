@@ -1,11 +1,31 @@
 models:
-  # 2026-08-13: per api-docs.deepseek.com's pricing/model page, deepseek-chat
-  # and deepseek-reasoner no longer appear in DeepSeek's current model
-  # catalog — deepseek-chat's deprecation (announced for 2026-07-24, per
-  # provider_consistency_live.rs's DeepSeek live-test comments) has passed as
-  # of this writing. Kept in the registry (not deleted) so existing configs
-  # referencing them by name don't silently break, but new integrations
-  # should target deepseek-v4-flash / deepseek-v4-pro below.
+  # 2026-11-20: DeepSeek's live `/models` catalog serves `deepseek-flash`
+  # (`DeepSeek-V4.1-Flash`, 1M context window, 384K max output tokens,
+  # `input_modalities: [text, image]`) and `deepseek-v4-pro` (1M context
+  # window, 384K max output tokens, text input), plus `/v1/tools/tts` and
+  # `/v1/tools/asr` speech endpoints under the same `DEEPSEEK_API_KEY`.
+  # Legacy `deepseek-chat`, `deepseek-reasoner`, and `deepseek-v4-flash`
+  # remain in the registry so existing configs keep working (`deepseek-v4-flash`
+  # aliases directly to `model_id: deepseek-flash`).
+  deepseek-flash:
+    vendor: deepseek
+    type: chat
+    accepts: [text, image]
+    model_id: null
+    base_url: null
+    temperature: 0.7
+    top_p: null
+    max_tokens: 8192
+    frequency_penalty: null
+    stop: null
+    n: null
+    supports_streaming: true
+    supports_tools: true
+    native_tool_calling: true
+    supports_multimodal: true
+    supports_thinking: true
+    thinking_kind: deep_seek_reasoning_effort
+    response_format: null
   deepseek-chat:
     vendor: deepseek
     type: chat
@@ -43,7 +63,8 @@ models:
   deepseek-v4-flash:
     vendor: deepseek
     type: chat
-    model_id: null
+    accepts: [text, image]
+    model_id: deepseek-flash
     base_url: null
     temperature: 0.7
     top_p: null
@@ -54,12 +75,7 @@ models:
     supports_streaming: true
     supports_tools: true
     native_tool_calling: true
-    supports_multimodal: false
-    # V4-Flash-0731. Both current DeepSeek models support thinking mode via
-    # the nested `thinking: {type, reasoning_effort}` request block (see
-    # `ThinkingKind::DeepSeekReasoningEffort`) — unlike legacy
-    # deepseek-reasoner above, this is a real caller-facing input knob, not
-    # output-only.
+    supports_multimodal: true
     supports_thinking: true
     thinking_kind: deep_seek_reasoning_effort
     response_format: null
@@ -78,7 +94,16 @@ models:
     supports_tools: true
     native_tool_calling: true
     supports_multimodal: false
-    # V4-Pro-0813. See deepseek-v4-flash's comment above.
     supports_thinking: true
     thinking_kind: deep_seek_reasoning_effort
     response_format: null
+  deepseek-tts:
+    vendor: deepseek
+    type: tts
+    accepts: [text]
+    base_url: null
+  deepseek-asr:
+    vendor: deepseek
+    type: asr
+    accepts: [audio]
+    base_url: null

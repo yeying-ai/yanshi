@@ -92,16 +92,28 @@ impl OpenAIProvider {
       body["tool_choice"] = tool_choice_to_openai_value(choice);
     }
 
-    // DeepSeek's V4 API diverges from real OpenAI here despite otherwise
-    // routing through this "OpenAI-compatible" provider — see
-    // `thinking_config_to_deepseek_value`'s doc comment. Dispatched on the
-    // model name (no per-vendor field exists on this struct — `OpenAIProvider`
-    // is shared verbatim by DashScope/GLM/DeepSeek/MiniMax), mirroring the
-    // same `starts_with("deepseek-")` idiom `tokenizer.rs` already uses to
-    // pick a per-vendor token-counting heuristic.
-    if let Some(thinking) = &request.thinking {
+    // DeepSeek's V4 / V4.1 API (`deepseek-flash`, `deepseek-v4-pro`) diverges
+    // from vanilla OpenAI in three ways despite sharing `OpenAIProvider`:
+    //   1. `thinking` is `{"type": "enabled" | "disabled"}` while
+    //      `reasoning_effort` (`"none" | "low" | "high" | "max"`) sits at the
+    //      top level of the request body;
+    //   2. thinking defaults to `enabled` (`high`), so structured JSON calls
+    //      without an explicit `.thinking(...)` actively disable it;
+    //   3. forced `tool_choice` (`"required"` or named function) returns HTTP
+    //      400 in thinking mode unless `thinking: {"type": "disabled"}` is set.
+    let deepseek_forced_tool_choice = is_deepseek_thinking_default_model(&request.model)
+      && matches!(
+        request.tool_choice,
+        Some(ToolChoice::Required | ToolChoice::Tool { .. })
+      );
+    if deepseek_forced_tool_choice {
+      body["thinking"] = json!({ "type": "disabled" });
+      if let Some(obj) = body.as_object_mut() {
+        obj.remove("reasoning_effort");
+      }
+    } else if let Some(thinking) = &request.thinking {
       if is_deepseek_model(&request.model) {
-        body["thinking"] = thinking_config_to_deepseek_value(thinking);
+        apply_deepseek_thinking(&mut body, thinking);
       } else if is_glm_thinking_model(&request.model) && thinking.is_disabled() {
         body["thinking"] = json!({ "type": "disabled" });
       } else if let Some(effort) = thinking_config_to_openai_effort(thinking) {
@@ -110,11 +122,13 @@ impl OpenAIProvider {
     } else if matches!(
       request.response_format,
       Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
-    ) && (is_deepseek_v4_model(&request.model) || is_glm_thinking_model(&request.model))
+    ) && (is_deepseek_thinking_default_model(&request.model)
+      || is_glm_thinking_model(&request.model))
       && !body.as_object().is_some_and(|m| m.contains_key("thinking"))
     {
-      // DeepSeek V4 and Zhipu GLM-4.5/5.x default to thinking=enabled, burning
-      // minutes and token budgets on structured JSON extraction unless disabled.
+      // DeepSeek V4/V4.1 and Zhipu GLM-4.5/5.x default to thinking=enabled,
+      // burning minutes and token budgets on structured JSON extraction unless
+      // disabled.
       body["thinking"] = json!({ "type": "disabled" });
     }
 
@@ -186,8 +200,9 @@ pub(crate) fn is_deepseek_model(model: &str) -> bool {
   model.to_ascii_lowercase().starts_with("deepseek-")
 }
 
-fn is_deepseek_v4_model(model: &str) -> bool {
-  model.to_ascii_lowercase().starts_with("deepseek-v4")
+fn is_deepseek_thinking_default_model(model: &str) -> bool {
+  let m = model.to_ascii_lowercase();
+  m == "deepseek-flash" || m.starts_with("deepseek-flash-") || m.starts_with("deepseek-v4")
 }
 
 fn is_glm_model(model: &str) -> bool {
@@ -199,39 +214,36 @@ fn is_glm_thinking_model(model: &str) -> bool {
   m.starts_with("glm-4.5") || m.starts_with("glm-5")
 }
 
-/// Encode a [`ThinkingConfig`] as DeepSeek's `thinking` request block
-/// (`api-docs.deepseek.com/zh-cn/api/create-chat-completion`, verified
-/// 2026-08-13).
+/// Apply [`ThinkingConfig`] onto a DeepSeek Chat Completions request body
+/// (`POST /chat/completions`, verified against DeepSeek V4.1 spec 2026-11).
 ///
-/// Despite `deepseek-v4-*` routing through this "OpenAI-compatible"
-/// provider, DeepSeek's actual wire shape diverges from real OpenAI's flat
-/// `reasoning_effort` string in two ways this function has to account for:
-///  - it's a **nested object**: `{"type": "enabled"|"disabled",
-///    "reasoning_effort": "low"|"high"|"max"}`, not a top-level field — the
-///    flat `reasoning_effort` this crate previously sent for every
-///    OpenAI-compatible vendor is simply an unrecognized field DeepSeek's API
-///    ignores, so `.thinking(...)` against a DeepSeek model was a silent
-///    no-op before this fix, despite `ThinkingConfig`'s own module doc
-///    (written for the older DeepSeek-R1 API) claiming DeepSeek has "no
-///    input knob";
-///  - thinking **defaults to `enabled`** (unlike OpenAI o-series, where
-///    omitting `reasoning_effort` doesn't turn reasoning off, just leaves
-///    the level unspecified) — so [`ThinkingConfig::Disabled`] must
-///    *actively* send `{"type": "disabled"}`, not omit the field entirely
-///    the way [`thinking_config_to_openai_effort`] does.
-///
-/// Effort levels: DeepSeek only accepts `low` / `high` (default) / `max` —
-/// `medium` and `xhigh` alias to `high` server-side per the docs' own
-/// compatibility note; this function maps directly to `high` for those
-/// instead of relying on that server-side aliasing.
-pub(crate) fn thinking_config_to_deepseek_value(config: &ThinkingConfig) -> Value {
+/// DeepSeek's `thinking` object accepts `{"type": "enabled" | "disabled"}`,
+/// while `reasoning_effort` (`"none" | "low" | "high" | "max"`) is a
+/// **top-level** field on the request body. Because `deepseek-flash` and
+/// `deepseek-v4-pro` default thinking ON (`high`), [`ThinkingConfig::Disabled`]
+/// (or `Effort("none")`) actively emits `thinking: {"type": "disabled"}`.
+pub(crate) fn apply_deepseek_thinking(body: &mut Value, config: &ThinkingConfig) {
+  let (thinking_val, effort) = thinking_config_to_deepseek_parts(config);
+  body["thinking"] = thinking_val;
+  if let Some(effort_str) = effort {
+    body["reasoning_effort"] = Value::String(effort_str.to_string());
+  } else if let Some(obj) = body.as_object_mut() {
+    obj.remove("reasoning_effort");
+  }
+}
+
+pub(crate) fn thinking_config_to_deepseek_parts(
+  config: &ThinkingConfig,
+) -> (Value, Option<&'static str>) {
   if config.is_disabled() {
-    return json!({ "type": "disabled" });
+    return (json!({ "type": "disabled" }), None);
+  }
+  if let ThinkingConfig::Effort(raw) = config
+    && raw.trim().eq_ignore_ascii_case("none")
+  {
+    return (json!({ "type": "disabled" }), Some("none"));
   }
   let effort = match config {
-    // Auto: omit `reasoning_effort` and let DeepSeek apply its own default
-    // (`high`) rather than force a value, mirroring how Anthropic/Google
-    // handle `Auto` elsewhere in this crate.
     ThinkingConfig::Auto => None,
     ThinkingConfig::Low => Some("low"),
     ThinkingConfig::Medium | ThinkingConfig::High => Some("high"),
@@ -239,17 +251,10 @@ pub(crate) fn thinking_config_to_deepseek_value(config: &ThinkingConfig) -> Valu
     ThinkingConfig::Effort(s) => Some(deepseek_normalise_effort(s)),
     ThinkingConfig::Disabled => unreachable!("handled by the is_disabled() check above"),
   };
-  match effort {
-    Some(effort) => json!({ "type": "enabled", "reasoning_effort": effort }),
-    None => json!({ "type": "enabled" }),
-  }
+  (json!({ "type": "enabled" }), effort)
 }
 
 /// Bucket an explicit token budget into DeepSeek's three effort levels.
-/// DeepSeek doesn't accept a raw token budget, so this reuses the same
-/// split philosophy as `ThinkingConfig`'s own OpenAI four-level bucketing
-/// (`thinking.rs`'s private `budget_to_effort`), extended with a `max` tier
-/// for very large budgets DeepSeek can express but OpenAI's scheme can't.
 fn deepseek_budget_to_effort(n: u32) -> &'static str {
   if n <= 2048 {
     "low"
@@ -260,15 +265,13 @@ fn deepseek_budget_to_effort(n: u32) -> &'static str {
   }
 }
 
-/// Normalise an arbitrary caller-supplied effort string to DeepSeek's three
-/// accepted values.
+/// Normalise an arbitrary caller-supplied effort string to DeepSeek's accepted
+/// values (`low` / `high` / `max`; per DeepSeek's spec `minimal` aliases to
+/// `low` and `medium` / `xhigh` alias to `high`).
 fn deepseek_normalise_effort(s: &str) -> &'static str {
-  match s.to_ascii_lowercase().as_str() {
+  match s.trim().to_ascii_lowercase().as_str() {
     "minimal" | "low" => "low",
-    "max" | "xhigh" => "max",
-    // "medium", "high", and anything unrecognized — matches DeepSeek's own
-    // server-side aliasing of medium/xhigh, so an unknown value degrades to
-    // the same effort level medium would.
+    "max" | "ultra" => "max",
     _ => "high",
   }
 }
@@ -843,15 +846,13 @@ mod tests {
     assert!(body.get("reasoning_effort").is_none());
   }
 
-  /// DeepSeek's real wire shape for thinking is a nested object, not
-  /// OpenAI's flat `reasoning_effort` string — despite `deepseek-v4-*`
-  /// routing through this same `OpenAIProvider`. Regression test for the
-  /// "DeepSeek `.thinking()` calls were a silent no-op" bug this fixes.
+  /// DeepSeek V4.1 (`POST /chat/completions`) expects `thinking: {"type": "enabled"}`
+  /// alongside a top-level `reasoning_effort` (`"low" | "high" | "max"`).
   #[test]
-  fn build_request_body_emits_nested_thinking_block_for_deepseek_model() {
+  fn build_request_body_emits_thinking_and_top_level_reasoning_effort_for_deepseek_model() {
     let provider = OpenAIProvider::new("test-key", None).unwrap();
     let request = ProviderRequest {
-      model: "deepseek-v4-pro".to_string(),
+      model: "deepseek-flash".to_string(),
       messages: vec![json!({"role": "user", "content": "reason"})],
       stream: false,
       parameters: std::collections::HashMap::new(),
@@ -861,23 +862,17 @@ mod tests {
       response_format: None,
     };
     let body = provider.build_request_body(&request);
-    assert!(
-      body.get("reasoning_effort").is_none(),
-      "must not send OpenAI's flat field for a DeepSeek model"
-    );
-    assert_eq!(body["thinking"]["type"], "enabled");
-    assert_eq!(body["thinking"]["reasoning_effort"], "high");
+    assert_eq!(body["thinking"], json!({"type": "enabled"}));
+    assert_eq!(body["reasoning_effort"], "high");
   }
 
-  /// DeepSeek thinking defaults to *enabled* (unlike OpenAI o-series, which
-  /// has no off switch) — `Disabled` must actively send
-  /// `{"type": "disabled"}`, not omit the field the way the OpenAI path
-  /// does above.
+  /// DeepSeek thinking defaults to *enabled* (`high`) — `Disabled` must actively
+  /// send `{"type": "disabled"}` rather than omitting the field.
   #[test]
   fn build_request_body_actively_disables_thinking_for_deepseek_model() {
     let provider = OpenAIProvider::new("test-key", None).unwrap();
     let request = ProviderRequest {
-      model: "deepseek-v4-flash".to_string(),
+      model: "deepseek-flash".to_string(),
       messages: vec![json!({"role": "user", "content": "no reasoning"})],
       stream: false,
       parameters: std::collections::HashMap::new(),
@@ -888,6 +883,7 @@ mod tests {
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert!(body.get("reasoning_effort").is_none());
   }
 
   #[test]
@@ -904,12 +900,53 @@ mod tests {
       response_format: None,
     };
     let body = provider.build_request_body(&request);
-    assert_eq!(body["thinking"]["type"], "enabled");
-    assert!(body["thinking"].get("reasoning_effort").is_none());
+    assert_eq!(body["thinking"], json!({"type": "enabled"}));
+    assert!(body.get("reasoning_effort").is_none());
+  }
+
+  #[test]
+  fn build_request_body_disables_thinking_for_deepseek_flash_json_and_forced_tool_choice() {
+    let provider = OpenAIProvider::new("test-key", None).unwrap();
+    let json_req = ProviderRequest {
+      model: "deepseek-flash".to_string(),
+      messages: vec![json!({"role": "user", "content": "emit json"})],
+      stream: false,
+      parameters: std::collections::HashMap::new(),
+      tools: None,
+      tool_choice: None,
+      thinking: None,
+      response_format: Some(ResponseFormat::JsonSchema {
+        name: "out".to_string(),
+        schema: json!({"type": "object"}),
+        strict: Some(true),
+      }),
+    };
+    let json_body = provider.build_request_body(&json_req);
+    assert_eq!(json_body["thinking"], json!({"type": "disabled"}));
+    assert_eq!(json_body["response_format"], json!({"type": "json_object"}));
+
+    let forced_tool_req = ProviderRequest {
+      model: "deepseek-flash".to_string(),
+      messages: vec![json!({"role": "user", "content": "call weather"})],
+      stream: false,
+      parameters: std::collections::HashMap::new(),
+      tools: Some(vec![ToolSpec::new(
+        "get_weather",
+        "Fetch weather",
+        json!({"type": "object"}),
+      )]),
+      tool_choice: Some(ToolChoice::Required),
+      thinking: Some(ThinkingConfig::High),
+      response_format: None,
+    };
+    let forced_body = provider.build_request_body(&forced_tool_req);
+    assert_eq!(forced_body["thinking"], json!({"type": "disabled"}));
+    assert!(forced_body.get("reasoning_effort").is_none());
   }
 
   #[test]
   fn is_deepseek_model_matches_by_prefix_case_insensitively() {
+    assert!(is_deepseek_model("deepseek-flash"));
     assert!(is_deepseek_model("deepseek-v4-pro"));
     assert!(is_deepseek_model("DeepSeek-V4-Flash"));
     assert!(!is_deepseek_model("gpt-4o-mini"));
@@ -917,36 +954,42 @@ mod tests {
   }
 
   #[test]
-  fn thinking_config_to_deepseek_value_maps_every_qualitative_level() {
+  fn thinking_config_to_deepseek_parts_maps_every_qualitative_level() {
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Low),
-      json!({"type": "enabled", "reasoning_effort": "low"})
-    );
-    // DeepSeek only accepts low/high/max server-side (medium aliases to
-    // high) — map directly instead of relying on that server aliasing.
-    assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Medium),
-      json!({"type": "enabled", "reasoning_effort": "high"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Low),
+      (json!({"type": "enabled"}), Some("low"))
     );
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::High),
-      json!({"type": "enabled", "reasoning_effort": "high"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Medium),
+      (json!({"type": "enabled"}), Some("high"))
     );
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Budget(1000)),
-      json!({"type": "enabled", "reasoning_effort": "low"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::High),
+      (json!({"type": "enabled"}), Some("high"))
     );
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Budget(30_000)),
-      json!({"type": "enabled", "reasoning_effort": "max"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Budget(1000)),
+      (json!({"type": "enabled"}), Some("low"))
     );
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Effort("xhigh".to_string())),
-      json!({"type": "enabled", "reasoning_effort": "max"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Budget(30_000)),
+      (json!({"type": "enabled"}), Some("max"))
     );
     assert_eq!(
-      thinking_config_to_deepseek_value(&ThinkingConfig::Disabled),
-      json!({"type": "disabled"})
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Effort("xhigh".to_string())),
+      (json!({"type": "enabled"}), Some("high"))
+    );
+    assert_eq!(
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Effort("max".to_string())),
+      (json!({"type": "enabled"}), Some("max"))
+    );
+    assert_eq!(
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Effort("none".to_string())),
+      (json!({"type": "disabled"}), Some("none"))
+    );
+    assert_eq!(
+      thinking_config_to_deepseek_parts(&ThinkingConfig::Disabled),
+      (json!({"type": "disabled"}), None)
     );
   }
 

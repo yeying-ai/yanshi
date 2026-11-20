@@ -147,10 +147,21 @@ impl AsyncNode for ASRNode {
           .transcribe(request)
           .await
           .map_err(|e| crate::vendor_error::vendor_error("ASR transcription failed", e))?;
-        crate::cost::record(&model, |p| p.cost_for_seconds(est_seconds))?;
+        let actual_seconds = asr_response
+          .metadata
+          .as_ref()
+          .and_then(|m| {
+            m.get("duration_ms")
+              .and_then(Value::as_f64)
+              .map(|ms| ms / 1000.0)
+              .or_else(|| m.get("duration").and_then(Value::as_f64))
+          })
+          .filter(|secs| secs.is_finite() && *secs > 0.0)
+          .unwrap_or(est_seconds);
+        crate::cost::record(&model, |p| p.cost_for_seconds(actual_seconds))?;
 
         let raw = asr_response.text;
-        let srt = normalize_to_srt(&raw, est_seconds);
+        let srt = normalize_to_srt(&raw, actual_seconds);
         let plain = if raw.contains("-->") {
           srt_to_timestamped_text(&srt)
         } else {

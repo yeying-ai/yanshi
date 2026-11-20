@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 pub mod anthropic;
 pub mod dashscope_media;
+pub mod deepseek_media;
 pub mod glm_images;
 pub mod google;
 pub(crate) mod google_endpoint;

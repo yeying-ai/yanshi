@@ -15,12 +15,14 @@
 //!   always returns `reasoning_content` alongside `content`. Yanshi
 //!   surfaces that via [`crate::providers::ProviderResponse::thinking`] /
 //!   [`crate::LLMResponse::thinking`].
-//! - **DeepSeek V4** (`deepseek-v4-flash`/`deepseek-v4-pro`, OpenAI-compat):
-//!   unlike real OpenAI, thinking is a *nested* object —
-//!   `thinking: { type: "enabled" | "disabled", reasoning_effort: "low" |
-//!   "high" | "max" }` — and defaults to enabled, so turning it off requires
-//!   actively sending `type: "disabled"` rather than omitting the field.
-//!   `reasoning_content` is still surfaced the same way as R1's.
+//! - **DeepSeek V4 / V4.1** (`deepseek-flash`/`deepseek-v4-pro`, OpenAI-compat):
+//!   thinking is controlled by `thinking: { type: "enabled" | "disabled" }`
+//!   together with a top-level `reasoning_effort: "none" | "low" | "high" |
+//!   "max"` field — and defaults to enabled (`high`), so turning it off
+//!   requires actively sending `thinking: { type: "disabled" }` rather than
+//!   omitting the field. Forced `tool_choice` (`required` or named function)
+//!   also requires thinking to be disabled. `reasoning_content` is surfaced
+//!   the same way as R1's.
 //!
 //! The high-level intent (`Auto` / `Low` / `Medium` / `High` / `Disabled`)
 //! is mapped per provider into the native wire shape. When a caller needs
@@ -185,13 +187,13 @@ pub enum ThinkingKind {
   /// wire-level config) so callers can express "I want the reasoning text"
   /// portably.
   OutputOnly,
-  /// DeepSeek V4 (`deepseek-v4-flash`/`deepseek-v4-pro`): emits a nested
-  /// `thinking: { type, reasoning_effort }` block — see
-  /// `providers::openai::thinking_config_to_deepseek_value`. Distinct from
-  /// [`Self::Effort`] (OpenAI's flat `reasoning_effort` string) despite
-  /// `deepseek-v4-*` otherwise routing through the same "OpenAI-compatible"
-  /// provider, and distinct from [`Self::OutputOnly`] since — unlike legacy
-  /// R1 — V4 *does* accept caller-supplied input configuration.
+  /// DeepSeek V4 / V4.1 (`deepseek-flash`/`deepseek-v4-pro`): emits
+  /// `thinking: { type: "enabled" | "disabled" }` plus top-level
+  /// `reasoning_effort: "low" | "high" | "max"` — see
+  /// `providers::openai::apply_deepseek_thinking`. Distinct from
+  /// [`Self::Effort`] (OpenAI's flat `reasoning_effort` string with no
+  /// `thinking` toggle) and distinct from [`Self::OutputOnly`] since V4/V4.1
+  /// default thinking ON and accept caller-supplied input configuration.
   DeepSeekReasoningEffort,
   /// Anthropic Opus 4.6+, Sonnet 4.6+, Haiku 5.5, Fable: emits `thinking:
   /// { type: "adaptive" }` plus `output_config.effort`. The provider picks
