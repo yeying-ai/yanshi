@@ -138,13 +138,19 @@ impl DeepSeekToolsClient {
         message: "DEEPSEEK_API_KEY must not be empty".to_string(),
       });
     }
+    let normalized_base = base_url
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty());
+    let is_loopback_base = normalized_base
+      .as_deref()
+      .and_then(|u| Url::parse(u).ok())
+      .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+      .is_some_and(|h| matches!(h.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]"));
     Ok(Self {
       api_key: trimmed,
-      base_url: base_url
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty()),
+      base_url: normalized_base,
       policy: Arc::new(SandboxPolicy::default()),
-      no_proxy: false,
+      no_proxy: is_loopback_base,
     })
   }
 

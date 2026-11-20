@@ -1083,6 +1083,7 @@ enum BytesFormat {
   Subtitle,
   Html,
   Pdf,
+  Image,
   Docx,
   Xlsx,
   Pptx,
@@ -1187,6 +1188,7 @@ async fn add_source(
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
         "srt" | "vtt" => BytesFormat::Subtitle,
         "pdf" => BytesFormat::Pdf,
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => BytesFormat::Image,
         "docx" => BytesFormat::Docx,
         "xlsx" => BytesFormat::Xlsx,
         "pptx" => BytesFormat::Pptx,
@@ -1197,7 +1199,7 @@ async fn add_source(
           return notebook_error_json(
             StatusCode::BAD_REQUEST,
             &format!(
-              "unsupported file type '.{other}': upload .txt, .md, .srt, .vtt, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv or .json"
+              "unsupported file type '.{other}': upload .txt, .md, .srt, .vtt, .html, .pdf, .png, .jpg, .jpeg, .webp, .gif, .docx, .xlsx, .pptx, .csv, .tsv or .json"
             ),
           );
         }
@@ -1221,6 +1223,12 @@ async fn add_source(
         return notebook_error_json(
           StatusCode::BAD_REQUEST,
           "uploaded .pdf file does not start with a %PDF- header",
+        );
+      }
+      if format == BytesFormat::Image && sniff_image_canonical_name(&bytes).is_none() {
+        return notebook_error_json(
+          StatusCode::BAD_REQUEST,
+          &format!("uploaded .{extension} file is not a valid PNG, JPEG, GIF or WebP image"),
         );
       }
       if matches!(
@@ -1467,6 +1475,7 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
     BytesFormat::Html => extract_html_text(&bytes).await,
     BytesFormat::Subtitle => subtitle_text(&bytes),
     BytesFormat::Pdf => extract_pdf_text(&bytes).await,
+    BytesFormat::Image => extract_image_ocr_text(&bytes).await,
     BytesFormat::Docx => docx_text(&bytes),
     BytesFormat::Xlsx => xlsx_text(&bytes),
     BytesFormat::Pptx => pptx_text(&bytes),
@@ -2024,10 +2033,75 @@ async fn ingest_source_url(url: &str) -> Result<(String, String), String> {
     SmartUrlTarget::Direct => {}
   }
 
-  let (bytes, format) = fetch_source_url(url).await?;
+  let (bytes, format) = match fetch_source_url(url).await {
+    Ok(pair) => pair,
+    Err(err) => {
+      if err.contains("returned HTTP ")
+        && let Some(fetched) = deepseek_fetch_fallback(url).await
+      {
+        return Ok(fetched);
+      }
+      return Err(err);
+    }
+  };
   let digest = format!("{:x}", Sha256::digest(&bytes));
   let text = extract_bytes_text(bytes, format).await?;
+  if format == BytesFormat::Html
+    && text.trim().is_empty()
+    && let Some(fetched) = deepseek_fetch_fallback(url).await
+  {
+    return Ok(fetched);
+  }
   Ok((digest, text))
+}
+
+fn sniff_image_canonical_name(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    Some("image.png")
+  } else if bytes.starts_with(b"\xff\xd8\xff") {
+    Some("image.jpg")
+  } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    Some("image.gif")
+  } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+    Some("image.webp")
+  } else {
+    None
+  }
+}
+
+async fn deepseek_fetch_fallback(url: &str) -> Option<(String, String)> {
+  load_user_dotenv();
+  let client = yanshi_tools::builtin::DeepSeekToolsClient::from_env()?;
+  let fetched = client.fetch_markdown(url).await.ok()?;
+  let content = fetched.content.trim();
+  if content.is_empty() {
+    return None;
+  }
+  let combined = if fetched.title.trim().is_empty() {
+    content.to_string()
+  } else {
+    format!("# {}\n\n{content}", fetched.title.trim())
+  };
+  let digest = format!("{:x}", Sha256::digest(combined.as_bytes()));
+  Some((digest, combined))
+}
+
+async fn extract_image_ocr_text(bytes: &[u8]) -> Result<String, String> {
+  load_user_dotenv();
+  let filename = sniff_image_canonical_name(bytes)
+    .ok_or_else(|| "unsupported image format (expected PNG, JPEG, GIF or WebP)".to_string())?;
+  let client = yanshi_tools::builtin::DeepSeekToolsClient::from_env().ok_or_else(|| {
+    "image OCR requires DEEPSEEK_API_KEY to be configured (/v1/tools/ocr)".to_string()
+  })?;
+  let resp = client
+    .ocr_bytes(
+      bytes,
+      filename,
+      yanshi_tools::builtin::DeepSeekOcrPurpose::RichLayoutRecognition,
+    )
+    .await
+    .map_err(|err| format!("extracting image text via DeepSeek OCR: {err}"))?;
+  Ok(resp.formatted_text(None))
 }
 
 async fn fetch_source_url(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
@@ -2049,7 +2123,7 @@ async fn fetch_source_url(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
     .and_then(|ct| ct.split(';').next())
     .map(|ct| ct.trim().to_ascii_lowercase());
   if let Some(ref ct) = content_type
-    && (ct.starts_with("audio/") || ct.starts_with("video/") || ct.starts_with("image/"))
+    && (ct.starts_with("audio/") || ct.starts_with("video/"))
   {
     return Err(format!(
       "URL returned binary media Content-Type '{ct}'; upload audio via `kind: recording` or run `video_summarizer` in Studio"
@@ -2057,6 +2131,17 @@ async fn fetch_source_url(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   }
   let bytes = response.body;
   let ext = url_path_extension(url);
+  if sniff_image_canonical_name(&bytes).is_some() {
+    return Ok((bytes, BytesFormat::Image));
+  }
+  if let Some(ref ct) = content_type
+    && ct.starts_with("image/")
+    && ct != "image/svg+xml"
+  {
+    return Err(format!(
+      "URL returned unsupported image Content-Type '{ct}' (expected PNG, JPEG, GIF or WebP)"
+    ));
+  }
   let format = if bytes.starts_with(b"%PDF-") || content_type.as_deref() == Some("application/pdf")
   {
     BytesFormat::Pdf
@@ -2149,6 +2234,21 @@ async fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
     && !text.trim().is_empty()
   {
     return Ok(text);
+  }
+  load_user_dotenv();
+  if let Some(ocr) = yanshi_tools::builtin::DeepSeekToolsClient::from_env()
+    && let Ok(resp) = ocr
+      .ocr_bytes(
+        bytes,
+        "document.pdf",
+        yanshi_tools::builtin::DeepSeekOcrPurpose::TextRecognition,
+      )
+      .await
+  {
+    let ocr_text = resp.formatted_text(None);
+    if !ocr_text.trim().is_empty() {
+      return Ok(ocr_text);
+    }
   }
   pure_rust
     .map(|doc| doc.content)
@@ -6822,5 +6922,128 @@ mod tests {
 
     // Ensure unused test helper import stays exercised cleanly.
     let _ = register_mock_model;
+  }
+
+  #[tokio::test]
+  async fn local_notebook_ingests_png_image_via_deepseek_ocr_and_rejects_bad_header() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base_url = crate::local_engine::start_loopback_engine(Some(tmp.path().to_path_buf()))
+      .await
+      .expect("start loopback engine");
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no-proxy client");
+
+    let created: Value = client
+      .post(format!("{base_url}/v1/notebooks"))
+      .json(&json!({ "title": "Image OCR Notebook" }))
+      .send()
+      .await
+      .expect("create notebook")
+      .json()
+      .await
+      .expect("notebook json");
+    let notebook_id = created["id"].as_str().expect("id").to_string();
+
+    // Corrupted `.png` without PNG magic bytes fails immediately with 400.
+    let bad_resp = client
+      .post(format!("{base_url}/v1/notebooks/{notebook_id}/sources"))
+      .json(&json!({
+        "kind": "file",
+        "filename": "broken.png",
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(b"not-a-png")
+      }))
+      .send()
+      .await
+      .expect("bad png req");
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let ocr_addr = listener.local_addr().expect("addr");
+    let ocr_server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.expect("accept");
+      let mut buf = vec![0u8; 8192];
+      let _ = socket.read(&mut buf).await.expect("read");
+      let body = r#"{"id":"ocr-local-1","object":"ocr.result","created":1762790000,"purpose":"rich_layout_recognition","page_count":1,"pages":[{"index":0,"text":"Kalman Filter State Estimation Equations","finish_reason":"stop"}],"usage":{"input_tokens":180,"output_tokens":9,"total_tokens":189}}"#;
+      let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+      );
+      socket.write_all(resp.as_bytes()).await.expect("write");
+    });
+
+    let prev_key = std::env::var("DEEPSEEK_API_KEY").ok();
+    let prev_base = std::env::var("DEEPSEEK_BASE_URL").ok();
+    // SAFETY: local unit test restores env vars once ingestion finishes.
+    unsafe {
+      std::env::set_var("DEEPSEEK_API_KEY", "sk-tauri-ocr");
+      std::env::set_var("DEEPSEEK_BASE_URL", format!("http://{ocr_addr}/v1"));
+    }
+
+    let ok_src: Value = client
+      .post(format!("{base_url}/v1/notebooks/{notebook_id}/sources"))
+      .json(&json!({
+        "kind": "file",
+        "filename": "slide.png",
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nslide")
+      }))
+      .send()
+      .await
+      .expect("upload png")
+      .json()
+      .await
+      .expect("src json");
+    let src_id = ok_src["id"].as_str().expect("src id").to_string();
+
+    for _ in 0..40 {
+      let nb: Value = client
+        .get(format!("{base_url}/v1/notebooks/{notebook_id}"))
+        .send()
+        .await
+        .expect("get nb")
+        .json()
+        .await
+        .expect("nb json");
+      let status = nb["sources"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|s| s["id"].as_str() == Some(&src_id)))
+        .and_then(|s| s["status"].as_str())
+        .unwrap_or("");
+      if status == "ready" {
+        break;
+      }
+      assert_ne!(status, "failed", "png OCR ingestion failed: {nb}");
+      tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    unsafe {
+      match prev_key {
+        Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
+        None => std::env::remove_var("DEEPSEEK_API_KEY"),
+      }
+      match prev_base {
+        Some(v) => std::env::set_var("DEEPSEEK_BASE_URL", v),
+        None => std::env::remove_var("DEEPSEEK_BASE_URL"),
+      }
+    }
+
+    let search_res: Value = client
+      .get(format!(
+        "{base_url}/v1/notebooks/{notebook_id}/search?q=Kalman"
+      ))
+      .send()
+      .await
+      .expect("search")
+      .json()
+      .await
+      .expect("search json");
+    assert_eq!(search_res["chunks"].as_array().map(Vec::len), Some(1));
+    ocr_server.await.expect("ocr server");
   }
 }

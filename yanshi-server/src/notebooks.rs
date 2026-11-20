@@ -541,6 +541,7 @@ enum BytesFormat {
   PlainText,
   Html,
   Pdf,
+  Image,
   Docx,
   Xlsx,
   Pptx,
@@ -630,6 +631,7 @@ pub async fn add_source(
         "html" | "htm" => BytesFormat::Html,
         "txt" | "md" | "markdown" => BytesFormat::PlainText,
         "pdf" => BytesFormat::Pdf,
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => BytesFormat::Image,
         "docx" => BytesFormat::Docx,
         "xlsx" => BytesFormat::Xlsx,
         "pptx" => BytesFormat::Pptx,
@@ -639,7 +641,7 @@ pub async fn add_source(
         "srt" | "vtt" => BytesFormat::Subtitle,
         other => {
           return Err(ApiError::BadRequest(format!(
-            "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .docx, .xlsx, .pptx, .csv, .tsv, .json, .srt or .vtt"
+            "unsupported file type '.{other}': upload .txt, .md, .html, .pdf, .png, .jpg, .jpeg, .webp, .gif, .docx, .xlsx, .pptx, .csv, .tsv, .json, .srt or .vtt"
           )));
         }
       };
@@ -658,6 +660,12 @@ pub async fn add_source(
         return Err(ApiError::BadRequest(
           "file is not a valid PDF (missing %PDF- header)".into(),
         ));
+      }
+      if format == BytesFormat::Image && sniff_image_canonical_name(&bytes).is_none() {
+        return Err(ApiError::BadRequest(format!(
+          "file is not a valid .{} image (expected PNG, JPEG, GIF or WebP header)",
+          extension
+        )));
       }
       if matches!(
         format,
@@ -830,6 +838,7 @@ async fn extract_bytes_text(bytes: Vec<u8>, format: BytesFormat) -> Result<Strin
   match format {
     BytesFormat::Html => html_text(&bytes).await,
     BytesFormat::Pdf => pdf_text(&bytes).await,
+    BytesFormat::Image => image_ocr_text(&bytes).await,
     BytesFormat::Docx => docx_text(&bytes),
     BytesFormat::Xlsx => xlsx_text(&bytes),
     BytesFormat::Pptx => pptx_text(&bytes),
@@ -1392,10 +1401,73 @@ async fn ingest_url(url: &str) -> Result<(String, String), String> {
     SmartUrlTarget::Direct => {}
   }
 
-  let (bytes, format) = fetch(url).await?;
+  let (bytes, format) = match fetch(url).await {
+    Ok(pair) => pair,
+    Err(err) => {
+      if err.contains("returned HTTP ")
+        && let Some(fetched) = deepseek_fetch_fallback(url).await
+      {
+        return Ok(fetched);
+      }
+      return Err(err);
+    }
+  };
   let digest = format!("{:x}", Sha256::digest(&bytes));
   let text = extract_bytes_text(bytes, format).await?;
+  if format == BytesFormat::Html
+    && text.trim().is_empty()
+    && let Some(fetched) = deepseek_fetch_fallback(url).await
+  {
+    return Ok(fetched);
+  }
   Ok((digest, text))
+}
+
+fn sniff_image_canonical_name(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    Some("image.png")
+  } else if bytes.starts_with(b"\xff\xd8\xff") {
+    Some("image.jpg")
+  } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    Some("image.gif")
+  } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+    Some("image.webp")
+  } else {
+    None
+  }
+}
+
+async fn deepseek_fetch_fallback(url: &str) -> Option<(String, String)> {
+  let client = yanshi_tools::builtin::DeepSeekToolsClient::from_env()?;
+  let fetched = client.fetch_markdown(url).await.ok()?;
+  let content = fetched.content.trim();
+  if content.is_empty() {
+    return None;
+  }
+  let combined = if fetched.title.trim().is_empty() {
+    content.to_string()
+  } else {
+    format!("# {}\n\n{content}", fetched.title.trim())
+  };
+  let digest = format!("{:x}", Sha256::digest(combined.as_bytes()));
+  Some((digest, combined))
+}
+
+async fn image_ocr_text(bytes: &[u8]) -> Result<String, String> {
+  let filename = sniff_image_canonical_name(bytes)
+    .ok_or_else(|| "unsupported image format (expected PNG, JPEG, GIF or WebP)".to_string())?;
+  let client = yanshi_tools::builtin::DeepSeekToolsClient::from_env().ok_or_else(|| {
+    "image OCR requires DEEPSEEK_API_KEY to be configured on the server (/v1/tools/ocr)".to_string()
+  })?;
+  let resp = client
+    .ocr_bytes(
+      bytes,
+      filename,
+      yanshi_tools::builtin::DeepSeekOcrPurpose::RichLayoutRecognition,
+    )
+    .await
+    .map_err(|e| format!("extracting image text via DeepSeek OCR: {e}"))?;
+  Ok(resp.formatted_text(None))
 }
 
 /// GET `url` through the http tool's default policy, which refuses
@@ -1419,7 +1491,7 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
     .and_then(|ct| ct.split(';').next())
     .map(|ct| ct.trim().to_ascii_lowercase());
   if let Some(ref ct) = content_type
-    && (ct.starts_with("audio/") || ct.starts_with("video/") || ct.starts_with("image/"))
+    && (ct.starts_with("audio/") || ct.starts_with("video/"))
   {
     return Err(format!(
       "URL returned binary media Content-Type '{ct}'; upload audio via `kind: recording` or run `video_summarizer` in Studio"
@@ -1427,6 +1499,17 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, BytesFormat), String> {
   }
   let bytes = response.body;
   let ext = url_path_extension(url);
+  if sniff_image_canonical_name(&bytes).is_some() {
+    return Ok((bytes, BytesFormat::Image));
+  }
+  if let Some(ref ct) = content_type
+    && ct.starts_with("image/")
+    && ct != "image/svg+xml"
+  {
+    return Err(format!(
+      "URL returned unsupported image Content-Type '{ct}' (expected PNG, JPEG, GIF or WebP)"
+    ));
+  }
   let format = if bytes.starts_with(b"%PDF-") || content_type.as_deref() == Some("application/pdf")
   {
     BytesFormat::Pdf
@@ -1508,6 +1591,20 @@ async fn pdf_text(bytes: &[u8]) -> Result<String, String> {
     && !text.trim().is_empty()
   {
     return Ok(text);
+  }
+  if let Some(ocr) = yanshi_tools::builtin::DeepSeekToolsClient::from_env()
+    && let Ok(resp) = ocr
+      .ocr_bytes(
+        bytes,
+        "document.pdf",
+        yanshi_tools::builtin::DeepSeekOcrPurpose::TextRecognition,
+      )
+      .await
+  {
+    let ocr_text = resp.formatted_text(None);
+    if !ocr_text.trim().is_empty() {
+      return Ok(ocr_text);
+    }
   }
   pure_rust
     .map(|doc| doc.content)
@@ -6183,5 +6280,72 @@ mod tests {
       None,
     );
     assert!(!synth_name.contains('/'));
+  }
+
+  #[tokio::test]
+  async fn sniffs_image_headers_and_extracts_image_text_via_deepseek_ocr() {
+    assert_eq!(
+      sniff_image_canonical_name(b"\x89PNG\r\n\x1a\npayload"),
+      Some("image.png")
+    );
+    assert_eq!(
+      sniff_image_canonical_name(b"\xff\xd8\xff\xe0jpeg"),
+      Some("image.jpg")
+    );
+    assert_eq!(
+      sniff_image_canonical_name(b"GIF89apayload"),
+      Some("image.gif")
+    );
+    assert_eq!(
+      sniff_image_canonical_name(b"RIFF\x20\x00\x00\x00WEBPVP8 "),
+      Some("image.webp")
+    );
+    assert_eq!(sniff_image_canonical_name(b"not-an-image"), None);
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.expect("accept");
+      let mut buf = vec![0u8; 8192];
+      let n = socket.read(&mut buf).await.expect("read");
+      let req = String::from_utf8_lossy(&buf[..n]).to_string();
+      assert!(req.starts_with("POST /v1/tools/ocr HTTP/1.1"), "got: {req}");
+      assert!(req.contains("rich_layout_recognition"));
+      let body = r#"{"id":"ocr-nb-1","object":"ocr.result","created":1762790000,"purpose":"rich_layout_recognition","page_count":1,"pages":[{"index":0,"text":"Whiteboard Architecture: Zero-Copy Ring Buffer","finish_reason":"stop"}],"usage":{"input_tokens":200,"output_tokens":12,"total_tokens":212}}"#;
+      let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+      );
+      socket.write_all(resp.as_bytes()).await.expect("write");
+    });
+
+    let prev_key = std::env::var("DEEPSEEK_API_KEY").ok();
+    let prev_base = std::env::var("DEEPSEEK_BASE_URL").ok();
+    // SAFETY: unit test restores env vars immediately after awaiting the local mock.
+    unsafe {
+      std::env::set_var("DEEPSEEK_API_KEY", "sk-nb-ocr-test");
+      std::env::set_var("DEEPSEEK_BASE_URL", format!("http://{addr}/v1"));
+    }
+
+    let extracted = extract_bytes_text(b"\x89PNG\r\n\x1a\nfake".to_vec(), BytesFormat::Image).await;
+
+    unsafe {
+      match prev_key {
+        Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
+        None => std::env::remove_var("DEEPSEEK_API_KEY"),
+      }
+      match prev_base {
+        Some(v) => std::env::set_var("DEEPSEEK_BASE_URL", v),
+        None => std::env::remove_var("DEEPSEEK_BASE_URL"),
+      }
+    }
+
+    let text = extracted.expect("ocr text");
+    assert!(text.contains("Zero-Copy Ring Buffer"));
+    server.await.expect("server");
   }
 }

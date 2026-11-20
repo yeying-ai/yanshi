@@ -99,7 +99,7 @@ pub enum NotebookCommands {
     #[arg(long)]
     title: Option<String>,
   },
-  /// Add a URL, pasted text, local document (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html/.srt/.vtt), or audio recording
+  /// Add a URL, pasted text, local document/image (.pdf/.docx/.xlsx/.pptx/.csv/.tsv/.json/.md/.txt/.html/.srt/.vtt/.png/.jpg/.jpeg/.webp/.gif), or audio recording
   AddSource {
     /// Notebook UUID
     notebook_id: String,
@@ -109,7 +109,7 @@ pub enum NotebookCommands {
     /// Inline text note
     #[arg(long, conflicts_with_all = ["url", "file", "recording"])]
     text: Option<String>,
-    /// Local document file path (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`, `.srt`, `.vtt`)
+    /// Local document or image file path (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.csv`, `.tsv`, `.json`, `.md`, `.txt`, `.html`, `.srt`, `.vtt`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`)
     #[arg(long, value_name = "PATH", conflicts_with_all = ["url", "text", "recording"])]
     file: Option<PathBuf>,
     /// Local audio recording file path (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.flac`, `.webm`, `.aac`)
