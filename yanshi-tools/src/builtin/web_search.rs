@@ -12,6 +12,8 @@ use crate::{
 
 const DEFAULT_TAVILY_URL: &str = "https://api.tavily.com/search";
 const DEFAULT_BOCHA_URL: &str = "https://api.bochaai.com/v1/web-search";
+const DEFAULT_DEEPSEEK_SEARCH_URL: &str = "https://api.deepseek.com/v1/tools/search";
+const DEEPSEEK_MAX_QUERY_CHARS: usize = 128;
 const DEFAULT_SERPER_URL: &str = "https://google.serper.dev/search";
 const DEFAULT_BRAVE_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_DUCKDUCKGO_URL: &str = "https://html.duckduckgo.com/html/";
@@ -44,6 +46,8 @@ pub struct SearchConfig {
   pub tavily_url: Option<String>,
   pub bocha_api_key: Option<String>,
   pub bocha_url: Option<String>,
+  pub deepseek_api_key: Option<String>,
+  pub deepseek_url: Option<String>,
   pub serper_api_key: Option<String>,
   pub serper_url: Option<String>,
   pub brave_api_key: Option<String>,
@@ -63,11 +67,17 @@ impl SearchConfig {
         .map(|val| val.trim().to_string())
         .filter(|val| !val.is_empty())
     };
+    let deepseek_url = env_opt("DEEPSEEK_SEARCH_URL").or_else(|| {
+      env_opt("DEEPSEEK_BASE_URL")
+        .map(|base| crate::builtin::deepseek_tools_endpoint(Some(&base), "search"))
+    });
     Self {
       tavily_api_key: env_opt("TAVILY_API_KEY"),
       tavily_url: env_opt("TAVILY_API_URL"),
       bocha_api_key: env_opt("BOCHA_API_KEY"),
       bocha_url: env_opt("BOCHA_API_URL"),
+      deepseek_api_key: env_opt("DEEPSEEK_API_KEY"),
+      deepseek_url,
       serper_api_key: env_opt("SERPER_API_KEY"),
       serper_url: env_opt("SERPER_API_URL"),
       brave_api_key: env_opt("BRAVE_API_KEY"),
@@ -87,6 +97,8 @@ impl SearchConfig {
       tavily_url: self.tavily_url.clone().or(env.tavily_url),
       bocha_api_key: self.bocha_api_key.clone().or(env.bocha_api_key),
       bocha_url: self.bocha_url.clone().or(env.bocha_url),
+      deepseek_api_key: self.deepseek_api_key.clone().or(env.deepseek_api_key),
+      deepseek_url: self.deepseek_url.clone().or(env.deepseek_url),
       serper_api_key: self.serper_api_key.clone().or(env.serper_api_key),
       serper_url: self.serper_url.clone().or(env.serper_url),
       brave_api_key: self.brave_api_key.clone().or(env.brave_api_key),
@@ -168,6 +180,10 @@ impl WebSearchTool {
         "bocha".to_string(),
         self.search_bocha(&cfg, query, max_results).await?,
       ),
+      "deepseek" => (
+        "deepseek".to_string(),
+        self.search_deepseek(&cfg, query, max_results).await?,
+      ),
       "serper" => (
         "serper".to_string(),
         self.search_serper(&cfg, query, max_results).await?,
@@ -192,7 +208,7 @@ impl WebSearchTool {
       other => {
         return Err(ToolError::InvalidParams {
           message: format!(
-            "Unsupported search provider '{other}'. Expected one of: auto, tavily, bocha, serper, brave, searxng, duckduckgo, wikipedia"
+            "Unsupported search provider '{other}'. Expected one of: auto, tavily, bocha, deepseek, serper, brave, searxng, duckduckgo, wikipedia"
           ),
         });
       }
@@ -243,6 +259,13 @@ impl WebSearchTool {
         Ok(items) if !items.is_empty() => return Ok(("brave".to_string(), items)),
         Ok(_) => errors.push("brave returned 0 results".to_string()),
         Err(err) => errors.push(format!("brave: {err}")),
+      }
+    }
+    if cfg.deepseek_api_key.is_some() {
+      match self.search_deepseek(cfg, query, max_results).await {
+        Ok(items) if !items.is_empty() => return Ok(("deepseek".to_string(), items)),
+        Ok(_) => errors.push("deepseek returned 0 results".to_string()),
+        Err(err) => errors.push(format!("deepseek: {err}")),
       }
     }
     if cfg.searxng_url.is_some() {
@@ -376,6 +399,72 @@ impl WebSearchTool {
           url: url.to_string(),
           snippet: clean_text(snippet_raw),
           source: "bocha".to_string(),
+        });
+      }
+    }
+    Ok(items)
+  }
+
+  async fn search_deepseek(
+    &self,
+    cfg: &SearchConfig,
+    query: &str,
+    max_results: usize,
+  ) -> Result<Vec<SearchResultItem>, ToolError> {
+    let key = cfg
+      .deepseek_api_key
+      .as_deref()
+      .ok_or_else(|| ToolError::InvalidParams {
+        message: "DEEPSEEK_API_KEY is not configured".to_string(),
+      })?;
+    let endpoint = cfg
+      .deepseek_url
+      .as_deref()
+      .unwrap_or(DEFAULT_DEEPSEEK_SEARCH_URL);
+    let bounded_query: String = query
+      .trim()
+      .chars()
+      .take(DEEPSEEK_MAX_QUERY_CHARS)
+      .collect();
+    if bounded_query.is_empty() {
+      return Err(ToolError::InvalidParams {
+        message: "Search query must not be empty".to_string(),
+      });
+    }
+    let auth = format!("Bearer {key}");
+    let payload = json!({
+      "query": bounded_query,
+      "count": max_results.clamp(1, 50),
+      "need_content": false
+    });
+    let resp = self
+      .send_json_post(
+        endpoint,
+        &payload,
+        &[
+          ("Content-Type", "application/json"),
+          ("Authorization", &auth),
+        ],
+      )
+      .await?;
+
+    let mut items = Vec::new();
+    if let Some(arr) = resp["results"].as_array() {
+      for entry in arr {
+        let url = entry["url"].as_str().unwrap_or_default().trim();
+        if url.is_empty() {
+          continue;
+        }
+        let snippet_raw = entry["summary"]
+          .as_str()
+          .filter(|s| !s.trim().is_empty())
+          .or_else(|| entry["snippet"].as_str())
+          .unwrap_or_default();
+        items.push(SearchResultItem {
+          title: entry["title"].as_str().unwrap_or(url).trim().to_string(),
+          url: url.to_string(),
+          snippet: clean_text(snippet_raw),
+          source: "deepseek".to_string(),
         });
       }
     }
@@ -831,7 +920,7 @@ impl Tool for WebSearchTool {
         },
         "provider": {
           "type": "string",
-          "enum": ["auto", "tavily", "bocha", "serper", "brave", "searxng", "duckduckgo", "wikipedia"],
+          "enum": ["auto", "tavily", "bocha", "deepseek", "serper", "brave", "searxng", "duckduckgo", "wikipedia"],
           "description": "Search backend (default: auto)"
         },
         "max_results": {
@@ -1178,5 +1267,74 @@ mod tests {
     assert_eq!(hits[0].title, "第一篇中文架构解析");
     assert_eq!(hits[1].title, "第二篇多模态评测");
     assert_eq!(hits[1].url, "https://example.org/two");
+  }
+
+  #[tokio::test]
+  async fn deepseek_search_truncates_128_char_query_and_resolves_in_auto_mode() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.unwrap();
+      let mut buf = vec![0u8; 4096];
+      let n = socket.read(&mut buf).await.unwrap();
+      let req = String::from_utf8_lossy(&buf[..n]).to_string();
+      assert!(
+        req.starts_with("POST /v1/tools/search HTTP/1.1"),
+        "got: {req}"
+      );
+      assert!(
+        req
+          .to_ascii_lowercase()
+          .contains("authorization: bearer sk-ds-search")
+      );
+      if let Some(body_idx) = req.find("\r\n\r\n") {
+        let parsed_body: Value = serde_json::from_str(&req[body_idx + 4..]).unwrap();
+        let sent_q = parsed_body["query"].as_str().unwrap();
+        assert_eq!(sent_q.chars().count(), 128);
+      }
+
+      let body = r#"{"results":[{"rerank_score":2.6,"title":"DeepSeek V4.1 Docs","url":"https://api-docs.deepseek.com/zh-cn/","snippet":"Short snippet","summary":"Detailed 600-char model summary for DeepSeek V4.1 multimodal and tools.","content":"","site_name":"DeepSeek","site_icon":null,"date":"2026-11-20T00:00:00+00:00","authority":4}]}"#;
+      let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+      );
+      socket.write_all(resp.as_bytes()).await.unwrap();
+    });
+
+    let policy = Arc::new(SandboxPolicy {
+      allow_loopback_network_access: true,
+      ..SandboxPolicy::default()
+    });
+    let tool = WebSearchTool::new(policy)
+      .unwrap()
+      .with_no_proxy()
+      .with_config(SearchConfig {
+        deepseek_api_key: Some("sk-ds-search".to_string()),
+        deepseek_url: Some(format!("http://{addr}/v1/tools/search")),
+        ..SearchConfig::default()
+      });
+
+    let overlong_cjk_query = "深度求索多模态与语音工具接口说明".repeat(12);
+    assert!(overlong_cjk_query.chars().count() > 128);
+    let resp = tool
+      .search(&json!({
+        "query": overlong_cjk_query,
+        "provider": "auto",
+        "max_results": 3
+      }))
+      .await
+      .unwrap();
+
+    assert_eq!(resp.provider, "deepseek");
+    assert_eq!(resp.results.len(), 1);
+    assert_eq!(resp.results[0].title, "DeepSeek V4.1 Docs");
+    assert!(
+      resp.results[0]
+        .snippet
+        .contains("Detailed 600-char model summary")
+    );
+    server.await.unwrap();
   }
 }

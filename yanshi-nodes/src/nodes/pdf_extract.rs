@@ -14,7 +14,7 @@ use yanshi_core::{
   value::FlowValue,
 };
 use yanshi_tools::SandboxPolicy;
-use yanshi_tools::builtin::HttpTool;
+use yanshi_tools::builtin::{DeepSeekOcrPurpose, DeepSeekToolsClient, HttpTool};
 
 use crate::common::{artifacts, sandboxed};
 
@@ -33,6 +33,7 @@ pub struct PdfExtractNode {
   id: String,
   policy: Arc<SandboxPolicy>,
   no_proxy: bool,
+  ocr_client: Option<Arc<DeepSeekToolsClient>>,
 }
 
 impl std::fmt::Debug for PdfExtractNode {
@@ -49,12 +50,31 @@ impl PdfExtractNode {
       id: id.into(),
       policy,
       no_proxy: false,
+      ocr_client: None,
     }
   }
 
   pub fn with_no_proxy(mut self) -> Self {
     self.no_proxy = true;
     self
+  }
+
+  /// Inject an explicit DeepSeek OCR client (used in tests or custom configs).
+  pub fn with_ocr_client(mut self, client: DeepSeekToolsClient) -> Self {
+    self.ocr_client = Some(Arc::new(client));
+    self
+  }
+
+  fn resolve_ocr_client(&self) -> Option<Arc<DeepSeekToolsClient>> {
+    if let Some(client) = &self.ocr_client {
+      return Some(Arc::clone(client));
+    }
+    DeepSeekToolsClient::from_env().map(|mut client| {
+      if self.no_proxy {
+        client = client.with_no_proxy();
+      }
+      Arc::new(client)
+    })
   }
 
   async fn load_pdf_bytes(&self, inputs: &AsyncNodeInputs) -> Result<Vec<u8>, YanshiError> {
@@ -175,33 +195,78 @@ impl AsyncNode for PdfExtractNode {
       .unwrap_or(DEFAULT_MAX_CHARS)
       .clamp(MIN_MAX_CHARS, MAX_MAX_CHARS);
     let max_pages = optional_usize(inputs, "max_pages").filter(|p| *p > 0);
+    let allow_ocr_fallback = optional_bool(inputs, "ocr_fallback").unwrap_or(true);
 
     let pdf_bytes = self.load_pdf_bytes(inputs).await?;
-    let pdftotext =
-      sandboxed::find_tool("pdftotext").ok_or_else(|| YanshiError::NodeExecutionFailed {
+    let mut pages = if let Some(pdftotext) = sandboxed::find_tool("pdftotext") {
+      let base_dir = artifacts::artifact_dir(&self.id);
+      let workdir = base_dir.join(format!(".pdf-{}", uuid::Uuid::new_v4()));
+      tokio::fs::create_dir_all(&workdir).await.map_err(|err| {
+        YanshiError::NodeExecutionFailed {
+          message: format!(
+            "{}: cannot create scratch dir '{}': {err}",
+            self.id,
+            workdir.display()
+          ),
+        }
+      })?;
+
+      let extract_result =
+        run_pdftotext(&self.id, &pdftotext, &workdir, &pdf_bytes, max_pages).await;
+      let _ = tokio::fs::remove_dir_all(&workdir).await;
+      let raw_text = extract_result?;
+      split_pdf_pages(&raw_text)
+    } else if allow_ocr_fallback && let Some(ocr) = self.resolve_ocr_client() {
+      let resp = ocr
+        .ocr_bytes(
+          &pdf_bytes,
+          "document.pdf",
+          DeepSeekOcrPurpose::TextRecognition,
+        )
+        .await
+        .map_err(|err| YanshiError::NodeExecutionFailed {
+          message: format!(
+            "{}: pdftotext is missing and DeepSeek OCR fallback failed: {err}",
+            self.id
+          ),
+        })?;
+      resp
+        .page_texts(max_pages)
+        .into_iter()
+        .map(|p| collapse_excess_blank_lines(&p))
+        .filter(|p| !p.is_empty())
+        .collect()
+    } else {
+      return Err(YanshiError::NodeExecutionFailed {
         message: format!(
-          "{}: pdftotext is not installed (`poppler-utils` / `brew install poppler`)",
+          "{}: pdftotext is not installed (`poppler-utils` / `brew install poppler`) and DEEPSEEK_API_KEY is not configured for OCR fallback",
           self.id
         ),
-      })?;
+      });
+    };
 
-    let base_dir = artifacts::artifact_dir(&self.id);
-    let workdir = base_dir.join(format!(".pdf-{}", uuid::Uuid::new_v4()));
-    tokio::fs::create_dir_all(&workdir)
-      .await
-      .map_err(|err| YanshiError::NodeExecutionFailed {
-        message: format!(
-          "{}: cannot create scratch dir '{}': {err}",
-          self.id,
-          workdir.display()
-        ),
-      })?;
+    if pages.iter().all(|p| p.trim().is_empty())
+      && allow_ocr_fallback
+      && let Some(ocr) = self.resolve_ocr_client()
+      && let Ok(resp) = ocr
+        .ocr_bytes(
+          &pdf_bytes,
+          "document.pdf",
+          DeepSeekOcrPurpose::TextRecognition,
+        )
+        .await
+    {
+      let ocr_pages: Vec<String> = resp
+        .page_texts(max_pages)
+        .into_iter()
+        .map(|p| collapse_excess_blank_lines(&p))
+        .filter(|p| !p.is_empty())
+        .collect();
+      if !ocr_pages.is_empty() {
+        pages = ocr_pages;
+      }
+    }
 
-    let extract_result = run_pdftotext(&self.id, &pdftotext, &workdir, &pdf_bytes, max_pages).await;
-    let _ = tokio::fs::remove_dir_all(&workdir).await;
-    let raw_text = extract_result?;
-
-    let pages = split_pdf_pages(&raw_text);
     let page_count = pages.len();
     let full_text = format_numbered_pages(&pages);
     let (truncated_text, truncated) = truncate_chars(&full_text, max_chars, page_count);
@@ -284,6 +349,18 @@ fn optional_usize(inputs: &AsyncNodeInputs, key: &str) -> Option<usize> {
   match inputs.get(key) {
     Some(FlowValue::Json(Value::Number(num))) => num.as_u64().and_then(|v| usize::try_from(v).ok()),
     Some(FlowValue::Json(Value::String(text))) => text.trim().parse::<usize>().ok(),
+    _ => None,
+  }
+}
+
+fn optional_bool(inputs: &AsyncNodeInputs, key: &str) -> Option<bool> {
+  match inputs.get(key) {
+    Some(FlowValue::Json(Value::Bool(flag))) => Some(*flag),
+    Some(FlowValue::Json(Value::String(text))) => match text.trim().to_ascii_lowercase().as_str() {
+      "true" | "1" | "yes" => Some(true),
+      "false" | "0" | "no" => Some(false),
+      _ => None,
+    },
     _ => None,
   }
 }
@@ -649,5 +726,47 @@ mod tests {
     uri_inputs.insert("source".to_string(), FlowValue::Json(json!(data_uri)));
     let out = denied_node.execute(&uri_inputs).await.unwrap();
     assert_eq!(out["page_count"], FlowValue::Json(json!(1)));
+  }
+
+  #[tokio::test]
+  async fn falls_back_to_deepseek_ocr_when_scanned_pdf_has_no_text_layer() {
+    let blank_pdf = build_minimal_pdf(&[""]);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&blank_pdf);
+    let data_uri = format!("data:application/pdf;base64,{b64}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut buf = vec![0u8; 8192];
+      let n = stream.read(&mut buf).await.unwrap();
+      let req = String::from_utf8_lossy(&buf[..n]).to_string();
+      assert!(req.starts_with("POST /v1/tools/ocr HTTP/1.1"), "got: {req}");
+      let body = r#"{"id":"ocr-scan-1","object":"ocr.result","created":1762790000,"purpose":"text_recognition","page_count":1,"pages":[{"index":0,"text":"Scanned Theorem 1: Convergence bound O(1/sqrt(T))","finish_reason":"stop"}],"usage":{"input_tokens":512,"output_tokens":18,"total_tokens":530}}"#;
+      let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+      );
+      stream.write_all(resp.as_bytes()).await.unwrap();
+    });
+
+    let ocr_client = DeepSeekToolsClient::new("sk-ds-ocr", Some(format!("http://{addr}/v1")))
+      .unwrap()
+      .with_no_proxy();
+    let node = PdfExtractNode::new("scanned_pdf", Arc::new(SandboxPolicy::default()))
+      .with_no_proxy()
+      .with_ocr_client(ocr_client);
+
+    let mut inputs = HashMap::new();
+    inputs.insert("source".to_string(), FlowValue::Json(json!(data_uri)));
+    let outputs = node.execute(&inputs).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(outputs["page_count"], FlowValue::Json(json!(1)));
+    let FlowValue::Json(Value::String(ref text)) = outputs["output"] else {
+      panic!("expected string output");
+    };
+    assert!(text.contains("Scanned Theorem 1"));
   }
 }
