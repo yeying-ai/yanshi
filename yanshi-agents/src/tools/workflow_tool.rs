@@ -453,6 +453,10 @@ mod tests {
     yanshi_llm::Yanshi::init_with_config(cfg_path.to_str().unwrap())
       .await
       .unwrap();
+    unsafe {
+      std::env::remove_var("YANSHI_MOCK_TOOL_CALLS");
+      std::env::remove_var("YANSHI_MOCK_RESPONSES");
+    }
 
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let high_water = Arc::new(std::sync::atomic::AtomicUsize::new(0));

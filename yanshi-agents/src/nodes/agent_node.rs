@@ -216,6 +216,11 @@ pub struct AgentNode {
   /// Logical name for this node (appears in workflow logs).
   pub name: String,
   agent: Arc<Mutex<ReActAgent>>,
+  /// AJ2: when `true` (default), each `execute()` briefly locks `agent` only
+  /// to call [`ReActAgent::fork_isolated`] and runs the forked session lock-free,
+  /// enabling parallel `Map` fan-out without session cross-talk. Opt into
+  /// stateful single-session serialization via [`Self::with_shared_session`].
+  isolated_per_call: bool,
   /// W2.3: parent-flow governance forwarded into this embedded agent's run
   /// context instead of the agent building an isolated, ungoverned one via
   /// `run_with_trace`. All `None` by default — set via
@@ -227,14 +232,27 @@ pub struct AgentNode {
 
 impl AgentNode {
   /// Construct from an existing [`ReActAgent`].
+  ///
+  /// Defaults to per-invocation session isolation (`fork_isolated`) so
+  /// parallel `Map` branches run concurrently without mutex contention or
+  /// memory cross-talk. Call [`Self::with_shared_session`] if multiple calls
+  /// should intentionally mutate the same session in sequence.
   pub fn from_agent(name: impl Into<String>, agent: ReActAgent) -> Self {
     Self {
       name: name.into(),
       agent: Arc::new(Mutex::new(agent)),
+      isolated_per_call: true,
       cancellation_token: None,
       event_sink: None,
       parent_limits: None,
     }
+  }
+
+  /// Reuse the inner `ReActAgent`'s single `session_id` across sequential
+  /// node executions instead of forking an isolated session per call.
+  pub fn with_shared_session(mut self) -> Self {
+    self.isolated_per_call = false;
+    self
   }
 
   /// Govern this embedded agent step with the parent flow's cancellation
@@ -343,18 +361,56 @@ impl AsyncNode for AgentNode {
     };
 
     // ── Run agent ────────────────────────────────────────────────────
-    let mut agent = self.agent.lock().await;
     let prior_result = parse_prior_agent_result(inputs)?;
-    let result = if let Some(prior) = prior_result {
-      let context = AgentContext::new(&prior.session_id, &message, "");
+    let (result, tools) = if self.isolated_per_call {
+      let mut forked = {
+        let guard = self.agent.lock().await;
+        guard.fork_isolated()
+      };
+      let result = self
+        .run_agent_instance(&mut forked, &message, prior_result)
+        .await?;
+      let tools = forked.tools().clone();
+      (result, tools)
+    } else {
+      let mut guard = self.agent.lock().await;
+      let result = self
+        .run_agent_instance(&mut guard, &message, prior_result)
+        .await?;
+      let tools = guard.tools().clone();
+      (result, tools)
+    };
+    if !result.stop_reason.is_success() {
+      let partial_outputs = build_outputs(&self.name, &result, &tools)?;
+      return Err(YanshiError::NodePartialExecutionFailed {
+        message: format!(
+          "AgentNode '{}': agent stopped before final answer: {:?}",
+          self.name, result.stop_reason
+        ),
+        partial_outputs,
+      });
+    }
+    build_outputs(&self.name, &result, &tools)
+  }
+}
+
+impl AgentNode {
+  async fn run_agent_instance(
+    &self,
+    agent: &mut ReActAgent,
+    message: &str,
+    prior_result: Option<AgentRunResult>,
+  ) -> Result<AgentRunResult, YanshiError> {
+    if let Some(prior) = prior_result {
+      let context = AgentContext::new(&prior.session_id, message, "");
       agent
         .resume_with_context(context, prior)
         .await
         .map_err(|e| YanshiError::NodeExecutionFailed {
           message: format!("AgentNode '{}': {}", self.name, e),
-        })?
+        })
     } else if self.has_governance() {
-      let mut context = agent.context_for_input(&message);
+      let mut context = agent.context_for_input(message);
       if let Some(sink) = &self.event_sink {
         context = context.with_event_sink(Arc::clone(sink));
       }
@@ -369,27 +425,15 @@ impl AsyncNode for AgentNode {
         .await
         .map_err(|e| YanshiError::NodeExecutionFailed {
           message: format!("AgentNode '{}': {}", self.name, e),
-        })?
+        })
     } else {
       agent
-        .run_with_trace(&message)
+        .run_with_trace(message)
         .await
         .map_err(|e| YanshiError::NodeExecutionFailed {
           message: format!("AgentNode '{}': {}", self.name, e),
-        })?
-    };
-    let tools = agent.tools().clone();
-    if !result.stop_reason.is_success() {
-      let partial_outputs = build_outputs(&self.name, &result, &tools)?;
-      return Err(YanshiError::NodePartialExecutionFailed {
-        message: format!(
-          "AgentNode '{}': agent stopped before final answer: {:?}",
-          self.name, result.stop_reason
-        ),
-        partial_outputs,
-      });
+        })
     }
-    build_outputs(&self.name, &result, &tools)
   }
 }
 
@@ -986,6 +1030,155 @@ mod tests {
     assert_eq!(
       contract.tool_calls[0].replay_policy,
       AgentNodeToolReplayPolicy::ReuseRecordedResult
+    );
+  }
+
+  struct HighWaterVerifier {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    high_water: Arc<std::sync::atomic::AtomicUsize>,
+  }
+
+  #[async_trait]
+  impl crate::verification::VerificationStrategy for HighWaterVerifier {
+    fn name(&self) -> &'static str {
+      "high-water"
+    }
+
+    async fn verify(
+      &self,
+      _ctx: &crate::verification::VerificationContext,
+    ) -> Result<crate::verification::VerificationOutcome, crate::verification::VerificationError>
+    {
+      let cur = self
+        .in_flight
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+      self
+        .high_water
+        .fetch_max(cur, std::sync::atomic::Ordering::SeqCst);
+      tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+      self
+        .in_flight
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+      Ok(crate::verification::VerificationOutcome::Approved)
+    }
+  }
+
+  async fn run_three_agent_node_calls(
+    shared_session: bool,
+  ) -> (usize, Vec<String>, Arc<SessionMemory>) {
+    let _guard = crate::LLM_TEST_LOCK.lock().await;
+    let model = format!("mock-agent-node-{}", uuid::Uuid::new_v4());
+    let cfg_path =
+      std::env::temp_dir().join(format!("yanshi-agent-node-{}.yml", uuid::Uuid::new_v4()));
+    unsafe {
+      std::env::set_var(
+        "YANSHI_MOCK_RESPONSE",
+        r#"{"thought":"ok","answer":"branch done"}"#,
+      );
+      std::env::remove_var("YANSHI_MOCK_RESPONSES");
+      std::env::remove_var("YANSHI_MOCK_TOOL_CALLS");
+    }
+    std::fs::write(
+      &cfg_path,
+      format!(
+        "models:\n  {model}:\n    vendor: mock\n    type: text\n    model_id: {model}\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n"
+      ),
+    )
+    .unwrap();
+    yanshi_llm::Yanshi::init_with_config(cfg_path.to_str().unwrap())
+      .await
+      .unwrap();
+    unsafe {
+      std::env::remove_var("YANSHI_MOCK_RESPONSE");
+    }
+
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let high_water = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let memory = Arc::new(SessionMemory::default_window());
+    let agent = ReActAgent::new_shared_memory(
+      ReActConfig::new(&model).with_max_iterations(3),
+      memory.clone(),
+      Arc::new(ToolRegistry::new()),
+    )
+    .with_verification_strategy(Arc::new(HighWaterVerifier {
+      in_flight,
+      high_water: high_water.clone(),
+    }));
+
+    let mut node = AgentNode::from_agent("branch_agent", agent);
+    if shared_session {
+      node = node.with_shared_session();
+    }
+    let node = Arc::new(node);
+
+    let mut handles = Vec::new();
+    for topic in ["alpha", "beta", "gamma"] {
+      let node = node.clone();
+      handles.push(tokio::spawn(async move {
+        let mut inputs = HashMap::new();
+        inputs.insert("message".to_string(), FlowValue::Json(json!(topic)));
+        let out = node.execute(&inputs).await.unwrap();
+        let FlowValue::Json(sid) = &out["session_id"] else {
+          panic!("expected string session_id");
+        };
+        sid.as_str().unwrap().to_string()
+      }));
+    }
+    let mut sids = Vec::new();
+    for h in handles {
+      sids.push(h.await.unwrap());
+    }
+    (
+      high_water.load(std::sync::atomic::Ordering::SeqCst),
+      sids,
+      memory,
+    )
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn agent_node_isolates_sessions_and_runs_in_parallel_by_default() {
+    use yanshi_memory::MemoryStore as _;
+    let (peak, sids, memory) = run_three_agent_node_calls(false).await;
+    assert!(
+      peak >= 2,
+      "expected >=2 concurrent AgentNode executions without mutex contention, got peak={peak}"
+    );
+    let unique: std::collections::HashSet<&String> = sids.iter().collect();
+    assert_eq!(
+      unique.len(),
+      3,
+      "each parallel call must get a fresh session_id"
+    );
+    for sid in &sids {
+      let msgs = memory.get_all(sid).await.unwrap();
+      assert_eq!(
+        msgs.len(),
+        2,
+        "each isolated session must contain only its own user + assistant turn"
+      );
+    }
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn agent_node_with_shared_session_serializes_and_accumulates_history() {
+    use yanshi_memory::MemoryStore as _;
+    let (peak, sids, memory) = run_three_agent_node_calls(true).await;
+    assert_eq!(
+      peak, 1,
+      "shared-session AgentNode must serialize executions"
+    );
+    let unique: std::collections::HashSet<&String> = sids.iter().collect();
+    assert_eq!(
+      unique.len(),
+      1,
+      "shared-session AgentNode must reuse one session_id"
+    );
+    let msgs = memory.get_all(&sids[0]).await.unwrap();
+    assert_eq!(
+      msgs.len(),
+      6,
+      "3 sequential turns should accumulate 6 messages"
     );
   }
 }

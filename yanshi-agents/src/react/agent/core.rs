@@ -113,7 +113,7 @@ pub(crate) use push_step;
 /// ```
 pub struct ReActAgent {
   pub(crate) config: ReActConfig,
-  pub(crate) memory: Box<dyn MemoryStore>,
+  pub(crate) memory: Arc<dyn MemoryStore>,
   pub(crate) tools: Arc<ToolRegistry>,
   pub(crate) reflection: Option<Arc<dyn ReflectionStrategy>>,
   pub(crate) verification: Option<Arc<dyn VerificationStrategy>>,
@@ -175,6 +175,15 @@ pub struct ReActAgent {
 
 impl ReActAgent {
   pub fn new(config: ReActConfig, memory: Box<dyn MemoryStore>, tools: Arc<ToolRegistry>) -> Self {
+    Self::new_shared_memory(config, Arc::from(memory), tools)
+  }
+
+  /// Construct a `ReActAgent` backed by a shared [`MemoryStore`] handle.
+  pub fn new_shared_memory(
+    config: ReActConfig,
+    memory: Arc<dyn MemoryStore>,
+    tools: Arc<ToolRegistry>,
+  ) -> Self {
     let session_id = uuid::Uuid::new_v4().to_string();
     // Build the initial counter from the configured model so
     // agents created without a context (e.g. construction-time
@@ -201,6 +210,38 @@ impl ReActAgent {
       message_counter,
       live_sink: None,
       live_checkpointer: None,
+    }
+  }
+
+  /// Fork an independent `ReActAgent` with a fresh `session_id` while sharing
+  /// the underlying `Arc<dyn MemoryStore>`, tool registry, and strategy
+  /// handles (AJ2).
+  ///
+  /// Because every [`MemoryStore`] partitions messages by `session_id` behind
+  /// `&self`, forked agents execute in parallel across worker threads without
+  /// mutex contention or session cross-talk, while keeping `AgentNode` resume
+  /// (`prior.session_id`) backed by the same store.
+  pub fn fork_isolated(&self) -> Self {
+    Self {
+      config: self.config.clone(),
+      memory: Arc::clone(&self.memory),
+      tools: Arc::clone(&self.tools),
+      reflection: self.reflection.clone(),
+      verification: self.verification.clone(),
+      citation_checker: self.citation_checker.clone(),
+      memory_hook: self.memory_hook.clone(),
+      memory_summary_backend: self.memory_summary_backend.clone(),
+      task_summary_store: self.task_summary_store.clone(),
+      task_summary_generator: Arc::clone(&self.task_summary_generator),
+      project_memory_store: self.project_memory_store.clone(),
+      project_key: self.project_key.clone(),
+      project_fact_generator: Arc::clone(&self.project_fact_generator),
+      preference_store: self.preference_store.clone(),
+      preference_scope: self.preference_scope.clone(),
+      session_id: uuid::Uuid::new_v4().to_string(),
+      message_counter: crate::token_counter_adapter::build_message_counter(&self.config.model),
+      live_sink: self.live_sink.clone(),
+      live_checkpointer: self.live_checkpointer.clone(),
     }
   }
 
@@ -241,6 +282,11 @@ impl ReActAgent {
   /// session_id) after construction, so a resumed session reads back the
   /// prior conversation — the long-lived-session resume contract.
   pub fn with_memory(mut self, memory: Box<dyn MemoryStore>) -> Self {
+    self.memory = Arc::from(memory);
+    self
+  }
+
+  pub fn with_shared_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
     self.memory = memory;
     self
   }
