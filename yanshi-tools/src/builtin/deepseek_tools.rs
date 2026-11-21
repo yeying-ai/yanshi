@@ -57,11 +57,82 @@ impl DeepSeekOcrPurpose {
   }
 }
 
+fn deserialize_null_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Strip DeepSeek-OCR grounding markup (`<｜ref｜>...<｜/ref｜>` and
+/// `<｜box｜>...<｜/box｜>`, plus ASCII-pipe variants) emitted by
+/// `rich_layout_recognition` while preserving Markdown headings, tables, and
+/// code indentation.
+pub fn strip_ocr_grounding_tags(raw: &str) -> String {
+  let mut cleaned_lines: Vec<String> = Vec::new();
+  for line in raw.lines() {
+    let (stripped, had_tag) = strip_line_grounding_spans(line);
+    if had_tag && stripped.trim().is_empty() {
+      continue;
+    }
+    cleaned_lines.push(stripped.trim_end().to_string());
+  }
+  cleaned_lines.join("\n").trim().to_string()
+}
+
+fn strip_line_grounding_spans(line: &str) -> (String, bool) {
+  const TAG_PAIRS: &[(&str, &str)] = &[
+    ("<｜ref｜>", "<｜/ref｜>"),
+    ("<｜box｜>", "<｜/box｜>"),
+    ("<|ref|>", "<|/ref|>"),
+    ("<|box|>", "<|/box|>"),
+  ];
+  let mut rest = line;
+  let mut out = String::with_capacity(line.len());
+  let mut had_tag = false;
+
+  while !rest.is_empty() {
+    let mut earliest: Option<(usize, &str, &str)> = None;
+    for &(open, close) in TAG_PAIRS {
+      if let Some(pos) = rest.find(open)
+        && earliest.is_none_or(|(best, _, _)| pos < best)
+      {
+        earliest = Some((pos, open, close));
+      }
+    }
+
+    let Some((pos, open, close)) = earliest else {
+      out.push_str(rest);
+      break;
+    };
+
+    out.push_str(&rest[..pos]);
+    let after_open = &rest[pos + open.len()..];
+    if let Some(end_rel) = after_open.find(close) {
+      had_tag = true;
+      rest = &after_open[end_rel + close.len()..];
+      // `rich_layout_recognition` places a single space between `.../box｜>` and
+      // the block's Markdown content (`<｜box｜>[[...]]<｜/box｜> ## Heading`).
+      if out.is_empty()
+        && let Some(trimmed_sep) = rest.strip_prefix(' ')
+      {
+        rest = trimmed_sep;
+      }
+    } else {
+      out.push_str(open);
+      rest = after_open;
+    }
+  }
+
+  (out, had_tag)
+}
+
 /// Markdown page fetched by `POST /v1/tools/fetch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepSeekFetchResponse {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "deserialize_null_string")]
   pub title: String,
+  #[serde(default, deserialize_with = "deserialize_null_string")]
   pub content: String,
 }
 
@@ -69,29 +140,31 @@ pub struct DeepSeekFetchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepSeekOcrPage {
   pub index: usize,
+  #[serde(default, deserialize_with = "deserialize_null_string")]
   pub text: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "deserialize_null_string")]
   pub finish_reason: String,
 }
 
 /// Full document recognition response from `POST /v1/tools/ocr`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepSeekOcrResponse {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "deserialize_null_string")]
   pub id: String,
   pub page_count: usize,
   pub pages: Vec<DeepSeekOcrPage>,
 }
 
 impl DeepSeekOcrResponse {
-  /// Return trimmed per-page text strings, optionally capped to `max_pages`.
+  /// Return cleaned, trimmed per-page text strings (with grounding tags stripped),
+  /// optionally capped to `max_pages`.
   pub fn page_texts(&self, max_pages: Option<usize>) -> Vec<String> {
     let limit = max_pages.unwrap_or(usize::MAX);
     self
       .pages
       .iter()
       .take(limit)
-      .map(|p| p.text.trim().to_string())
+      .map(|p| strip_ocr_grounding_tags(&p.text))
       .collect()
   }
 
@@ -558,5 +631,34 @@ mod tests {
       .unwrap_err();
     assert!(err_res.to_string().contains("unsupported encrypted pdf"));
     server.await.expect("server");
+  }
+
+  #[test]
+  fn strip_ocr_grounding_tags_preserves_markdown_and_drops_empty_image_boxes() {
+    let raw = concat!(
+      "<｜ref｜>image<｜/ref｜><｜box｜>[[0,0,999,999]]<｜/box｜>  \n",
+      "<｜ref｜>sub_title<｜/ref｜><｜box｜>[[259,128,593,162]]<｜/box｜> ## Chat Completions API \n",
+      "<｜ref｜>image<｜/ref｜><｜box｜>[[259,173,284,195]]<｜/box｜>  \n",
+      "<｜ref｜>text<｜/ref｜><｜box｜>[[284,176,561,197]]<｜/box｜> POST https://api.deepseek.com/chat/completions\n",
+      "  indented code line"
+    );
+    let resp = DeepSeekOcrResponse {
+      id: "ocr-live".to_string(),
+      page_count: 1,
+      pages: vec![DeepSeekOcrPage {
+        index: 0,
+        text: raw.to_string(),
+        finish_reason: "stop".to_string(),
+      }],
+    };
+    assert_eq!(
+      resp.formatted_text(None),
+      "## Chat Completions API\nPOST https://api.deepseek.com/chat/completions\n  indented code line"
+    );
+
+    let null_title: DeepSeekFetchResponse =
+      serde_json::from_str(r#"{"title":null,"content":"hello"}"#).expect("null title ok");
+    assert_eq!(null_title.title, "");
+    assert_eq!(null_title.content, "hello");
   }
 }

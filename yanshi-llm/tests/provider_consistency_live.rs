@@ -443,7 +443,8 @@ fn provider_vision_request(model: &str) -> ProviderRequest {
         {
           "type": "image_url",
           "image_url": {
-            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/l1u37wAAAABJRU5ErkJggg=="
+            // Valid 32x32 solid-red RGB PNG (strictly valid IHDR + zlib IDAT + CRC).
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAJ0lEQVR42u3NsQkAAAjAsP7/tF7hIASyp6lTCQQCgUAgEAgEgi/BAjLD/C5w/SM9AAAAAElFTkSuQmCC"
           }
         }
       ]
@@ -451,7 +452,7 @@ fn provider_vision_request(model: &str) -> ProviderRequest {
     stream: false,
     parameters: HashMap::from([
       ("temperature".to_string(), json!(0.0)),
-      ("max_tokens".to_string(), json!(16)),
+      ("max_tokens".to_string(), json!(64)),
     ]),
     tools: None,
     tool_choice: None,
@@ -1638,6 +1639,66 @@ async fn deepseek_live_vision_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deepseek_live_tool_calling_and_json_mode_path() {
+  let _guard = deepseek_live_lock().lock().await;
+  let Some((api_key, base_url)) = deepseek_live_context(LiveCapability::Llm).await else {
+    return;
+  };
+  let provider =
+    OpenAIProvider::with_client(no_proxy_client(), &api_key, base_url).expect("deepseek provider");
+  let model = live_text_model("deepseek", "deepseek-flash");
+
+  // 1. Forced `ToolChoice::Required` WITH `ThinkingConfig::High` — verifies our
+  // `OpenAIProvider` guard automatically forces `thinking: {"type": "disabled"}`
+  // so DeepSeek V4.1 does not reject forced tool calling with HTTP 400.
+  let mut tool_req = glm_provider_tool_request(&model);
+  tool_req.parameters.remove("do_sample");
+  tool_req.parameters.remove("thinking");
+  tool_req.tool_choice = Some(ToolChoice::Required);
+  tool_req.thinking = Some(ThinkingConfig::High);
+
+  let tool_resp = tokio::time::timeout(Duration::from_secs(45), provider.execute(&tool_req))
+    .await
+    .unwrap_or_else(|_| panic!("deepseek: forced tool request timed out after 45s"))
+    .unwrap_or_else(|e| panic!("deepseek: forced tool request failed: {e}"));
+  let tc = tool_resp
+    .tool_calls
+    .first()
+    .expect("deepseek: ToolChoice::Required must emit a tool call");
+  assert_eq!(tc.name, "get_weather");
+  assert!(tc.arguments.get("city").is_some());
+
+  // 2. `ResponseFormat::JsonObject` WITH default thinking — verifies our
+  // `is_deepseek_thinking_default_model` guard disables thinking so JSON output succeeds.
+  let json_req = ProviderRequest {
+    model: model.clone(),
+    messages: vec![json!({
+      "role": "user",
+      "content": "Return a JSON object {\"ok\": true}."
+    })],
+    stream: false,
+    parameters: HashMap::from([
+      ("temperature".to_string(), json!(0.0)),
+      ("max_tokens".to_string(), json!(64)),
+    ]),
+    tools: None,
+    tool_choice: None,
+    thinking: None,
+    response_format: Some(ResponseFormat::JsonObject),
+  };
+  let json_resp = tokio::time::timeout(Duration::from_secs(45), provider.execute(&json_req))
+    .await
+    .unwrap_or_else(|_| panic!("deepseek: json_object request timed out after 45s"))
+    .unwrap_or_else(|e| panic!("deepseek: json_object request failed: {e}"));
+  let ContentType::Text(raw_json) = &json_resp.content else {
+    panic!("deepseek: expected JSON text");
+  };
+  let parsed: serde_json::Value =
+    serde_json::from_str(raw_json).expect("deepseek: json_object output must parse");
+  assert_eq!(parsed["ok"], json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deepseek_tts_and_asr_via_modality_dispatcher() {
   let _guard = deepseek_live_lock().lock().await;
   let Some((api_key, _)) = deepseek_live_context(LiveCapability::Audio).await else {
@@ -1707,17 +1768,16 @@ models:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minimax_live_text_path() {
   // MiniMax (https://api.minimaxi.com — note the `i` in `minimaxi`) advertises
-  // OpenAI SDK compatibility per their API overview. `MiniMax-M2` is the
-  // cheapest current model in the M2 family per the docs. Override at the
-  // workflow level via `YANSHI_LIVE_MINIMAX_TEXT_MODEL` if the lineup
-  // shifts.
+  // OpenAI SDK compatibility per their API overview. `MiniMax-M2` was retired
+  // (HTTP 404 code 2069); `MiniMax-M3.1-Flash` is the current fast text model.
+  // Override via `YANSHI_LIVE_MINIMAX_TEXT_MODEL` if the lineup shifts.
   let _guard = minimax_live_lock().lock().await;
   let Some((api_key, base_url)) = minimax_live_context(LiveCapability::Llm).await else {
     return;
   };
   let provider =
     OpenAIProvider::with_client(no_proxy_client(), &api_key, base_url).expect("minimax provider");
-  let model = live_text_model("minimax", "MiniMax-M2");
+  let model = live_text_model("minimax", "MiniMax-M3.1-Flash");
 
   let response = tokio::time::timeout(
     Duration::from_secs(30),

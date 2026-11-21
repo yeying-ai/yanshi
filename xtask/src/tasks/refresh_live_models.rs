@@ -39,7 +39,7 @@
 //! explanatory comments that an automated rewrite would clobber.
 
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,7 +107,9 @@ const REFRESH_LIVE_MODELS_PROBES: &[LiveModelProbe] = &[
   LiveModelProbe {
     name: "minimax",
     key_envs: &["MINIMAX_API_KEY"],
-    default_text_model: "MiniMax-M2",
+    // `MiniMax-M2` was retired (HTTP 404 code 2069); `MiniMax-M3.1-Flash`
+    // is the current fast text model.
+    default_text_model: "MiniMax-M3.1-Flash",
     endpoint: LiveModelsEndpoint::OpenAICompat("https://api.minimaxi.com/v1/models"),
   },
 ];
@@ -189,25 +191,6 @@ pub fn refresh_live_models_from_args(
     }
   }
 
-  // Load ~/.yanshi/.env into the process environment, mirroring the
-  // existing `Yanshi::init()` convention. Silent no-op when the file
-  // is missing — that's the expected case on CI, where keys come from
-  // the workflow's `env:` block.
-  let env_path = std::env::var_os("HOME")
-    .map(PathBuf::from)
-    .map(|home| home.join(".yanshi").join(".env"));
-  if let Some(path) = env_path.as_ref()
-    && path.exists()
-  {
-    let loaded = load_dotenv_file(path)?;
-    let _ = writeln!(
-      out,
-      "[refresh] loaded {} key(s) from {}",
-      loaded,
-      path.display()
-    );
-  }
-
   let probes: Vec<LiveModelProbe> = if include.is_empty() {
     REFRESH_LIVE_MODELS_PROBES.to_vec()
   } else {
@@ -230,6 +213,31 @@ pub fn refresh_live_models_from_args(
     );
   }
 
+  // Snapshot ambient shell keys BEFORE loading ~/.yanshi/.env so that if a
+  // key in ~/.yanshi/.env is stale (HTTP 401/403/5xx) while the operator's
+  // ambient shell carries a fresh key, we automatically fall back to the
+  // ambient key without breaking P10.3.4's `.env-first` precedence.
+  let ambient_snapshot = snapshot_ambient_keys(REFRESH_LIVE_MODELS_PROBES);
+
+  // Load ~/.yanshi/.env into the process environment, mirroring the
+  // existing `Yanshi::init()` convention. Silent no-op when the file
+  // is missing — that's the expected case on CI, where keys come from
+  // the workflow's `env:` block.
+  let env_path = std::env::var_os("HOME")
+    .map(PathBuf::from)
+    .map(|home| home.join(".yanshi").join(".env"));
+  if let Some(path) = env_path.as_ref()
+    && path.exists()
+  {
+    let loaded = load_dotenv_file(path)?;
+    let _ = writeln!(
+      out,
+      "[refresh] loaded {} key(s) from {}",
+      loaded,
+      path.display()
+    );
+  }
+
   // Empty `_ = workspace_root`: kept on the signature to mirror the other
   // xtask subcommands (`bench_gate_from_args`, `test_gate_from_args`).
   // Future extensions may want to read the workspace root to locate the
@@ -238,7 +246,7 @@ pub fn refresh_live_models_from_args(
 
   let mut outcomes: Vec<LiveProbeOutcome> = Vec::with_capacity(probes.len());
   for probe in &probes {
-    let outcome = probe_provider(probe);
+    let outcome = probe_provider_with_fallback(probe, &ambient_snapshot);
     print_probe_line(out, &outcome);
     outcomes.push(outcome);
   }
@@ -284,24 +292,80 @@ pub fn refresh_live_models_from_args(
   Ok(())
 }
 
-fn probe_provider(probe: &LiveModelProbe) -> LiveProbeOutcome {
-  let api_key = match resolve_api_key(probe.key_envs) {
-    Some(k) => k,
-    None => {
-      return LiveProbeOutcome {
-        provider: probe.name,
-        default_text_model: probe.default_text_model.to_string(),
-        status: ProbeStatus::Skipped {
-          reason: format!(
-            "no key in {} (or HOME/.yanshi/.env)",
-            probe.key_envs.join(" / ")
-          ),
-        },
-      };
+fn snapshot_ambient_keys(probes: &[LiveModelProbe]) -> BTreeMap<&'static str, String> {
+  let mut out = BTreeMap::new();
+  for probe in probes {
+    for &env_var in probe.key_envs {
+      if let Ok(value) = std::env::var(env_var) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+          out.insert(env_var, trimmed.to_string());
+        }
+      }
     }
-  };
+  }
+  out
+}
 
-  let model_ids = match fetch_provider_models(probe, &api_key) {
+fn candidate_api_keys(
+  key_envs: &[&str],
+  ambient_snapshot: &BTreeMap<&'static str, String>,
+) -> Vec<String> {
+  let mut keys = Vec::new();
+  if let Some(primary) = resolve_api_key(key_envs) {
+    keys.push(primary);
+  }
+  for env_var in key_envs {
+    if let Some(ambient) = ambient_snapshot.get(env_var)
+      && !keys.contains(ambient)
+    {
+      keys.push(ambient.clone());
+    }
+  }
+  keys
+}
+
+#[cfg(test)]
+fn probe_provider(probe: &LiveModelProbe) -> LiveProbeOutcome {
+  probe_provider_with_fallback(probe, &BTreeMap::new())
+}
+
+fn probe_provider_with_fallback(
+  probe: &LiveModelProbe,
+  ambient_snapshot: &BTreeMap<&'static str, String>,
+) -> LiveProbeOutcome {
+  let candidates = candidate_api_keys(probe.key_envs, ambient_snapshot);
+  if candidates.is_empty() {
+    return LiveProbeOutcome {
+      provider: probe.name,
+      default_text_model: probe.default_text_model.to_string(),
+      status: ProbeStatus::Skipped {
+        reason: format!(
+          "no key in {} (or HOME/.yanshi/.env)",
+          probe.key_envs.join(" / ")
+        ),
+      },
+    };
+  }
+
+  let mut chosen_key = String::new();
+  let mut model_ids_res: Option<Result<Vec<String>>> = None;
+  for key in candidates {
+    match fetch_provider_models(probe, &key) {
+      Ok(ids) => {
+        chosen_key = key;
+        model_ids_res = Some(Ok(ids));
+        break;
+      }
+      Err(err) => {
+        if model_ids_res.is_none() {
+          model_ids_res = Some(Err(err));
+        }
+      }
+    }
+  }
+  let api_key = chosen_key;
+  let model_ids = match model_ids_res.unwrap_or_else(|| Err(anyhow::anyhow!("no key candidates"))) {
     Ok(ids) => ids,
     Err(reason) => {
       return LiveProbeOutcome {
