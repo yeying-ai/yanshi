@@ -93,11 +93,11 @@ LOCALE_META: dict[str, dict[str, Any]] = {
       ),
       (
         "没有图像生成或语音 TTS API Key 可以运行么？支持哪些大模型服务商？",
-        "完全可以。只需配置任一文本大模型 Key 即可开箱运行 slides.yml、report.yml、repo_architecture.yml、backend_project_planner.yml、paper_reader.yml、mindmap.yml 等绝大多数生成器。运行时原生内置 9 大模型服务商（OpenAI、Anthropic Claude、Google Gemini、Moonshot Kimi、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax）及 Mock 测试后端，也支持任意兼容 OpenAI 接口的服务（如本地 Ollama）。",
+        "完全可以。只需配置任一文本大模型 Key（例如单个 DEEPSEEK_API_KEY 即可同时解锁 deepseek-flash 视觉理解以及原生 TTS、ASR、联网搜索、网页抓取与扫描件/图片 OCR）即可开箱运行 slides.yml、report.yml、repo_architecture.yml、backend_project_planner.yml、paper_reader.yml、mindmap.yml 等绝大多数生成器。运行时原生内置 9 大模型服务商（OpenAI、Anthropic Claude、Google Gemini、Moonshot Kimi、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax）及 Mock 测试后端，也支持本地 Ollama 等兼容接口。",
       ),
       (
         "Yanshi 与 LangGraph、Dify 或单一 AI PPT 工具有何核心区别？",
-        "Yanshi 将「确定性并发 DAG 工作流」、「原生 ReAct / Plan-Execute / 多智能体循环」与「运行期动态编译工作流」统一在同一套零运行时依赖耦合的 Rust L0 窄腰内核上：既编译为单一高性能静态二进制（调度与预算护栏开销低于 1ms，内置 44 模型硬性 cost_limit_usd 熔断），又以一等公民磁盘文件句柄（FlowValue::File）打通 PPTX、1080p 配音视频、PDF、Excel 与播客渲染，免除 Python 环境冲突与 Base64 内存膨胀。",
+        "Yanshi 将「默认并发 DAG 工作流」、「原生跨核并行 ReAct / 多智能体循环（WorkflowTool / AgentNode / AgentTool 会话隔离并行）」与「运行期动态编译工作流」统一在同一套零运行时依赖耦合的 Rust L0 窄腰内核上：既编译为单一高性能静态二进制（调度与预算护栏开销低于 1ms，内置 76 模型硬性 cost_limit_usd 祖先预算池熔断与零数据库 workflow run-batch 本地批处理），又以一等公民磁盘文件句柄（FlowValue::File）打通 PPTX、1080p 配音视频、PDF、Excel 与播客渲染，免除 Python 环境冲突与 Base64 内存膨胀。",
       ),
       (
         "在抓取外部网页、分析陌生代码仓库或运行绘图代码时如何保障宿主机安全？",
@@ -133,11 +133,11 @@ LOCALE_META: dict[str, dict[str, Any]] = {
       ),
       (
         "Can I run workflows without image or TTS API keys, and which LLM providers are supported?",
-        "Yes. A single text LLM key runs most Studio generators out of the box — including slides.yml, report.yml, repo_architecture.yml, backend_project_planner.yml, paper_reader.yml, and mindmap.yml. Yanshi natively supports 9 LLM vendors (OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, GLM·Zhipu, DashScope·Alibaba, DeepSeek, MiniMax) plus Mock and any OpenAI-compatible endpoint (such as local Ollama).",
+        "Yes. A single LLM key — for example DEEPSEEK_API_KEY, which unlocks deepseek-flash vision plus native TTS, ASR, web search, Markdown fetch, and PDF/image OCR — runs Studio generators out of the box, including slides.yml, report.yml, repo_architecture.yml, backend_project_planner.yml, paper_reader.yml, and mindmap.yml. Yanshi natively supports 9 LLM vendors (OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, GLM·Zhipu, DashScope·Alibaba, DeepSeek, MiniMax) plus Mock and local Ollama.",
       ),
       (
         "How does Yanshi differ from LangGraph, Dify, or single-purpose AI slide tools?",
-        "Yanshi unifies deterministic concurrent DAGs, native autonomous agent loops (ReAct, Plan-Execute, Handoff/Blackboard/Debate), and runtime-compiled dynamic workflows on one narrow-waist Rust kernel. You get a single fast binary (< 1ms scheduling overhead, built-in 44-model cost_limit_usd enforcement) and first-class FlowValue::File multimodal renderers (.pptx, 1080p .mp4, .pdf, .xlsx, .mp3) with zero Python dependency drift or Base64 memory bloat.",
+        "Yanshi unifies deterministic concurrent DAGs, multi-core parallel autonomous agent loops (ReAct, Plan-Execute, Handoff/Blackboard/Debate, isolated AgentNode/AgentTool & parallel WorkflowTools), and runtime-compiled dynamic workflows on one narrow-waist Rust kernel. You get a single fast binary (< 1ms scheduling overhead, built-in 76-model cost_limit_usd ancestor budget pool, and zero-DB yanshi workflow run-batch matrix execution) with first-class FlowValue::File multimodal renderers (.pptx, 1080p .mp4, .pdf, .xlsx, .mp3) and zero Python dependency drift or Base64 memory bloat.",
       ),
       (
         "How does Yanshi isolate untrusted repos, web fetches, and LLM-generated code?",
@@ -343,13 +343,13 @@ def build_json_ld(lang: str) -> str:
           "priceCurrency": "USD",
         },
         "featureList": [
-          "Deterministic concurrent DAG workflows in YAML and Rust",
-          "Autonomous AI agent loops (ReAct, Plan-Execute, Reflection, Multi-Agent Supervisors)",
+          "Deterministic concurrent DAG workflows in YAML and Rust with zero-DB workflow run-batch matrix runner",
+          "Multi-core parallel AI agent loops (ReAct, Plan-Execute, Supervisors, parallel WorkflowTool & isolated AgentNode/AgentTool)",
           "Pure-Rust native editable OOXML .pptx and typed .xlsx writers",
           "1080p narrated slide video (.mp4) and EBU R128 podcast (.mp3) synthesis",
           "Self-repairing D2, Typst, TikZ, and sandboxed Python vector diagrams",
           "Fail-closed OS sandboxing (macOS sandbox-exec, Linux Landlock + seccomp + cgroup v2)",
-          "First-class MCP client, Qdrant/ONNX RAG, and Ed25519-verified SKILL.md packages",
+          "First-class MCP client, Qdrant/ONNX RAG, image/PDF OCR ingestion, and Ed25519-verified SKILL.md packages",
         ],
       },
       {
@@ -594,9 +594,9 @@ def generate_llms_txt(workflow_files: list[str]) -> None:
   )
   llms_txt = f"""# Yanshi (偃师)
 
-> Yanshi is an open-source multimodal content-production runtime in Rust unifying deterministic concurrent DAG workflows, autonomous AI agent loops (ReAct, Plan-Execute, Reflection, multi-agent supervisors), runtime-compiled dynamic workflows, and fail-closed OS sandboxing.
+> Yanshi is an open-source multimodal content-production runtime in Rust unifying deterministic concurrent DAG workflows, multi-core parallel autonomous AI agent loops (ReAct, Plan-Execute, Reflection, multi-agent supervisors, parallel `WorkflowTool`s, isolated `AgentNode`/`AgentTool` sessions), runtime-compiled dynamic workflows, zero-DB local batch orchestration (`yanshi workflow run-batch` with shared `CostMeter` ancestor budget pools), and fail-closed OS sandboxing.
 
-Named after the artificer Yanshi (偃师) in *Liezi · Tangwen* (《列子·汤问》), every pipeline is assembled from explicit, inspectable, checkpoint-replayable components — turning raw topics, web URLs, GitHub repositories, academic PDFs, or audio/video recordings into native editable OOXML `.pptx`, narrated `1080p .mp4`, `16:9 .pdf`, `.xlsx` workbooks, EBU R128 `.mp3` podcasts, and verified D2/Typst/TikZ vector diagrams.
+Named after the artificer Yanshi (偃师) in *Liezi · Tangwen* (《列子·汤问》), every pipeline is assembled from explicit, inspectable, checkpoint-replayable components — turning raw topics, web URLs, GitHub repositories, academic PDFs, scanned images (`.png`/`.jpg`/`.webp`/`.gif` OCR), or audio/video recordings into native editable OOXML `.pptx`, narrated `1080p .mp4`, `16:9 .pdf`, `.xlsx` workbooks, EBU R128 `.mp3` podcasts, and verified D2/Typst/TikZ vector diagrams.
 
 ## Entry Points
 

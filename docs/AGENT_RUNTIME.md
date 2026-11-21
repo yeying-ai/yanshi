@@ -332,6 +332,19 @@ and serializes workflow node results back to a JSON `ToolOutput`. Node failures
 are returned as `ToolOutput::error`, so the agent can continue reasoning with
 the failed workflow observation.
 
+**Multi-core tool batching & isolated agent sessions (AJ1–AJ2).** When a
+`ReActAgent` turn emits two or more native `tool_calls`, `batch.rs` inspects
+`ToolRegistry::tool_concurrency_safe(name)` (`Tool::concurrency_safe`, which
+defaults to `idempotency == Idempotent` and can be opted into independently of
+replay/approval `ToolIdempotency` — e.g. `WorkflowTool::with_concurrency_safe`
+and `AgentTool::new`). Concurrency-safe batches dispatch in parallel across
+Tokio worker threads via `tokio::spawn` + `AbortOnDropHandle` while propagating
+`yanshi_llm::trace_context`. Likewise, `AgentNode::from_agent` and
+`AgentTool::new` default to lock-free per-call session isolation via
+`ReActAgent::fork_isolated()`, avoiding `Mutex` serialization and memory
+cross-talk under `Map(parallel: true)` or multi-agent supervisors (pass
+`.with_shared_session()` when cross-call history is desired).
+
 This keeps the dependency direction stable:
 
 `Flow -> AgentNode -> AgentRuntime -> ToolRegistry -> Tool/MCP/WorkflowTool`

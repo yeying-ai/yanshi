@@ -70,6 +70,8 @@ Outputs:
 
 `AgentNode` treats non-success stop reasons as node execution failures. That lets the parent DAG retry or fail using the same control flow as any other node.
 
+**Session isolation & parallel execution (AJ2):** `AgentNode::from_agent` defaults to **per-call session isolation** — each invocation calls `ReActAgent::fork_isolated()` to construct a fresh `SessionMemory` while sharing immutable `ReActConfig`, `Arc<ToolRegistry>`, and hooks without holding a `Mutex` across `.await`. Multiple `AgentNode` branches or `Map(parallel: true)` iterations therefore run concurrently across Tokio worker threads with zero conversation cross-talk. Call `.with_shared_session()` when an `AgentNode` inside a sequential `While` loop intentionally needs multi-turn history across iterations (`AgentTool::new` vs `AgentTool::from_shared` / `.with_shared_session()` follow the same rule).
+
 Minimal shape:
 
 ```rust
@@ -134,6 +136,7 @@ let workflow_tool = WorkflowTool::new(
   "Run a deterministic child workflow that formats a summary.",
   child_flow,
 )
+.with_concurrency_safe(true)
 .with_timeout(Duration::from_secs(10));
 
 let mut registry = ToolRegistry::new();
@@ -141,6 +144,8 @@ registry.register(Arc::new(workflow_tool));
 ```
 
 The tool output is a JSON serialization of the child workflow results. It is returned both as compatible string content and as a structured `ToolOutputPart::Resource` with a `workflow://<tool_name>` URI.
+
+**Parallel tool batching & approval safety (AJ1):** `Tool::concurrency_safe` is decoupled from `Tool::idempotency`. `WorkflowTool` keeps `ToolIdempotency::Unknown` (preserving `SecurityProfile::Production` approval escalation and `AgentNodeResumeContract` replay safety), while `.with_concurrency_safe(true)` marks the sub-workflow safe to execute in parallel via `tokio::spawn` when `ReActAgent` emits multiple tool calls in a single turn (`LlmTraceContext` and parent `CostMeter` budgets propagate across spawned tasks). Declarative Skill `[[workflows]]` templates (`yanshi skill run`, default `--max-concurrency 8`) are automatically classified as `concurrency_safe` unless the graph contains host-mutating nodes (`shell`, `mcp`, or `file` writes).
 
 If any child workflow node returns an error, `WorkflowTool` returns an error `ToolOutput`. If the workflow exceeds its timeout, the tool call fails with a tool execution error.
 

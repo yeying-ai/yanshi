@@ -99,7 +99,7 @@ server (`local_engine.rs`) inside the native desktop process so users can run
 and debug workflows offline without installing PostgreSQL:
 
 - **Automatic Credential & Pricing Bootstrap**: loads `~/.yanshi/.env` and
-  `~/.yanshi/models.yml`, and automatically materializes the bundled 44-model
+  `~/.yanshi/models.yml`, and automatically materializes the bundled 76-model
   production pricing catalog (`config/pricing.prod.yml`) into
   `YANSHI_PRICING_TABLE` when no custom pricing table is configured.
 - **Full HITL Question Parity**: `local_questions.rs` (`LocalRunQuestionHandler`)

@@ -350,8 +350,8 @@
                   <span class="inspector-contract">SSRF-Pinned + Typed Chunks</span>
                 </div>
                 <p class="inspector-desc">
-                  <span data-i18n-zh>内置节点直接抓取网页、扫描 GitHub 仓库依赖树（不执行不可信代码）、解析 arXiv 源码包与 PDF 表格，或对音视频自动提取字幕与 ASR 转写。</span>
-                  <span data-i18n-en>Ingest web pages with DNS-pinned SSRF protection, snapshot GitHub repos without running untrusted code, parse PDFs/arXiv tarballs, or extract captions + ASR transcripts.</span>
+                  <span data-i18n-zh>内置节点直接抓取网页、扫描 GitHub 仓库依赖树（不执行不可信代码）、解析 arXiv 源码包与 PDF 表格、对图片与扫描件执行高保真 OCR，或对音视频自动提取字幕与 ASR 转写。</span>
+                  <span data-i18n-en>Ingest web pages with DNS-pinned SSRF protection, snapshot GitHub repos without running untrusted code, parse PDFs/arXiv tarballs, run high-fidelity image/PDF OCR, or extract captions + ASR transcripts.</span>
                 </p>
                 <pre class="inspector-code"><code data-hl="yaml">- id: ingest_repo
   type: repo_snapshot
@@ -366,7 +366,7 @@
                 <div class="inspector-tags">
                   <span class="chip">web_search</span>
                   <span class="chip">repo_snapshot</span>
-                  <span class="chip">pdf_extract</span>
+                  <span class="chip">pdf_extract + ocr</span>
                   <span class="chip">arxiv</span>
                   <span class="chip">video_ingest + asr</span>
                 </div>
@@ -707,16 +707,16 @@ yanshi workflow resume 019a8f2c examples/generators/tech_slides_video.yml \
                   </p>
                   <ul class="paradigm-points">
                     <li>
-                      <span data-i18n-zh>依赖就绪并发调度器 + <code>map</code> / <code>while</code> / <code>run_if</code> 控制流</span>
-                      <span data-i18n-en>Dependency-ready concurrent scheduler with <code>map</code>, <code>while</code>, and <code>run_if</code></span>
+                      <span data-i18n-zh>全端默认开启并发就绪调度（<code>concurrent(8)</code>）+ <code>map</code> / <code>while</code> / <code>run_if</code> 控制流</span>
+                      <span data-i18n-en>Default concurrent ready scheduler (<code>concurrent(8)</code>) with <code>map</code>, <code>while</code>, and <code>run_if</code></span>
                     </li>
                     <li>
-                      <span data-i18n-zh>内置 44 模型计费表与 <code>cost_limit_usd</code> 实时熔断保护</span>
-                      <span data-i18n-en>Built-in 44-model pricing ledger with hard <code>cost_limit_usd</code> enforcement</span>
+                      <span data-i18n-zh>内置 76 模型计费表与跨子工作流共享的 <code>CostMeter</code> <code>cost_limit_usd</code> 实时熔断保护</span>
+                      <span data-i18n-en>Built-in 76-model pricing ledger with shared ancestor <code>CostMeter</code> <code>cost_limit_usd</code> enforcement</span>
                     </li>
                     <li>
-                      <span data-i18n-zh>通过 <code>AgentNode</code> 在任意 DAG 节点内嵌入自主智能体</span>
-                      <span data-i18n-en>Embed an autonomous agent inside any DAG step via <code>AgentNode</code></span>
+                      <span data-i18n-zh>支持零数据库 <code>workflow run-batch</code> 本地多工作流并行批处理，或通过 <code>AgentNode</code> 嵌入无锁隔离会话智能体</span>
+                      <span data-i18n-en>Zero-DB <code>workflow run-batch</code> local parallel runner &amp; lock-free isolated <code>AgentNode</code> embedding</span>
                     </li>
                   </ul>
                   <a href="docs/WORKFLOW_SCHEMA.html">
@@ -778,13 +778,13 @@ nodes:
                     <span data-i18n-en>Agent-Native Loops: ReAct, Plan-Execute &amp; Supervisors</span>
                   </h3>
                   <p>
-                    <span data-i18n-zh>结构化记录每一步观察、规划、工具调用、反思与停止原因（<code>AgentStopReason</code>），并可将任意确定性 DAG 封装为 <code>WorkflowTool</code> 供智能体按需调用。</span>
-                    <span data-i18n-en>Every observe, plan, tool call, reflection, and verification step is typed and traceable — and any DAG workflow can be exposed to the agent as a <code>WorkflowTool</code>.</span>
+                    <span data-i18n-zh>结构化记录每一步观察、规划、工具调用、反思与停止原因（<code>AgentStopReason</code>），并将并发安全的确定性 DAG 封装为 <code>WorkflowTool</code> 供智能体跨多核线程真并行调用。</span>
+                    <span data-i18n-en>Every observe, plan, tool call, reflection, and verification step is typed and traceable — and concurrency-safe DAG workflows execute in parallel across Tokio worker threads via <code>WorkflowTool</code>.</span>
                   </p>
                   <ul class="paradigm-points">
                     <li>
-                      <span data-i18n-zh>支持 Handoff、Blackboard、Debate 三种多智能体协同编排器</span>
-                      <span data-i18n-en>Multi-agent Handoff, Blackboard, and Debate supervisors</span>
+                      <span data-i18n-zh>支持 Handoff、Blackboard、Debate 多智能体编排与 <code>AgentNode</code> / <code>AgentTool</code> 默认独立会话隔离</span>
+                      <span data-i18n-en>Handoff, Blackboard, and Debate supervisors with isolated per-call <code>AgentNode</code> / <code>AgentTool</code> sessions</span>
                     </li>
                     <li>
                       <span data-i18n-zh>原生 MCP 工具接入与 Ed25519 签名校验的 <code>SKILL.md</code> 技能包</span>
@@ -1535,12 +1535,12 @@ let result = flow.run().await?;</code></pre>
           <div class="surfaces-grid">
             <div class="surface-box spotlight-card">
               <h3>
-                <span data-i18n-zh>CLI 命令行与批处理流水线</span>
-                <span data-i18n-en>CLI &amp; Checkpointed Automation</span>
+                <span data-i18n-zh>CLI 命令行与本地并行批处理</span>
+                <span data-i18n-en>CLI &amp; Local Parallel Batch Runner</span>
               </h3>
               <p>
-                <span data-i18n-zh>一行命令完成工作流严格校验、执行、断点续跑与终端 TUI 轨迹重放（<code>trace replay</code>）。</span>
-                <span data-i18n-en>Validate, execute, checkpoint-resume, and inspect runs interactively in the terminal TUI with <code>yanshi trace replay</code>.</span>
+                <span data-i18n-zh>一行命令完成工作流严格校验、默认并发执行、<code>workflow run-batch</code> 多工作流共享预算并行跑批、断点续跑与终端 TUI 轨迹重放（<code>trace replay</code>）。</span>
+                <span data-i18n-en>Validate, run concurrently, fan out multi-YAML / manifest batches under one shared budget with <code>workflow run-batch</code>, and inspect traces in <code>yanshi trace replay</code>.</span>
               </p>
               <pre class="surface-cmd"><code data-hl="bash">cargo install --path yanshi-cli</code></pre>
             </div>
@@ -1622,8 +1622,8 @@ let result = flow.run().await?;</code></pre>
               </summary>
               <div class="faq-answer">
                 <p>
-                  <span data-i18n-zh>Yanshi 将「确定性并发 DAG 工作流」、「原生 ReAct / Plan-Execute / 多智能体循环」与「运行期动态编译工作流」统一在同一套零运行时依赖耦合的 Rust L0 窄腰内核上：既编译为单一高性能静态二进制（调度与预算护栏开销低于 1ms，内置 44 模型硬性 <code>cost_limit_usd</code> 熔断），又以一等公民磁盘文件句柄（<code>FlowValue::File</code>）打通 PPTX、1080p 配音视频、PDF、Excel 与播客渲染，免除 Python 环境冲突与 Base64 内存膨胀。</span>
-                  <span data-i18n-en>Yanshi unifies deterministic concurrent DAGs, native autonomous agent loops (ReAct, Plan-Execute, Handoff/Blackboard/Debate), and runtime-compiled dynamic workflows on one narrow-waist Rust kernel. You get a single fast binary (&lt; 1ms scheduling overhead, built-in 44-model <code>cost_limit_usd</code> enforcement) and first-class <code>FlowValue::File</code> multimodal renderers (.pptx, 1080p .mp4, .pdf, .xlsx, .mp3) with zero Python dependency drift or Base64 memory bloat.</span>
+                  <span data-i18n-zh>Yanshi 将「默认并发 DAG 工作流」、「原生跨核并行 ReAct / 多智能体循环（<code>WorkflowTool</code> / <code>AgentNode</code> / <code>AgentTool</code> 会话隔离并行）」与「运行期动态编译工作流」统一在同一套零运行时依赖耦合的 Rust L0 窄腰内核上：既编译为单一高性能静态二进制（调度与预算护栏开销低于 1ms，内置 76 模型硬性 <code>cost_limit_usd</code> 祖先预算池熔断与零数据库 <code>workflow run-batch</code> 本地批处理），又以一等公民磁盘文件句柄（<code>FlowValue::File</code>）打通 PPTX、1080p 配音视频、PDF、Excel 与播客渲染，免除 Python 环境冲突与 Base64 内存膨胀。</span>
+                  <span data-i18n-en>Yanshi unifies deterministic concurrent DAGs, multi-core parallel autonomous agent loops (ReAct, Plan-Execute, Handoff/Blackboard/Debate, isolated <code>AgentNode</code>/<code>AgentTool</code> &amp; parallel <code>WorkflowTool</code>s), and runtime-compiled dynamic workflows on one narrow-waist Rust kernel. You get a single fast binary (&lt; 1ms scheduling overhead, built-in 76-model <code>cost_limit_usd</code> ancestor budget pool, and zero-DB <code>yanshi workflow run-batch</code> matrix execution) with first-class <code>FlowValue::File</code> multimodal renderers (.pptx, 1080p .mp4, .pdf, .xlsx, .mp3) and zero Python dependency drift or Base64 memory bloat.</span>
                 </p>
               </div>
             </details>

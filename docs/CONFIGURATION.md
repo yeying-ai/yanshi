@@ -181,14 +181,22 @@ their required/optional parameters.
 
 ## Workflow Commands
 
-Run a workflow:
+Run a workflow (`--execution-mode` defaults to `concurrent` with `--max-concurrency 8`, matching `yanshi serve` and the Tauri desktop engine):
 
 ```bash
 yanshi workflow run flow.yml
 yanshi workflow run flow.yml --dry-run
 yanshi workflow run flow.yml --model gpt-4o-mini
-yanshi workflow run flow.yml --execution-mode concurrent --max-concurrency 4
+yanshi workflow run flow.yml --max-concurrency 4
+yanshi workflow run flow.yml --execution-mode serial
 yanshi workflow run flow.yml --input topic Yanshi
+```
+
+Run multiple workflows or a `--manifest` job matrix in parallel on a single machine under one shared `CostMeter` budget pool (zero DB/Server required; writes `<output-dir>/<job>/` + `batch_summary.json`):
+
+```bash
+yanshi workflow run-batch a.yml b.yml --max-parallel 2 --cost-limit-usd 1.50 --output-dir out/batch
+yanshi workflow run-batch --manifest batch.yml --fail-fast --output-dir out/matrix
 ```
 
 Validate without execution:

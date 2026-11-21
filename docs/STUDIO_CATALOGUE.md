@@ -144,6 +144,16 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
 # If interrupted at a late stage, resume from the last completed node:
 yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
   --output-dir out/lecture
+
+# Run multiple Studio generators in parallel on a single machine (zero DB/Server)
+# under one shared ancestor CostMeter budget pool:
+yanshi workflow run-batch \
+  examples/generators/report.yml \
+  examples/generators/mindmap.yml \
+  examples/generators/flashcards.yml \
+  --input source="https://arxiv.org/abs/1706.03762" \
+  --max-parallel 3 --cost-limit-usd 1.20 \
+  --output-dir out/paper-bundle
 ```
 
 ### Web Studio (`/ui/notebooks`, `/ui/studio` & `/ui/app`)
@@ -151,8 +161,9 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
 Start `yanshi-server` and open:
 
 - **`http://127.0.0.1:8080/ui/notebooks`** — **Notebook Workspace**: ingest URLs
-  (incl. automatic `arxiv.org` PDF & `github.com` repo snapshots),
-  `.pdf`/`.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`/`.md`/`.html` files,
+  (incl. automatic `arxiv.org` / `openreview.net` PDF & `github.com` repo snapshots),
+  `.pdf`/`.docx`/`.xlsx`/`.pptx`/`.csv`/`.tsv`/`.json`/`.md`/`.html`/`.srt`/`.vtt` files,
+  `.png`/`.jpg`/`.webp`/`.gif` images (via high-fidelity OCR),
   editable text notes, and audio recordings into per-notebook BM25 indexes,
   scope active sources via checkboxes, run persistent multi-turn grounded Q&A
   with verified chunk citations, and launch/interact with 12 source-grounded
@@ -172,7 +183,7 @@ Start `yanshi-server` and open:
 `yanshi-ui/src-tauri` packages the full Studio and App Runner as a standalone
 desktop app with an in-process local execution engine (`local_engine.rs`) —
 **no PostgreSQL or external server process required**. It automatically loads
-`~/.yanshi/.env`, seeds the bundled 44-model pricing table
+`~/.yanshi/.env`, seeds the bundled 76-model pricing table
 (`config/pricing.prod.yml`), and supports interactive `ask_user` HITL prompts
 offline.
 

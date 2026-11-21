@@ -1,6 +1,6 @@
 # Yanshi 试用手册（Trial Guide）
 
-**版本基线**：2026-11-19（Content Studio **Y0–Y10** 及 **Z–AF** 全闭环 + 19 个内置生成器 + 多源笔记本工作台 + Tauri 桌面端 `Yanshi Studio`）  
+**版本基线**：2026-11-21（Content Studio **Y0–Y10** 及 **Z–AJ** 全闭环 + 单机多 Agent 工作流真并行与 `workflow run-batch` 本地跑批 + 19 个内置生成器 + 多源笔记本工作台 + Tauri 桌面端 `Yanshi Studio`）  
 **适用读者**：想在日常研发、论文研读、技术分享与多模态内容生产中直接使用 Yanshi 的开发者与创作者  
 **配套文档**：当前全景状态见 [`CURRENT_STATUS.md`](CURRENT_STATUS.md)；19 个内置工作流清单见 [`STUDIO_CATALOGUE.md`](STUDIO_CATALOGUE.md)
 
@@ -8,15 +8,15 @@
 
 ## 0. 先读：当前各入口成熟度总览
 
-经过 V / W / X / Y 四轮收口，核心 CLI、Studio 生成器、服务端网关与桌面端均已打通端到端闭环：
+经过 V / W / X / Y 四轮收口及 Z–AJ 增量演进，核心 CLI、Studio 生成器、服务端网关与桌面端均已打通端到端闭环：
 
 | 状态 | 入口 / 路径 | 说明 |
 |:---:|---|---|
 | 🟢 | **Studio 生成器（19 套模板）** | `yanshi workflow run examples/generators/<name>.yml --output-dir out`，直出 `.pptx`、`.pdf`、`.mp4`、`.xlsx`、`.mp3`、`.svg`、`.html` |
-| 🟢 | **桌面端 `Yanshi Studio.app`（macOS / Windows / Linux）** | 免 PostgreSQL 零配置本地引擎，支持可视化单步调试、一键运行、内置价格表与交互式问答卡片 |
-| 🟢 | **Web Studio（`/ui/app` · `/ui/studio` · `/ui/console`）** | `yanshi-server` 内嵌前端，支持模板运行、DAG 拓扑画布编辑、断点观测与 SSE 实时事件追踪 |
-| 🟢 | **本地 DAG 工作流（`workflow run / resume / validate / debug`）** | 支持并发调度、`FlowValue::File` 零 base64 流转、`cost_limit_usd` 成本上限与不重复计费断点续跑 |
-| 🟢 | **Skill + 工作流工具编排（`skill run / chat / validate`）** | 支持 `[[workflows]]`（如 [`examples/applications/content-studio`](../examples/applications/content-studio)）与双语 CJK BM25 知识检索 |
+| 🟢 | **桌面端 `Yanshi Studio.app`（macOS / Windows / Linux）** | 免 PostgreSQL 零配置本地引擎，支持可视化单步调试、一键运行、内置 76 模型价格表与交互式问答卡片 |
+| 🟢 | **Web Studio（`/ui/notebooks` · `/ui/app` · `/ui/studio` · `/ui/console`）** | `yanshi-server` 内嵌前端，支持多源笔记本（含图片/扫描件 OCR）、模板运行、DAG 画布断点调试与 SSE 事件追踪 |
+| 🟢 | **本地并发 DAG 与批量编排（`workflow run / run-batch / resume / validate / debug`）** | 默认 `concurrent(8)` 调度、`FlowValue::File` 零 base64 流转、跨子工作流共享 `cost_limit_usd` 预算池与不重复计费断点续跑 |
+| 🟢 | **Skill + 并行工作流工具编排（`skill run / chat / validate`）** | 并发安全的 `[[workflows]]` 子工作流跨多核真并行执行（默认 `--max-concurrency 8`），内置双语 CJK BM25 知识检索 |
 | 🟢 | **Harness 治理会话与动态工作流** | 支持非幂等/发布类（`Publish`）/超预算审批门禁、`DenyAndStop` 立即停机与 `ask_user` 中断恢复 |
 | 🟢 | **诊断与复盘（`doctor` / `trace replay` / `trace tui`）** | 自动体检模型配置、价格表、沙箱等级与外部渲染二进制（`ffmpeg` / `pandoc` / `typst` / `d2`） |
 
@@ -50,6 +50,8 @@ yanshi config init
 OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / MOONSHOT_API_KEY /
 DASHSCOPE_API_KEY / STEP_API_KEY / GLM_API_KEY / DEEPSEEK_API_KEY / MINIMAX_API_KEY
 ```
+
+> **提示**：配置单个 `DEEPSEEK_API_KEY` 即可同时使用 `deepseek-flash` 多模态视觉理解以及原生 `/v1/tools/{tts,asr,search,fetch,ocr}`（语音合成、语音识别、联网检索、网页抓取与 PDF/图片 OCR）。
 
 运行体检确认配置与外部工具状态：
 
@@ -164,6 +166,21 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
   --output-dir out/traits-video
 ```
 
+### 3.3 单机多工作流并行批处理（`workflow run-batch`）
+
+无需部署 PostgreSQL 或分布式 Worker，即可在单机上并发/并行运行多套工作流（或 `--manifest` 参数矩阵），并共享同一个根 `CostMeter` 预算池、按 `<output-dir>/<job>/` 隔离产物与输出 `batch_summary.json`：
+
+```bash
+yanshi workflow run-batch \
+  examples/generators/report.yml \
+  examples/generators/mindmap.yml \
+  examples/generators/flashcards.yml \
+  --input source="https://arxiv.org/abs/1706.03762" \
+  --max-parallel 3 \
+  --cost-limit-usd 1.20 \
+  --output-dir out/paper-bundle
+```
+
 ---
 
 ## 4. 场景三：可视化 Studio 与桌面端调试（10 分钟）
@@ -179,14 +196,15 @@ yanshi workflow resume <run_id> examples/generators/tech_slides_video.yml \
 
 ## 5. 场景四：Skill 编排与 Harness 治理会话（20 分钟）
 
-### 5.1 用 Planner Skill 一次调度多个生成器
+### 5.1 用 Planner Skill 一次并行调度多个生成器
 
-[`examples/applications/content-studio`](../examples/applications/content-studio) 将多个生成器封装为 `WorkflowTool`，由 Agent 按需组合参数调用：
+[`examples/applications/content-studio`](../examples/applications/content-studio) 将多个生成器封装为并发安全的 `WorkflowTool`，Agent 在单轮发出多个工具调用时会跨多核线程真并行执行（子工作流内亦默认以 `--max-concurrency 8` 并发调度）：
 
 ```bash
 yanshi skill run examples/applications/content-studio \
   --input url=https://example.org/article \
   --input want=report,mindmap,flashcards \
+  --max-concurrency 8 \
   --output-dir out/bundle
 ```
 
@@ -226,9 +244,10 @@ yanshi doctor --profile local
 yanshi config validate
 yanshi llm models
 
-# 运行与续跑工作流（结果导出到 --output-dir）
+# 运行、批量并行与续跑工作流（默认 concurrent(8)，结果导出到 --output-dir）
 yanshi workflow validate <yml> --strict
 yanshi workflow run <yml> --input KEY VALUE --checkpoint --output-dir out
+yanshi workflow run-batch a.yml b.yml --max-parallel 2 --cost-limit-usd 1.00 --output-dir out/batch
 yanshi workflow resume <run_id> <yml> --output-dir out
 
 # Skill 与多成品编排

@@ -136,8 +136,8 @@ yanshi rag eval -d <dataset_dir> -r hybrid --compare-baseline <path>
 
 ### 3.2 并发 / 吞吐 优化
 
-- [ ] DAG 层：`--execution-mode concurrent --max-concurrency N`，从小值开始逐步加，观察是否有下游限流；`fail_fast`/`continue_on_skip` 默认都是符合直觉的值，一般不用碰。
-- [ ] Agent 层：≥2 个原生 tool_calls 会自动走批量分发——`Idempotent` 的并发跑,`NonIdempotent`/`Unknown` 的串行跑（H3）。想更快，优先把工具的 `idempotency()` 声明准确,而不是手动改并发参数。
+- [ ] DAG 层：`workflow run`、`yanshi serve`（`POST /v1/runs`）与桌面端均已默认开启 `concurrent`（`max_concurrency = 8`）；遇到下游 API 限流时可调小 `--max-concurrency N`，排查顺序敏感问题时切 `--execution-mode serial`。单机跑多套工作流或参数矩阵直接用 `yanshi workflow run-batch`（`--max-parallel` 控制跨工作流并行度，`--cost-limit-usd` 共享根 `CostMeter` 预算池），无需起分布式 Worker。
+- [ ] Agent 层：≥2 个原生 `tool_calls` 会自动走批量分发——`Tool::concurrency_safe() == true` 的工具通过 `tokio::spawn` 跨多核线程真并行执行（`Tool::idempotency` 继续独立控制审批升级与断点重放安全；`Skill` 的无宿主机写副作用 `[[workflows]]`、`WorkflowTool::with_concurrency_safe(true)` 与 `AgentTool::new` 均默认支持并行），其余工具串行执行。`AgentNode::from_agent` 与 `AgentTool::new` 默认每次调用 `fork_isolated()` 隔离会话，仅在需要跨轮保留记忆时显式调用 `.with_shared_session()`。
 - [ ] 长任务丢进 Harness 后台任务（`task_create` 等 5 个内置工具，H4），别让主循环阻塞等结果——`max_output_bytes` 默认 64 KiB,输出巨大的任务要自己分页取。
 
 ### 3.3 循环收敛质量优化
@@ -164,7 +164,8 @@ yanshi rag eval -d <dataset_dir> -r hybrid --compare-baseline <path>
 | 生产环境健康检查 | `yanshi doctor --format json --profile production --server <url> --backup-check --check-installations` |
 | 验证 workflow 定义 | `yanshi workflow validate <file> --format json --strict --explain-permissions` |
 | 干跑不执行 | `yanshi workflow run <file> --dry-run` |
-| 并发执行 | `yanshi workflow run <file> --execution-mode concurrent --max-concurrency <N>` |
+| 并发执行（默认 `concurrent(8)`） | `yanshi workflow run <file> --max-concurrency <N>` |
+| 本地多工作流并行批处理 | `yanshi workflow run-batch a.yml b.yml --max-parallel <P> --cost-limit-usd <USD> --output-dir out` |
 | 看某次运行的 trace | `yanshi trace tui <run_id> --filter workflow --details` |
 | 断点续跑评估 | `yanshi workflow resume-plan <run_id> --format json` |
 | LLM 生成计划再执行（沙箱工具） | `yanshi workflow dynamic --goal "<goal>" -m <model> --allow-path <p> --allow-domain <d> --dry-run` |
