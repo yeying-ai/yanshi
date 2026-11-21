@@ -1798,7 +1798,7 @@ export function NotebookWorkspacePage({
       } else if (ingestTab === 'file') {
         if (!selectedUploadFile) {
           throw new Error(
-            '请选择一个 .pdf、.docx、.xlsx、.pptx、.csv、.tsv、.json、.txt、.md 或 .html 文档文件。',
+            '请选择一个 .pdf、.png/.jpg/.webp/.gif、.docx、.xlsx、.pptx、.csv、.tsv、.json、.txt、.md 或 .html 文件。',
           );
         }
         const buffer = await selectedUploadFile.arrayBuffer();
@@ -2665,13 +2665,13 @@ export function NotebookWorkspacePage({
                 <div className="nb-tabpanel-inner">
                   <div className="nb-field">
                     <label htmlFor="nb-src-file">
-                      选择本地文档、表格、字幕或课件（支持 .pdf / .docx / .xlsx / .pptx / .csv / .tsv / .json / .srt / .vtt / .md / .txt / .html，≤10MB）
+                      选择本地文档、图片、表格、字幕或课件（支持 .pdf / .png / .jpg / .webp / .gif / .docx / .xlsx / .pptx / .csv / .tsv / .json / .srt / .vtt / .md / .txt / .html，≤10MB）
                     </label>
                     <input
                       id="nb-src-file"
                       name="file"
                       type="file"
-                      accept=".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.json,.srt,.vtt,.txt,.md,.markdown,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/csv,text/tab-separated-values,application/json,application/x-subrip,text/vtt,text/plain,text/markdown,text/html"
+                      accept=".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.json,.srt,.vtt,.txt,.md,.markdown,.html,.htm,.png,.jpg,.jpeg,.webp,.gif,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/csv,text/tab-separated-values,application/json,application/x-subrip,text/vtt,text/plain,text/markdown,text/html,image/png,image/jpeg,image/webp,image/gif"
                       onChange={(ev) => setSelectedUploadFile(ev.target.files?.[0] ?? null)}
                     />
                   </div>
@@ -2705,7 +2705,7 @@ export function NotebookWorkspacePage({
                       autoCorrect="off"
                       autoCapitalize="none"
                       spellCheck={false}
-                      placeholder="例如 gemini-2.5-flash-asr / whisper-1（留空读 YANSHI_ASR_MODEL）"
+                      placeholder="例如 deepseek-asr / gemini-2.5-flash-asr / whisper-1（留空读 YANSHI_ASR_MODEL）"
                       value={recordingModelDraft}
                       onChange={(ev) => setRecordingModelDraft(ev.target.value)}
                     />

@@ -61,7 +61,7 @@ inputs:
     description: "为开篇引入或总结页调用文生图生成无文字概念插图"
     default: true
   chat_model:
-    description: "主策划与脚本生成模型（推荐 gemini-2.5-flash / gemini-2.5-pro，兼容 qwen-plus / deepseek-v4-flash / glm-5.1 / kimi-k2.6）"
+    description: "主策划与脚本生成模型（推荐 gemini-2.5-flash / gemini-2.5-pro，兼容 qwen-plus / deepseek-flash / glm-5.1 / kimi-k2.6）"
     default: "gemini-2.5-flash"
   tts_model:
     description: "语音合成模型（推荐 gemini-2.5-flash-preview-tts，兼容 qwen3-tts-flash / step-tts-mini / gpt-4o-mini-tts）"

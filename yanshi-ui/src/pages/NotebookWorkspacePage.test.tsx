@@ -249,6 +249,8 @@ describe('NotebookWorkspacePage helpers, generator contract & SSR', () => {
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="nb-tab-recording"');
     expect(html).toContain('accept=".pdf,.docx,.xlsx,.pptx,.csv,');
+    expect(html).toContain('.png,.jpg,.jpeg,.webp,.gif');
+    expect(html).toContain('deepseek-asr');
     expect(html).toContain('data-testid="notebook-ask-card"');
     expect(html).toContain('data-testid="notebook-ask-input"');
     expect(html).toContain('data-testid="notebook-ask-submit"');
