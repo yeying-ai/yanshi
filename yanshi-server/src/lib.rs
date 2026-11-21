@@ -131,12 +131,11 @@ pub const RUN_SUBMIT_RATE_LIMIT_PER_MINUTE_ENV: &str = "YANSHI_RUN_SUBMIT_RATE_L
 /// --max-concurrency` already uses). Unset preserves today's exact
 /// behavior — see [`DEFAULT_RUN_MAX_CONCURRENCY`].
 pub const RUN_MAX_CONCURRENCY_ENV: &str = "YANSHI_RUN_MAX_CONCURRENCY";
-/// Default is `1`: functionally equivalent to the pre-W4.3a hardcoded
-/// `FlowExecutionConfig::serial()` (a single in-flight node at a time),
-/// so upgrading the gateway does not silently reorder any existing
-/// deployment's node execution. Operators opt into real parallelism via
-/// [`RUN_MAX_CONCURRENCY_ENV`].
-pub const DEFAULT_RUN_MAX_CONCURRENCY: usize = 1;
+/// AJ3: default max concurrently-running nodes within a single `/v1/runs`
+/// workflow or skill sub-workflow run (`8`, aligned with `yanshi workflow run`
+/// and the desktop local engine). Operators can override via
+/// [`RUN_MAX_CONCURRENCY_ENV`] (`1` restores strict serial scheduling).
+pub const DEFAULT_RUN_MAX_CONCURRENCY: usize = 8;
 
 /// Server-wide state injected into every handler.
 #[derive(Clone)]

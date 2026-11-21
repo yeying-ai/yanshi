@@ -2,6 +2,11 @@ use clap::{Args, Subcommand};
 
 use super::{debug, dynamic, resume, resume_plan, run, server_ops, validate};
 
+/// AJ3: default execution mode and node concurrency for `yanshi workflow run`,
+/// aligned with the desktop local engine (`local_engine.rs`) and `yanshi serve`.
+pub const EXECUTION_MODE_DEFAULT: &str = "concurrent";
+pub const MAX_CONCURRENCY_DEFAULT: usize = 8;
+
 #[derive(Args)]
 pub struct WorkflowArgs {
   #[command(subcommand)]
@@ -31,11 +36,11 @@ enum WorkflowCommands {
     timeout: String,
     #[arg(long, default_value_t = 0)]
     max_retries: u32,
-    /// Workflow execution mode: serial or concurrent
-    #[arg(long, default_value = "serial", value_parser = ["serial", "concurrent"])]
+    /// Workflow execution mode: concurrent (default) or serial
+    #[arg(long, default_value = EXECUTION_MODE_DEFAULT, value_parser = ["serial", "concurrent"])]
     execution_mode: String,
     /// Maximum concurrently running workflow nodes when --execution-mode concurrent
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = MAX_CONCURRENCY_DEFAULT)]
     max_concurrency: usize,
     /// Base directory for per-run workflow artifacts. Defaults to YANSHI_RUN_DIR or ~/.yanshi/runs.
     #[arg(long)]
@@ -345,8 +350,6 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
     } => {
       let input_pairs = crate::commands::parse_input_flag_tokens(&input)?;
       if let Some(server_url) = crate::server_client::resolve_server_url(server.as_deref()) {
-        const EXECUTION_MODE_DEFAULT: &str = "serial";
-        const MAX_CONCURRENCY_DEFAULT: usize = 4;
         const TIMEOUT_DEFAULT: &str = "60s";
         server_ops::reject_local_only_flags(
           max_concurrency,
@@ -371,19 +374,8 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
           }
           input_map.insert(k, run::parse_input_value(&raw_v));
         }
-        let server_max_concurrency = if execution_mode != EXECUTION_MODE_DEFAULT
-          || max_concurrency != MAX_CONCURRENCY_DEFAULT
-        {
-          Some(
-            if execution_mode == "serial" && max_concurrency == MAX_CONCURRENCY_DEFAULT {
-              1
-            } else {
-              max_concurrency
-            },
-          )
-        } else {
-          None
-        };
+        let server_max_concurrency =
+          resolve_server_max_concurrency(&execution_mode, max_concurrency);
         let out_path = output_dir.as_deref().map(std::path::PathBuf::from);
         match std::fs::read_to_string(&workflow_file) {
           Ok(body) => {
@@ -627,5 +619,49 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       )
       .await
     }
+  }
+}
+
+fn resolve_server_max_concurrency(execution_mode: &str, max_concurrency: usize) -> Option<usize> {
+  if execution_mode == "serial" {
+    Some(1)
+  } else if max_concurrency != MAX_CONCURRENCY_DEFAULT {
+    Some(max_concurrency)
+  } else {
+    None
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use clap::Parser;
+
+  #[derive(Parser)]
+  struct TestCli {
+    #[command(flatten)]
+    workflow: WorkflowArgs,
+  }
+
+  #[test]
+  fn workflow_run_defaults_to_concurrent_eight_and_maps_serial_to_one() {
+    let parsed = TestCli::try_parse_from(["yanshi", "run", "wf.yml"]).expect("parse");
+    let WorkflowCommands::Run {
+      execution_mode,
+      max_concurrency,
+      ..
+    } = parsed.workflow.command
+    else {
+      panic!("expected Run");
+    };
+    assert_eq!(execution_mode, "concurrent");
+    assert_eq!(max_concurrency, 8);
+    assert_eq!(
+      resolve_server_max_concurrency(&execution_mode, max_concurrency),
+      None
+    );
+    assert_eq!(resolve_server_max_concurrency("serial", 8), Some(1));
+    assert_eq!(resolve_server_max_concurrency("serial", 16), Some(1));
+    assert_eq!(resolve_server_max_concurrency("concurrent", 4), Some(4));
   }
 }

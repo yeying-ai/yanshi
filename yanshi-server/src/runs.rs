@@ -1540,8 +1540,7 @@ impl TraceStorage for DiscardTraceStorage {
 /// nodes via `FuturesUnordered` up to `max_concurrency`; explicit
 /// dependency edges are unaffected either way — only nodes with no edge
 /// between them (order-agnostic by DAG semantics) can now interleave.
-/// `max_concurrency` defaults to `1` (see `DEFAULT_RUN_MAX_CONCURRENCY`),
-/// which is functionally equivalent to the prior hardcoded `serial()`.
+/// `max_concurrency` defaults to `8` (see `DEFAULT_RUN_MAX_CONCURRENCY`).
 fn server_execution_config(
   run_base_dir: Option<PathBuf>,
   cancellation_token: FlowCancellationToken,
