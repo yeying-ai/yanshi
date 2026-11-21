@@ -174,6 +174,16 @@ impl ToolRegistry {
     self.tools.get(name).map(|tool| tool.idempotency(params))
   }
 
+  /// Return whether a concrete tool invocation can run in parallel with other
+  /// concurrency-safe calls in the same batch.
+  pub fn tool_concurrency_safe(&self, name: &str, params: &Value) -> bool {
+    self
+      .tools
+      .get(name)
+      .map(|tool| tool.concurrency_safe(params))
+      .unwrap_or(false)
+  }
+
   pub fn evaluate_policy(
     &self,
     name: &str,

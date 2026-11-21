@@ -28,7 +28,7 @@ use yanshi_core::{Flow, FlowExecutionConfig, FlowExt, FlowRunner};
 use yanshi_skills::manifest::SkillManifest;
 use yanshi_tools::Tool;
 
-use crate::config::v2::FlowDefinitionV2;
+use crate::config::v2::{FlowDefinitionV2, NodeDefinitionV2, walk_nodes};
 use crate::executor::{
   apply_declared_inputs, build_flow_from_definition, inputs_json_schema, parse_workflow_definition,
 };
@@ -59,6 +59,7 @@ struct TemplateRunner {
   tool: String,
   definition: FlowDefinitionV2,
   config: FlowExecutionConfig,
+  parent_cost_meter: Option<Arc<yanshi_core::run_context::CostMeter>>,
   runs: Arc<RecordedRuns>,
 }
 
@@ -103,9 +104,14 @@ impl FlowRunner for TemplateRunner {
       config = config.with_cost_limit_usd(limit);
     }
     let run_id = uuid::Uuid::new_v4().to_string();
-    let state = flow
-      .execute_from_inputs_with_id_and_config(run_id.clone(), inputs, config)
-      .await?;
+    let run_fut = flow.execute_from_inputs_with_id_and_config(run_id.clone(), inputs, config);
+    let state = if yanshi_core::run_context::current_cost_meter().is_none()
+      && self.parent_cost_meter.is_some()
+    {
+      yanshi_core::run_context::with_cost_meter(self.parent_cost_meter.clone(), run_fut).await?
+    } else {
+      run_fut.await?
+    };
     self
       .runs
       .0
@@ -147,6 +153,55 @@ pub fn load_definitions(
     .collect()
 }
 
+/// AJ1: inspect a workflow template recursively (including `map` and `while`
+/// bodies) to decide whether multiple invocations of its `WorkflowTool` in the
+/// same agent turn may run in parallel.
+///
+/// Every call already gets its own `Uuid::new_v4()` `run_id` directory under
+/// `run_base_dir`, so pure, LLM, Studio-rendering, and read-only ingestion
+/// nodes are isolated per call (`true`). Templates that contain host-mutating
+/// or arbitrary external side-effect nodes (`shell`, `code_exec`, `plugin`,
+/// `mcp`, mutating `file`, or non-`GET`/`HEAD` `http`) fall back to serial
+/// execution (`false`).
+pub fn is_definition_concurrency_safe(definition: &FlowDefinitionV2) -> bool {
+  let mut safe = true;
+  let walk_res: Result<(), String> =
+    walk_nodes(&definition.nodes, &mut |node: &NodeDefinitionV2| {
+      let node_safe = match node.node_type.as_str() {
+        "shell" | "code_exec" | "plugin" | "mcp" => false,
+        "file" => {
+          !node.input_mapping.contains_key("operation")
+            && matches!(
+              node
+                .parameters
+                .get("operation")
+                .and_then(serde_yaml::Value::as_str),
+              Some("read" | "read_bytes")
+            )
+        }
+        "http" => {
+          !node.input_mapping.contains_key("method")
+            && match node
+              .parameters
+              .get("method")
+              .and_then(serde_yaml::Value::as_str)
+            {
+              None => true,
+              Some(method) => {
+                method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")
+              }
+            }
+        }
+        _ => true,
+      };
+      if !node_safe {
+        safe = false;
+      }
+      Ok(())
+    });
+  walk_res.is_ok() && safe
+}
+
 /// Build the skill's workflow tools. `model` (the skill's resolved model
 /// or `--model`) is applied to the templates' llm nodes; every run uses
 /// `config` (run base dir, scheduling, cancellation, a cost cap the
@@ -158,12 +213,14 @@ pub fn build(
   config: FlowExecutionConfig,
 ) -> Result<WorkflowTools> {
   let runs = Arc::new(RecordedRuns::default());
+  let parent_cost_meter = yanshi_core::run_context::current_cost_meter();
   let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
   let definitions = load_definitions(manifest, skill_dir)?;
   for (entry, (name, definition)) in manifest.workflows.iter().zip(definitions) {
     let flow = build_flow_from_definition(&definition, model)
       .with_context(|| format!("workflow tool '{name}': building {}", entry.path))?;
     let has_deliverable = definition.nodes.iter().any(|node| node.id == "deliverable");
+    let concurrency_safe = is_definition_concurrency_safe(&definition);
     let description = entry
       .description
       .clone()
@@ -173,9 +230,11 @@ pub fn build(
       tool: name.clone(),
       definition,
       config: config.clone(),
+      parent_cost_meter: parent_cost_meter.clone(),
       runs: runs.clone(),
     });
-    let mut tool = WorkflowTool::with_schema(name, description, schema, flow, runner);
+    let mut tool = WorkflowTool::with_schema(name, description, schema, flow, runner)
+      .with_concurrency_safe(concurrency_safe);
     if has_deliverable {
       tool = tool.with_result_output("deliverable", "deliverable");
     }
@@ -251,5 +310,59 @@ nodes:
       .expect_err("file-shaped input");
     assert!(error.to_string().contains("plain JSON value"), "{error}");
     assert!(tools.runs.take().is_empty(), "nothing ran");
+  }
+
+  #[test]
+  fn concurrency_classifier_allows_studio_templates_and_blocks_mutating_nodes() {
+    let safe_yaml = r#"
+name: studio_safe
+nodes:
+  - id: fetch_doc
+    type: http
+    parameters:
+      url: "https://example.org"
+  - id: read_cfg
+    type: file
+    parameters:
+      operation: read
+      path: "./input.md"
+      allowed_paths: ["."]
+  - id: render_items
+    type: map
+    parameters:
+      items: ["a"]
+      template:
+        - id: chart
+          type: render_svg
+          parameters:
+            svg: "<svg/>"
+"#;
+    let safe_def: FlowDefinitionV2 = serde_yaml::from_str(safe_yaml).expect("parse safe");
+    assert!(is_definition_concurrency_safe(&safe_def));
+
+    for (label, unsafe_yaml) in [
+      (
+        "shell",
+        "name: u\nnodes:\n  - id: s\n    type: shell\n    parameters:\n      command: echo hi\n",
+      ),
+      (
+        "file_write",
+        "name: u\nnodes:\n  - id: f\n    type: file\n    parameters:\n      operation: write\n      path: out.txt\n      allowed_paths: [\".\"]\n",
+      ),
+      (
+        "http_post",
+        "name: u\nnodes:\n  - id: h\n    type: http\n    parameters:\n      method: POST\n      url: https://example.org\n",
+      ),
+      (
+        "nested_shell_in_map",
+        "name: u\nnodes:\n  - id: m\n    type: map\n    parameters:\n      items: [\"a\"]\n      template:\n        - id: s\n          type: shell\n          parameters:\n            command: echo hi\n",
+      ),
+    ] {
+      let def: FlowDefinitionV2 = serde_yaml::from_str(unsafe_yaml).expect(label);
+      assert!(
+        !is_definition_concurrency_safe(&def),
+        "expected '{label}' template to be classified non-concurrent"
+      );
+    }
   }
 }

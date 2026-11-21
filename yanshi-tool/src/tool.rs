@@ -377,6 +377,18 @@ pub trait Tool: Send + Sync {
     self.metadata().idempotency
   }
 
+  /// Whether multiple invocations in the same agent turn can safely run in
+  /// parallel across worker threads.
+  ///
+  /// Defaults to `matches!(self.idempotency(params), ToolIdempotency::Idempotent)`.
+  /// Tools that isolate per-call execution state (e.g. `WorkflowTool` running
+  /// in a fresh `run_id` directory or `AgentTool` forking an isolated session)
+  /// may return `true` here while keeping [`ToolIdempotency::Unknown`] so
+  /// production approval escalation and checkpoint replay guards remain intact.
+  fn concurrency_safe(&self, params: &Value) -> bool {
+    matches!(self.idempotency(params), ToolIdempotency::Idempotent)
+  }
+
   /// Y7.2: the call's [`ToolEffect`]. Per call, like
   /// [`Self::idempotency`], so one tool can publish for some parameters
   /// only (a `status: "published"` vs a draft).

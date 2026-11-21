@@ -23,6 +23,11 @@ pub struct WorkflowTool {
   /// Y4.4: `(node_id, output_key)` to return instead of the whole final
   /// state (see [`Self::with_result_output`]).
   result_output: Option<(String, String)>,
+  /// AJ1: whether multiple invocations in a single agent turn can execute in
+  /// parallel (defaults to `true` because each run allocates an isolated
+  /// `run_id` directory; callers wrapping host-mutating templates can disable
+  /// via [`Self::with_concurrency_safe`]).
+  concurrency_safe: bool,
 }
 
 impl WorkflowTool {
@@ -56,6 +61,7 @@ impl WorkflowTool {
       runner,
       timeout: None,
       result_output: None,
+      concurrency_safe: true,
     }
   }
 
@@ -74,6 +80,7 @@ impl WorkflowTool {
       runner,
       timeout: None,
       result_output: None,
+      concurrency_safe: true,
     }
   }
 
@@ -84,6 +91,17 @@ impl WorkflowTool {
 
   pub fn with_timeout_ms(self, timeout_ms: u64) -> Self {
     self.with_timeout(Duration::from_millis(timeout_ms))
+  }
+
+  /// Configure whether multiple calls to this workflow tool in one agent turn
+  /// may run in parallel.
+  pub fn with_concurrency_safe(mut self, concurrency_safe: bool) -> Self {
+    self.concurrency_safe = concurrency_safe;
+    self
+  }
+
+  pub fn is_concurrency_safe(&self) -> bool {
+    self.concurrency_safe
   }
 
   /// Y4.4: return only `node_id`'s `output_key` (e.g. a generator's
@@ -124,6 +142,10 @@ impl Tool for WorkflowTool {
 
   fn metadata(&self) -> ToolMetadata {
     ToolMetadata::workflow()
+  }
+
+  fn concurrency_safe(&self, _params: &Value) -> bool {
+    self.concurrency_safe
   }
 
   async fn execute(&self, params: Value) -> Result<ToolOutput, ToolError> {
@@ -357,5 +379,143 @@ mod tests {
       }
       other => panic!("expected timeout execution failure, got {other:?}"),
     }
+  }
+
+  struct HighWaterNode {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    high_water: Arc<std::sync::atomic::AtomicUsize>,
+  }
+
+  #[async_trait]
+  impl yanshi_core::AsyncNode for HighWaterNode {
+    async fn execute(&self, inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+      let current = self
+        .in_flight
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+      self
+        .high_water
+        .fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+      tokio::time::sleep(Duration::from_millis(80)).await;
+      self
+        .in_flight
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+      let mut outputs = AsyncNodeInputs::new();
+      outputs.insert(
+        "deliverable".to_string(),
+        inputs
+          .get("topic")
+          .cloned()
+          .unwrap_or_else(|| FlowValue::Json(json!("ok"))),
+      );
+      Ok(outputs)
+    }
+  }
+
+  async fn run_three_workflow_tools_batch(
+    concurrency_safe: bool,
+  ) -> (usize, crate::AgentRunResult) {
+    let _guard = crate::LLM_TEST_LOCK.lock().await;
+    use_writable_home();
+    let run_dir =
+      std::env::temp_dir().join(format!("yanshi-wf-batch-runs-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    let model = format!("mock-wf-batch-{}", uuid::Uuid::new_v4());
+    // SAFETY: LLM_TEST_LOCK serializes process-wide mock env mutation.
+    unsafe {
+      std::env::set_var(
+        "YANSHI_MOCK_TOOL_CALLS",
+        serde_json::to_string(&vec![
+          vec![
+            json!({"id": "c1", "name": "wf_report", "arguments": {"topic": "alpha"}}),
+            json!({"id": "c2", "name": "wf_mindmap", "arguments": {"topic": "beta"}}),
+            json!({"id": "c3", "name": "wf_slides", "arguments": {"topic": "gamma"}}),
+          ],
+          Vec::<serde_json::Value>::new(),
+        ])
+        .unwrap(),
+      );
+      std::env::set_var(
+        "YANSHI_MOCK_RESPONSES",
+        serde_json::to_string(&vec![
+          "(unused)",
+          r#"{"thought":"all deliverables ready","answer":"done"}"#,
+        ])
+        .unwrap(),
+      );
+    }
+    let config_yaml = format!(
+      "models:\n  {model}:\n    vendor: mock\n    type: text\n    model_id: {model}\nproviders:\n  mock:\n    api_key_env: MOCK_API_KEY\n"
+    );
+    let cfg_path = run_dir.join("models.yml");
+    std::fs::write(&cfg_path, config_yaml).unwrap();
+    yanshi_llm::Yanshi::init_with_config(cfg_path.to_str().unwrap())
+      .await
+      .unwrap();
+
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let high_water = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runner = Arc::new(yanshi_core::CoreFlowRunner::new(
+      yanshi_core::FlowExecutionConfig::concurrent(4).with_run_base_dir(&run_dir),
+    ));
+
+    let mut registry = yanshi_tool::ToolRegistry::new();
+    for name in ["wf_report", "wf_mindmap", "wf_slides"] {
+      let node = Arc::new(HighWaterNode {
+        in_flight: in_flight.clone(),
+        high_water: high_water.clone(),
+      });
+      let tool = WorkflowTool::new(
+        name,
+        "Studio generator",
+        single_node_flow("deliverable", node),
+        runner.clone(),
+      )
+      .with_result_output("deliverable", "deliverable")
+      .with_concurrency_safe(concurrency_safe);
+      assert_eq!(
+        tool.idempotency(&json!({})),
+        yanshi_tool::ToolIdempotency::Unknown,
+        "replay idempotency must stay Unknown for production approval escalation"
+      );
+      assert_eq!(tool.concurrency_safe(&json!({})), concurrency_safe);
+      registry.register(Arc::new(tool));
+    }
+
+    let mut agent = crate::react::ReActAgent::new(
+      crate::react::ReActConfig::new(&model).with_max_iterations(4),
+      Box::new(yanshi_memory::SessionMemory::default_window()),
+      Arc::new(registry),
+    );
+    let result = agent
+      .run_with_context(crate::AgentContext::new(
+        "s-wf-batch",
+        "generate all",
+        &model,
+      ))
+      .await
+      .unwrap();
+    (high_water.load(std::sync::atomic::Ordering::SeqCst), result)
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn react_agent_runs_workflow_tools_in_parallel_while_keeping_unknown_idempotency() {
+    let (peak, result) = run_three_workflow_tools_batch(true).await;
+    assert_eq!(result.answer.as_deref(), Some("done"));
+    assert!(
+      peak >= 2,
+      "expected >=2 WorkflowTools executing in parallel across Tokio worker tasks, got peak={peak}"
+    );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn react_agent_serializes_workflow_tools_when_concurrency_safe_is_false() {
+    let (peak, result) = run_three_workflow_tools_batch(false).await;
+    assert_eq!(result.answer.as_deref(), Some("done"));
+    assert_eq!(
+      peak, 1,
+      "WorkflowTools with concurrency_safe=false must run strictly one at a time"
+    );
   }
 }

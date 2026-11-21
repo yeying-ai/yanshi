@@ -28,6 +28,10 @@ impl OutputFormat {
   }
 }
 
+/// Default per-workflow node concurrency for local `yanshi skill run` (AJ1),
+/// aligned with the desktop engine and `yanshi workflow run`.
+pub const DEFAULT_SKILL_WORKFLOW_CONCURRENCY: usize = 8;
+
 /// `yanshi skill run` arguments (local mode).
 pub struct RunArgs {
   pub skill_dir: String,
@@ -37,6 +41,7 @@ pub struct RunArgs {
   /// Y4.4: where to copy the `[[workflows]]` tools' files.
   pub output_dir: Option<String>,
   pub run_dir: Option<String>,
+  pub max_concurrency: Option<usize>,
   pub model_override: Option<String>,
   pub memory_override: Option<String>,
   pub session_id: Option<String>,
@@ -69,12 +74,17 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     inputs,
     output_dir,
     run_dir,
+    max_concurrency,
     model_override,
     memory_override,
     session_id,
     trace,
     output,
   } = args;
+  let max_concurrency = max_concurrency.unwrap_or(DEFAULT_SKILL_WORKFLOW_CONCURRENCY);
+  if max_concurrency == 0 {
+    anyhow::bail!("--max-concurrency must be >= 1");
+  }
   let message = compose_message(message, &inputs)?;
   let output = OutputFormat::parse(&output)?;
   let dir = Path::new(&skill_dir);
@@ -125,7 +135,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     &manifest,
     dir,
     Some(resolved_model),
-    yanshi_core::FlowExecutionConfig::serial().with_run_base_dir(&run_base_dir),
+    yanshi_core::FlowExecutionConfig::concurrent(max_concurrency).with_run_base_dir(&run_base_dir),
   )?;
   if !workflow_tools.is_empty() && matches!(output, OutputFormat::Text) {
     println!(

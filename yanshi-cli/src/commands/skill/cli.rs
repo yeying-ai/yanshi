@@ -95,68 +95,7 @@ enum SkillCommands {
   /// `--trace` are rejected in server mode because the wire
   /// contract doesn't accept per-request overrides today
   /// (P10.11.2 follow-up if needed).
-  Run {
-    /// Local mode: path to the skill directory. Server mode (with
-    /// `--server`): skill name resolved via the server's catalog.
-    skill_dir: String,
-    /// The message to send to the agent. Optional when `--input` is
-    /// given (the inputs are then the request).
-    #[arg(short, long)]
-    message: Option<String>,
-    /// `KEY=VALUE` or `KEY VALUE` facts for the agent (e.g. `url=...` or
-    /// `--input want report`), appended to the message. **Local-only.**
-    #[arg(short = 'i', long = "input", num_args = 1..=2, value_names = ["KEY[=VALUE]", "VALUE"])]
-    inputs: Vec<String>,
-    /// Copy the files produced by the skill's `[[workflows]]` tools to
-    /// `<DIR>/<tool>/<node_id>/<file>`. **Local-only.**
-    #[arg(long, value_name = "DIR")]
-    output_dir: Option<String>,
-    /// Run base directory for the skill's `[[workflows]]` tools (default:
-    /// YANSHI_RUN_DIR or ~/.yanshi/runs). **Local-only.**
-    #[arg(long, value_name = "DIR")]
-    run_dir: Option<String>,
-    /// Override the model declared by the skill manifest.
-    /// **Local-only** — incompatible with `--server`.
-    #[arg(long)]
-    model: Option<String>,
-    /// Override memory backend for this run: session, sqlite, or none.
-    /// **Local-only** — incompatible with `--server`.
-    #[arg(long, value_parser = ["session", "sqlite", "none"])]
-    memory: Option<String>,
-    /// Reuse an existing session ID for multi-turn conversations.
-    /// **Local-only** — incompatible with `--server`.
-    #[arg(long, visible_alias = "session-id")]
-    session: Option<String>,
-    /// Print the structured AgentRuntime trace as JSON (text mode only;
-    /// in `--output json` mode the trace is inlined under the `trace`
-    /// key of the response payload instead). **Local-only** — server
-    /// runs emit their trace through the event log; consume it via
-    /// `yanshi workflow logs <run_id>`.
-    #[arg(long)]
-    trace: bool,
-    /// Output format. Local mode: `text` (default — emoji banner +
-    /// `🤖 Agent:`) or `json` (single JSON object). Server mode:
-    /// `text` (final run row pretty-printed) or `json-envelope`
-    /// (canonical `CliJsonEnvelope` wrapping the run row;
-    /// progress goes to stderr). Warnings always go to stderr.
-    #[arg(long, default_value = "text", value_parser = ["text", "json", "json-envelope"])]
-    output: String,
-    /// Dispatch the run to a remote `yanshi serve` instance
-    /// instead of running in-process. Falls back to
-    /// YANSHI_SERVER_URL when omitted; when neither is set the
-    /// CLI runs the skill locally. In server mode the positional
-    /// argument is the skill NAME, not a filesystem path.
-    #[arg(long)]
-    server: Option<String>,
-    /// Bearer token for the remote server (also YANSHI_API_TOKEN).
-    /// Only consulted when --server is set.
-    #[arg(long)]
-    auth_token: Option<String>,
-    /// Tenant id scope for server-mode requests. Defaults to
-    /// YANSHI_TENANT or "default".
-    #[arg(long)]
-    tenant: Option<String>,
-  },
+  Run(Box<SkillRunCliArgs>),
   /// Start an interactive multi-turn chat session with a skill
   Chat {
     /// Path to the skill directory
@@ -193,6 +132,74 @@ enum SkillCommands {
     #[arg(long)]
     smoke: bool,
   },
+}
+
+#[derive(Args)]
+struct SkillRunCliArgs {
+  /// Local mode: path to the skill directory. Server mode (with
+  /// `--server`): skill name resolved via the server's catalog.
+  skill_dir: String,
+  /// The message to send to the agent. Optional when `--input` is
+  /// given (the inputs are then the request).
+  #[arg(short, long)]
+  message: Option<String>,
+  /// `KEY=VALUE` or `KEY VALUE` facts for the agent (e.g. `url=...` or
+  /// `--input want report`), appended to the message. **Local-only.**
+  #[arg(short = 'i', long = "input", num_args = 1..=2, value_names = ["KEY[=VALUE]", "VALUE"])]
+  inputs: Vec<String>,
+  /// Copy the files produced by the skill's `[[workflows]]` tools to
+  /// `<DIR>/<tool>/<node_id>/<file>`. **Local-only.**
+  #[arg(long, value_name = "DIR")]
+  output_dir: Option<String>,
+  /// Run base directory for the skill's `[[workflows]]` tools (default:
+  /// YANSHI_RUN_DIR or ~/.yanshi/runs). **Local-only.**
+  #[arg(long, value_name = "DIR")]
+  run_dir: Option<String>,
+  /// Maximum concurrent nodes inside each `[[workflows]]` tool run
+  /// (default: 8). **Local-only.**
+  #[arg(long, value_name = "N")]
+  max_concurrency: Option<usize>,
+  /// Override the model declared by the skill manifest.
+  /// **Local-only** — incompatible with `--server`.
+  #[arg(long)]
+  model: Option<String>,
+  /// Override memory backend for this run: session, sqlite, or none.
+  /// **Local-only** — incompatible with `--server`.
+  #[arg(long, value_parser = ["session", "sqlite", "none"])]
+  memory: Option<String>,
+  /// Reuse an existing session ID for multi-turn conversations.
+  /// **Local-only** — incompatible with `--server`.
+  #[arg(long, visible_alias = "session-id")]
+  session: Option<String>,
+  /// Print the structured AgentRuntime trace as JSON (text mode only;
+  /// in `--output json` mode the trace is inlined under the `trace`
+  /// key of the response payload instead). **Local-only** — server
+  /// runs emit their trace through the event log; consume it via
+  /// `yanshi workflow logs <run_id>`.
+  #[arg(long)]
+  trace: bool,
+  /// Output format. Local mode: `text` (default — emoji banner +
+  /// `🤖 Agent:`) or `json` (single JSON object). Server mode:
+  /// `text` (final run row pretty-printed) or `json-envelope`
+  /// (canonical `CliJsonEnvelope` wrapping the run row;
+  /// progress goes to stderr). Warnings always go to stderr.
+  #[arg(long, default_value = "text", value_parser = ["text", "json", "json-envelope"])]
+  output: String,
+  /// Dispatch the run to a remote `yanshi serve` instance
+  /// instead of running in-process. Falls back to
+  /// YANSHI_SERVER_URL when omitted; when neither is set the
+  /// CLI runs the skill locally. In server mode the positional
+  /// argument is the skill NAME, not a filesystem path.
+  #[arg(long)]
+  server: Option<String>,
+  /// Bearer token for the remote server (also YANSHI_API_TOKEN).
+  /// Only consulted when --server is set.
+  #[arg(long)]
+  auth_token: Option<String>,
+  /// Tenant id scope for server-mode requests. Defaults to
+  /// YANSHI_TENANT or "default".
+  #[arg(long)]
+  tenant: Option<String>,
 }
 
 #[derive(Args)]
@@ -313,81 +320,90 @@ pub async fn dispatch(args: SkillArgs) -> anyhow::Result<()> {
       )
       .await
     }
-    SkillCommands::Run {
-      skill_dir,
-      message,
-      inputs,
-      output_dir,
-      run_dir,
-      model,
-      memory,
-      session,
-      trace,
-      output,
-      server,
-      auth_token,
-      tenant,
-    } => match crate::server_client::resolve_server_url(server.as_deref()) {
-      Some(server_url) => {
-        // Reject local-only flags (including the local-only `json`
-        // output value) BEFORE any HTTP call.
-        let validation = server_ops::reject_local_only_flags(
-          model.as_deref(),
-          memory.as_deref(),
-          session.as_deref(),
-          trace,
-          &output,
-        );
-        let validation = validation.and_then(|()| {
-          if !inputs.is_empty() || output_dir.is_some() || run_dir.is_some() {
-            anyhow::bail!(
-              "--input / --output-dir / --run-dir are local-only; drop them with --server"
-            )
-          }
-          message
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--message is required with --server"))
-        });
-        match validation {
-          Ok(message) => {
-            server_ops::run_via_server(
-              &server_url,
-              auth_token.as_deref(),
-              tenant.as_deref(),
-              &skill_dir,
-              &message,
-              &output,
-            )
-            .await
-          }
-          Err(err) => Err(err),
-        }
-      }
-      None => {
-        // Local mode: server-only flags being set is a soft
-        // misconfiguration — the user probably intended to set
-        // YANSHI_SERVER_URL too. Warn but don't bail; local
-        // mode is the fallback.
-        if auth_token.is_some() || tenant.is_some() {
-          eprintln!(
-            "⚠  --auth-token / --tenant ignored: --server (or YANSHI_SERVER_URL) is not set"
+    SkillCommands::Run(run_args) => {
+      let SkillRunCliArgs {
+        skill_dir,
+        message,
+        inputs,
+        output_dir,
+        run_dir,
+        max_concurrency,
+        model,
+        memory,
+        session,
+        trace,
+        output,
+        server,
+        auth_token,
+        tenant,
+      } = *run_args;
+      match crate::server_client::resolve_server_url(server.as_deref()) {
+        Some(server_url) => {
+          // Reject local-only flags (including the local-only `json`
+          // output value) BEFORE any HTTP call.
+          let validation = server_ops::reject_local_only_flags(
+            model.as_deref(),
+            memory.as_deref(),
+            session.as_deref(),
+            trace,
+            &output,
           );
+          let validation = validation.and_then(|()| {
+            if !inputs.is_empty()
+              || output_dir.is_some()
+              || run_dir.is_some()
+              || max_concurrency.is_some()
+            {
+              anyhow::bail!(
+                "--input / --output-dir / --run-dir / --max-concurrency are local-only; drop them with --server"
+              )
+            }
+            message
+              .clone()
+              .ok_or_else(|| anyhow::anyhow!("--message is required with --server"))
+          });
+          match validation {
+            Ok(message) => {
+              server_ops::run_via_server(
+                &server_url,
+                auth_token.as_deref(),
+                tenant.as_deref(),
+                &skill_dir,
+                &message,
+                &output,
+              )
+              .await
+            }
+            Err(err) => Err(err),
+          }
         }
-        run::execute(run::RunArgs {
-          skill_dir,
-          message,
-          inputs,
-          output_dir,
-          run_dir,
-          model_override: model,
-          memory_override: memory,
-          session_id: session,
-          trace,
-          output,
-        })
-        .await
+        None => {
+          // Local mode: server-only flags being set is a soft
+          // misconfiguration — the user probably intended to set
+          // YANSHI_SERVER_URL too. Warn but don't bail; local
+          // mode is the fallback.
+          if auth_token.is_some() || tenant.is_some() {
+            eprintln!(
+              "⚠  --auth-token / --tenant ignored: --server (or YANSHI_SERVER_URL) is not set"
+            );
+          }
+          run::execute(run::RunArgs {
+            skill_dir,
+            message,
+            inputs,
+            output_dir,
+            run_dir,
+            max_concurrency,
+            model_override: model,
+            memory_override: memory,
+            session_id: session,
+            trace,
+            output,
+          })
+          .await
+        }
       }
-    },
+    }
     SkillCommands::Chat {
       skill_dir,
       model,

@@ -458,6 +458,10 @@ impl Tool for HookedTool {
     self.inner.idempotency(params)
   }
 
+  fn concurrency_safe(&self, params: &serde_json::Value) -> bool {
+    self.inner.concurrency_safe(params)
+  }
+
   fn effect(&self, params: &serde_json::Value) -> ToolEffect {
     self.inner.effect(params)
   }

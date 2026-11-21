@@ -25,7 +25,7 @@ struct PreparedToolCall {
   tool: String,
   params: Value,
   call_step_idx: usize,
-  idempotency: ToolIdempotency,
+  concurrency_safe: bool,
   source: Option<String>,
   permissions: Vec<String>,
 }
@@ -126,6 +126,9 @@ impl ReActAgent {
         .tools
         .tool_idempotency(&call.name, &call.arguments)
         .unwrap_or(ToolIdempotency::Unknown);
+      let concurrency_safe = self
+        .tools
+        .tool_concurrency_safe(&call.name, &call.arguments);
       let (source, permissions) = tool_event_metadata(metadata.as_ref());
       let trace_params = annotate_tool_params_for_resume(call.arguments.clone(), Some(idempotency));
       let call_step_idx = *step_index;
@@ -198,40 +201,63 @@ impl ReActAgent {
         tool: call.name.clone(),
         params: call.arguments.clone(),
         call_step_idx,
-        idempotency,
+        concurrency_safe,
         source,
         permissions,
       });
     }
 
-    // 5. Partition by idempotency. Idempotent → concurrent group.
-    //    Non-idempotent / Unknown → serial group, evaluated in LLM
-    //    order. The harness `HookedTool` wrapper is responsible for
-    //    approval gating; the agent only worries about safety
-    //    relative to repeating the call.
-    let concurrent_idxs: Vec<usize> = (0..n)
-      .filter(|&i| matches!(prepared[i].idempotency, ToolIdempotency::Idempotent))
-      .collect();
-    let serial_idxs: Vec<usize> = (0..n)
-      .filter(|&i| !matches!(prepared[i].idempotency, ToolIdempotency::Idempotent))
-      .collect();
+    // 5. Partition by concurrency safety (AJ1). Concurrency-safe calls
+    //    (idempotent tools, isolated WorkflowTools, isolated AgentTools)
+    //    are spawned onto Tokio's worker pool in parallel with Drop-Abort
+    //    guards; non-concurrent calls run serially in LLM order. Replay
+    //    idempotency remains unchanged for trace resume annotations and
+    //    production `HookedTool` approval escalation.
+    let concurrent_idxs: Vec<usize> = (0..n).filter(|&i| prepared[i].concurrency_safe).collect();
+    let serial_idxs: Vec<usize> = (0..n).filter(|&i| !prepared[i].concurrency_safe).collect();
 
     let mut outputs: Vec<Option<(yanshi_tool::ToolOutput, u64)>> = (0..n).map(|_| None).collect();
 
-    // 5a. Concurrent group.
+    // 5a. Concurrent group — spawned as independent Tokio tasks so multi-core
+    //     CPU work (e.g. pure-Rust Studio rendering inside WorkflowTools) runs
+    //     in true parallel alongside async I/O, while AbortOnDropHandle aborts
+    //     in-flight tasks immediately on outer timeout or cancellation.
     if !concurrent_idxs.is_empty() {
-      let mut futs = Vec::with_capacity(concurrent_idxs.len());
+      let trace_ctx = yanshi_llm::trace_context::current();
+      let mut handles = Vec::with_capacity(concurrent_idxs.len());
       for &i in &concurrent_idxs {
         let tools = self.tools.clone();
         let tool = prepared[i].tool.clone();
         let params = prepared[i].params.clone();
+        let trace_ctx = trace_ctx.clone();
         let started = Instant::now();
-        futs.push(async move {
-          let result = tools.execute(&tool, params).await;
-          (i, result, started.elapsed().as_millis() as u64)
+        let task = tokio::spawn(async move {
+          let fut = async move {
+            let result = tools.execute(&tool, params).await;
+            (i, result, started.elapsed().as_millis() as u64)
+          };
+          match trace_ctx {
+            Some(ctx) => yanshi_llm::trace_context::scope(ctx, fut).await,
+            None => fut.await,
+          }
         });
+        handles.push((i, started, tokio_util::task::AbortOnDropHandle::new(task)));
       }
-      let batch_fut = futures::future::join_all(futs);
+      let batch_fut = async move {
+        futures::future::join_all(handles.into_iter().map(|(i, started, handle)| async move {
+          match handle.await {
+            Ok(outcome) => outcome,
+            Err(join_err) => (
+              i,
+              Err(yanshi_tool::ToolError::ExecutionFailed {
+                message: format!("parallel tool task failed: {join_err}"),
+              }),
+              started.elapsed().as_millis() as u64,
+            ),
+          }
+        }))
+        .await
+      };
 
       let timeout = remaining_timeout(run_started_at, timeout_ms);
       let cancel = cancellation_token.as_ref().map(|token| token.cancelled());
