@@ -5,5 +5,6 @@ pub mod dynamic;
 pub mod resume;
 pub mod resume_plan;
 pub mod run;
+pub mod run_batch;
 pub mod server_ops;
 pub mod validate;

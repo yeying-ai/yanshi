@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 
-use super::{debug, dynamic, resume, resume_plan, run, server_ops, validate};
+use super::{debug, dynamic, resume, resume_plan, run, run_batch, server_ops, validate};
 
 /// AJ3: default execution mode and node concurrency for `yanshi workflow run`,
 /// aligned with the desktop local engine (`local_engine.rs`) and `yanshi serve`.
@@ -74,6 +74,9 @@ enum WorkflowCommands {
     #[arg(long, default_value = "text", value_parser = ["text", "json-envelope"])]
     format: String,
   },
+  /// Run multiple workflows or a per-job input matrix in parallel locally (no DB/server needed).
+  #[command(name = "run-batch")]
+  RunBatch(Box<run_batch::RunBatchCliArgs>),
   /// List recent workflow runs from a remote server. Requires --server.
   List {
     #[arg(long)]
@@ -619,6 +622,7 @@ pub async fn dispatch(args: WorkflowArgs) -> anyhow::Result<()> {
       )
       .await
     }
+    WorkflowCommands::RunBatch(batch_args) => run_batch::execute(*batch_args).await,
   }
 }
 

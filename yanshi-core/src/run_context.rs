@@ -145,6 +145,7 @@ tokio::task_local! {
 pub struct CostMeter {
   usd: std::sync::Mutex<f64>,
   parent: Option<std::sync::Arc<CostMeter>>,
+  limit_usd: Option<f64>,
   limit_reported: std::sync::atomic::AtomicBool,
 }
 
@@ -152,6 +153,36 @@ impl CostMeter {
   /// A top-level meter (a run with no enclosing node).
   pub fn root() -> std::sync::Arc<Self> {
     std::sync::Arc::new(Self::default())
+  }
+
+  /// A top-level meter with an optional shared USD spend cap enforced across
+  /// every child flow and node attached beneath it (AJ4).
+  pub fn root_with_limit(limit_usd: Option<f64>) -> std::sync::Arc<Self> {
+    std::sync::Arc::new(Self {
+      limit_usd: limit_usd.filter(|v| v.is_finite() && *v > 0.0),
+      ..Self::default()
+    })
+  }
+
+  /// Configured USD cap on this meter, if any.
+  pub fn limit_usd(&self) -> Option<f64> {
+    self.limit_usd
+  }
+
+  /// Walk `self` and every ancestor meter; return `Some((spent_usd, limit_usd))`
+  /// for the first meter whose recorded spend exceeds its configured cap.
+  pub fn exceeded_limit(&self) -> Option<(f64, f64)> {
+    let mut meter = Some(self);
+    while let Some(current) = meter {
+      if let Some(limit_usd) = current.limit_usd {
+        let spent_usd = current.total();
+        if spent_usd > limit_usd {
+          return Some((spent_usd, limit_usd));
+        }
+      }
+      meter = current.parent.as_deref();
+    }
+    None
   }
 
   /// A meter whose spend also counts toward `parent`.

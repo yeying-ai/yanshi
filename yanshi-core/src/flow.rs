@@ -1428,12 +1428,15 @@ impl<'f> FlowExecutor<'f> {
     inputs: &AsyncNodeInputs,
     config: &FlowExecutionConfig,
   ) -> AsyncNodeResult {
-    // Y2.3: refuse to start once the run has overspent, and give the
-    // node its own meter (a child of the run's) so its cost is known.
+    // Y2.3 / AJ4: refuse to start once this run or any enclosing shared
+    // CostMeter pool has overspent, and give the node its own child meter.
     let run_meter = crate::run_context::current_cost_meter();
-    if let (Some(limit_usd), Some(meter)) = (config.cost_limit_usd, run_meter.as_ref()) {
-      let spent_usd = meter.total();
-      if spent_usd > limit_usd {
+    if let Some(meter) = run_meter.as_ref() {
+      let local_breach = config.cost_limit_usd.and_then(|limit_usd| {
+        let spent_usd = meter.total();
+        (spent_usd > limit_usd).then_some((spent_usd, limit_usd))
+      });
+      if let Some((spent_usd, limit_usd)) = local_breach.or_else(|| meter.exceeded_limit()) {
         if meter.claim_limit_report() {
           self.emit_event(WorkflowEvent::CostLimitExceeded {
             workflow_id: run_id.to_string(),
@@ -6158,6 +6161,98 @@ mod tests {
       "the node after the Map must be refused: {:?}",
       state.get("after")
     );
+  }
+
+  /// AJ4: multiple independent workflows sharing an enclosing
+  /// `CostMeter::root_with_limit` pool enforce the combined cap in real time.
+  #[tokio::test]
+  async fn shared_root_cost_meter_enforces_cross_workflow_budget_pool() {
+    use_writable_home();
+
+    struct SpendNode(f64);
+    #[async_trait]
+    impl AsyncNode for SpendNode {
+      async fn execute(&self, _inputs: &AsyncNodeInputs) -> AsyncNodeResult {
+        crate::run_context::record_cost_usd(self.0);
+        Ok(HashMap::from([(
+          "ok".to_string(),
+          FlowValue::Json(json!(true)),
+        )]))
+      }
+    }
+
+    let make_two_step_flow = || {
+      Flow::new(vec![
+        GraphNode {
+          id: "step1".to_string(),
+          node_type: NodeType::Standard(Arc::new(SpendNode(0.02))),
+          dependencies: vec![],
+          input_mapping: None,
+          run_if: None,
+          initial_inputs: HashMap::new(),
+        },
+        GraphNode {
+          id: "step2".to_string(),
+          node_type: NodeType::Standard(Arc::new(SpendNode(0.02))),
+          dependencies: vec!["step1".to_string()],
+          input_mapping: None,
+          run_if: None,
+          initial_inputs: HashMap::new(),
+        },
+      ])
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    // Tight shared pool ($0.05 < $0.08 needed for both 2-step flows):
+    let tight_pool = crate::run_context::CostMeter::root_with_limit(Some(0.05));
+    let s1 = crate::run_context::with_cost_meter(
+      Some(tight_pool.clone()),
+      make_two_step_flow().execute_from_inputs_with_config(
+        HashMap::new(),
+        FlowExecutionConfig::serial().with_run_base_dir(temp_dir.path()),
+      ),
+    )
+    .await
+    .unwrap();
+    assert!(s1["step2"].is_ok(), "first workflow spends $0.04 <= $0.05");
+
+    let s2 = crate::run_context::with_cost_meter(
+      Some(tight_pool.clone()),
+      make_two_step_flow().execute_from_inputs_with_config(
+        HashMap::new(),
+        FlowExecutionConfig::serial().with_run_base_dir(temp_dir.path()),
+      ),
+    )
+    .await
+    .unwrap();
+    assert!(
+      s2["step1"].is_ok(),
+      "second workflow step1 starts at $0.04 <= $0.05 and pushes pool to $0.06"
+    );
+    assert!(
+      matches!(
+        s2.get("step2"),
+        Some(Err(YanshiError::CostLimitExceeded { limit_usd, .. })) if (*limit_usd - 0.05).abs() < 1e-9
+      ),
+      "second workflow step2 must trip shared $0.05 pool, got {:?}",
+      s2.get("step2")
+    );
+
+    // Generous shared pool ($0.10 >= $0.08): both workflows complete cleanly.
+    let generous_pool = crate::run_context::CostMeter::root_with_limit(Some(0.10));
+    for _ in 0..2 {
+      let state = crate::run_context::with_cost_meter(
+        Some(generous_pool.clone()),
+        make_two_step_flow().execute_from_inputs_with_config(
+          HashMap::new(),
+          FlowExecutionConfig::serial().with_run_base_dir(temp_dir.path()),
+        ),
+      )
+      .await
+      .unwrap();
+      assert!(state["step2"].is_ok());
+    }
+    assert!((generous_pool.total() - 0.08).abs() < 1e-9);
   }
 
   /// Y1.1: every node sees its run's directory as the artifact root,

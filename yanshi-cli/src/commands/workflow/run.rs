@@ -289,7 +289,7 @@ fn resolve_trace_dir() -> Result<Option<PathBuf>> {
   Ok(dirs::home_dir().map(|h| h.join(".yanshi").join("traces")))
 }
 
-fn parse_inputs(input: Vec<(String, String)>) -> Result<AsyncNodeInputs> {
+pub(super) fn parse_inputs(input: Vec<(String, String)>) -> Result<AsyncNodeInputs> {
   let mut inputs = AsyncNodeInputs::new();
   for (key, raw_value) in input {
     if key.trim().is_empty() {

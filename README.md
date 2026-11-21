@@ -180,6 +180,8 @@ nodes:
 ```bash
 yanshi workflow validate workflow_v2.yml --strict
 yanshi workflow run workflow_v2.yml --output-dir out/brief
+# Run multiple workflows or an input matrix in parallel locally with a shared USD budget:
+yanshi workflow run-batch wf1.yml wf2.yml --max-parallel 4 --cost-limit-usd 2.00 --output-dir out/batch
 ```
 
 ### 💻 Code-First (Rust Core SDK)

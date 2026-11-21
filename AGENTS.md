@@ -181,7 +181,11 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-21 (synced with Content Studio Y0–Y10 & Z–AI closure,
+**Last Updated**: 2026-11-21 (synced with Content Studio Y0–Y10 & Z–AJ closure,
+single-machine multi-core parallel `WorkflowTool`/`Skill`/`AgentNode`/`AgentTool`
+execution via `Tool::concurrency_safe` & `ReActAgent::fork_isolated`, default
+`concurrent` (`8`) DAG scheduling across CLI/Server/Desktop, shared `CostMeter`
+ancestor budget pool + `yanshi workflow run-batch` local batch runner,
 19-template Studio catalogue incl. `data_table` & multi-paradigm creative/deliberative
 studios, DeepSeek `deepseek-flash` Vision + native `/v1/tools/{tts,asr,search,fetch,ocr}`,
 24-route Notebook contract incl. persistent `messages`, portable

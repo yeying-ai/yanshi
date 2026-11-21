@@ -524,6 +524,22 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Single-machine multi-core parallel agent workflows, unified `concurrent` (`8`) DAG scheduling, shared `CostMeter` budget pools, and `yanshi workflow run-batch` (Track AJ).**
+  Added `Tool::concurrency_safe` + `ToolRegistry::tool_concurrency_safe` (forwarded
+  through `HookedTool`) so per-call-isolated `WorkflowTool` and `AgentTool` calls
+  run in parallel across Tokio worker tasks (`tokio::spawn` + `AbortOnDropHandle` +
+  `LlmTraceContext` propagation) while preserving `ToolIdempotency::Unknown` for
+  Production approval escalation and checkpoint replay guards; added recursive
+  template node classification in `skill_workflows::build` and `--max-concurrency`
+  (default `8`) on `yanshi skill run`; upgraded `ReActAgent.memory` to
+  `Arc<dyn MemoryStore>` with `fork_isolated()` so `AgentNode::from_agent` and
+  `AgentTool::new` isolate sessions and run lock-free across `Map(parallel: true)`
+  and multi-agent `Supervisor` turns (with `.with_shared_session()` opt-in);
+  unified `yanshi workflow run` and `yanshi-server` `DEFAULT_RUN_MAX_CONCURRENCY`
+  defaults to `concurrent` (`8`); added `CostMeter::root_with_limit` ancestor-chain
+  spend caps and `yanshi workflow run-batch` (direct multi-file + `--manifest`
+  matrix modes, `--max-parallel`, `--cost-limit-usd`, `--fail-fast`, and
+  `<output-dir>/<job>/` + `batch_summary.json`).
 - **DeepSeek `deepseek-flash` Vision, native `/v1/tools/{tts,asr,search,fetch,ocr}` integration, and Notebook image/scanned-PDF OCR ingestion (`462f452`, `8034606`, `6bff20b`, `4574d20`).**
   Registered `deepseek-flash` (`DeepSeek-V4.1-Flash`, 1M context window, `text` +
   `image` input modalities), `deepseek-tts`, and `deepseek-asr` in `deepseek.yml`

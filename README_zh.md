@@ -180,6 +180,8 @@ nodes:
 ```bash
 yanshi workflow validate workflow_v2.yml --strict
 yanshi workflow run workflow_v2.yml --output-dir out/brief
+# 单机零依赖并行批跑多条工作流或 --manifest 输入矩阵（共享实时总预算池熔断）：
+yanshi workflow run-batch wf1.yml wf2.yml --max-parallel 4 --cost-limit-usd 2.00 --output-dir out/batch
 ```
 
 ### 💻 代码优先（Rust Core SDK）

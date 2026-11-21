@@ -1,7 +1,7 @@
 # Current Project Status
 
 Last updated: 2026-11-21 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-**AC**, **AD**, **AE**, **AF**, **AG**, **AH**, and **AI** closed, plus the daily productivity, keynote & multi-paradigm creative
+**AC**, **AD**, **AE**, **AF**, **AG**, **AH**, **AI**, and **AJ** closed, including single-machine multi-core parallel `WorkflowTool` / `Skill` / `AgentNode` / `AgentTool` execution, unified `concurrent` (`8`) DAG scheduling across CLI / Server / Desktop, shared `CostMeter` ancestor budget pool + zero-DB `yanshi workflow run-batch`, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
