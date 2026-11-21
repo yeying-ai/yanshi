@@ -99,7 +99,7 @@ yanshi workflow run examples/generators/tech_slides_video.yml \
   --input topic "Rust 零拷贝序列化设计" \
   --output-dir out/video
 
-# 5. 多源笔记本 CLI（支持 .pdf/.docx/.xlsx/.pptx/.csv 摄取、多轮源接地追问、AI 规划批量生成与可移植导出）
+# 5. 多源笔记本 CLI（支持 .pdf/.docx/.xlsx/.pptx/.csv/.png/.jpg 摄取、多轮源接地追问、AI 规划批量生成与可移植导出）
 yanshi notebook create "海洋动力学调研"
 yanshi notebook add-source <notebook_id> --file metrics.xlsx --wait
 yanshi notebook ask <notebook_id> "对比主要强潮河口的峰值潮差" --history-file chat.json

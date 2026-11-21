@@ -1,7 +1,7 @@
 # Current Project Status
 
-Last updated: 2026-11-19 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
-**AC**, **AD**, **AE**, **AF**, **AG**, and **AH** closed, plus the daily productivity, keynote & multi-paradigm creative
+Last updated: 2026-11-21 (Content Studio track **Y0–Y10**, **Z**, **AA**, **AB**,
+**AC**, **AD**, **AE**, **AF**, **AG**, **AH**, and **AI** closed, plus the daily productivity, keynote & multi-paradigm creative
 studio suites — native pure-Rust OOXML `.pptx` writer, `16:9` widescreen Typst
 `.pdf` export, art-directed `illustration` node, 19 Studio catalogue workflows
 including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
@@ -14,7 +14,7 @@ including `data_table`, `episodic_drama_studio`, `debate_podcast_show`, and
 `arxiv.org`/`openreview.net`/`github.com` & `.srt`/`.vtt` ingestion, per-source
 passage reader (`GET /v1/notebooks/{id}/sources/{source_id}/chunks`), portable
 Notebook bundle export/import with 100% `deliverables` restoration & one-click
-`artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` source ingestion,
+`artifacts.zip` archive, pure-Rust `.docx`/`.xlsx`/`.pptx`/`.csv` + DeepSeek OCR `.png`/`.jpg`/`.webp`/`.gif` & scanned-PDF source ingestion,
 interactive UI flashcards/quiz/sortable-table/audio-transcript/video-storyboard
 viewers, first-class `yanshi notebook` CLI, 24-route 1:1 Tauri desktop
 Notebook engine parity, and Pingora production gateway; see `RoadMap.md` and `TODOs.md`)

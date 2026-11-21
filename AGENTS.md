@@ -181,12 +181,13 @@ what's active vs. closed.
 
 ---
 
-**Last Updated**: 2026-11-19 (synced with Content Studio Y0–Y10 & Z–AH closure,
+**Last Updated**: 2026-11-21 (synced with Content Studio Y0–Y10 & Z–AI closure,
 19-template Studio catalogue incl. `data_table` & multi-paradigm creative/deliberative
-studios, 24-route Notebook contract incl. persistent `messages`, portable
+studios, DeepSeek `deepseek-flash` Vision + native `/v1/tools/{tts,asr,search,fetch,ocr}`,
+24-route Notebook contract incl. persistent `messages`, portable
 `deliverables` restoration on `import`, `POST /v1/notebooks/{id}/artifacts` (`attach-run`),
 lossless `raw_text` source `PATCH` rename/note re-chunking & `:retry`, smart
-`arxiv.org`/`openreview.net`/`github.com` & `.srt`/`.vtt` ingestion,
+`arxiv.org`/`openreview.net`/`github.com` & `.srt`/`.vtt` + `.png`/`.jpg`/`.webp`/`.gif` OCR ingestion,
 `sources/{id}/chunks` passage reader, `plan` + `generate-batch`, `artifacts.zip`,
 `generate.cost_limit_usd`, `source_ids` scoping & multi-turn grounded
 `POST /v1/notebooks/{id}/ask`, interactive UI flashcards/quiz/sortable-table/audio-transcript/video-storyboard

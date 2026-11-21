@@ -2,7 +2,7 @@
 //!
 //! DeepSeek exposes TTS and ASR under `/v1/tools/*` using the same
 //! `DEEPSEEK_API_KEY` as chat completions. Because the chat registry entry
-//! defaults `base_url` to `https://api.deepseek.com/v1`, [`deepseek_tools_url`]
+//! defaults `base_url` to `https://api.deepseek.com/v1`, `deepseek_tools_url`
 //! normalizes both `https://api.deepseek.com` and `https://api.deepseek.com/v1`
 //! onto `{root}/v1/tools/{op}`.
 

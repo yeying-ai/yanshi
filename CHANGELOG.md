@@ -168,6 +168,15 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **DeepSeek V4.1 Chat Completions wire alignment: top-level `reasoning_effort`, `deepseek-flash` JSON auto-disable, and forced `tool_choice` thinking guard (`462f452`).**
+  `OpenAIProvider::build_request_body` now emits `thinking: {"type": "enabled" | "disabled"}`
+  alongside a top-level `reasoning_effort` (`"none" | "low" | "high" | "max"`)
+  per DeepSeek's updated Chat Completions schema, extends structured `json_object`
+  thinking auto-disable to `deepseek-flash*`, and actively sets
+  `thinking: {"type": "disabled"}` whenever `ToolChoice::Required` or
+  `ToolChoice::Tool { .. }` is requested so forced tool calls no longer fail with
+  HTTP `400` under DeepSeek's default-on thinking mode. Legacy `deepseek-v4-flash`
+  aliases seamlessly to `model_id: deepseek-flash`.
 - **Multi-system prompt preservation, streaming `usage` billing & modality pricing, Studio `FigureNode` `inputs.source` collision fix, Harness `0018` limit persistence, CLI `resume`/`export`/`backup`, and Web UI/lint parity (`06b4017`, `f00eee6`, `9e15624`, `e06b034`).**
   Anthropic and Google chat providers now concatenate multiple `role == "system"`
   messages instead of overwriting earlier persona/tool instructions; streaming
@@ -515,6 +524,19 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **DeepSeek `deepseek-flash` Vision, native `/v1/tools/{tts,asr,search,fetch,ocr}` integration, and Notebook image/scanned-PDF OCR ingestion (`462f452`, `8034606`, `6bff20b`, `4574d20`).**
+  Registered `deepseek-flash` (`DeepSeek-V4.1-Flash`, 1M context window, `text` +
+  `image` input modalities), `deepseek-tts`, and `deepseek-asr` in `deepseek.yml`
+  and `config/pricing.prod.yml`; implemented `DeepSeekMediaProvider` (`POST /v1/tools/tts`
+  with `stella`/`tide` voice mapping and WAV/PCM normalization + `POST /v1/tools/asr`
+  with `duration_ms` propagation into `ASRNode`); added `yanshi_tools::builtin::deepseek_tools`
+  (`POST /v1/tools/fetch` with SSRF target validation and `POST /v1/tools/ocr`
+  page-ordered recognition), `WebSearchTool` `provider: "deepseek"` (`POST /v1/tools/search`
+  with 128-char Unicode query capping and `auto` mode discovery when `DEEPSEEK_API_KEY`
+  is set), and `PdfExtractNode` scanned-PDF OCR fallback; and added 1:1 `.png` /
+  `.jpg` / `.jpeg` / `.webp` / `.gif` image OCR source ingestion, scanned-PDF OCR
+  fallback, and SPA URL `fetch` fallback across `yanshi-server`, Tauri `local_notebooks.rs`,
+  `yanshi notebook add-source --file`, and `/ui/notebooks`.
 - **Portable Notebook `deliverables` import restoration, 24th Notebook route (`POST /v1/notebooks/{id}/artifacts` / `attach-run`), `.srt`/`.vtt` & OpenReview/arXiv-HTML ingestion, interactive audio/video viewers, and CI `dist/`/`gateway-check` gates (`3afc74f`, `d92912e`, `2cad1e9`).**
   `POST /v1/notebooks/import` (on both `yanshi-server` and Tauri `local_notebooks.rs`)
   now restores exported `deliverables` with recursive `<old_chunk_id>` →

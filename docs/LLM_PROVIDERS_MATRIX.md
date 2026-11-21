@@ -26,7 +26,7 @@ field on `ProviderRequest` fails CI until this section is updated.**
 | `parameters` | `HashMap<String, Value>` | ✅ | Free-form provider passthrough (temperature, top_p, max_tokens, custom flags). Adapters whitelist and rename as needed; unknown keys are ignored. |
 | `tools` | `Option<Vec<ToolSpec>>` | – | Native tool / function-calling specification. `None` skips tool wiring entirely. |
 | `tool_choice` | `Option<ToolChoice>` | – | Selection strategy used together with `tools`. See the [`ToolChoice` table](#toolchoice-modes). |
-| `thinking` | `Option<ThinkingConfig>` | – | Extended-reasoning ("thinking") configuration. Travels as a typed field so Anthropic/Google whitelists don't drop it. Adapters map to native shapes: Anthropic `thinking: { type: "adaptive" }` + `output_config.effort` (Haiku 4.5 and older: `thinking: { budget_tokens }`; chosen by model name), OpenAI `reasoning_effort`, Google `generationConfig.thinkingConfig.thinkingBudget` (plus `includeThoughts: true`, whose `thought: true` parts become `thinking` instead of answer text), DeepSeek V4 (`deepseek-v4-*`, model-name-dispatched inside `OpenAIProvider`) a *nested* `thinking: { type, reasoning_effort }` block that — unlike OpenAI — defaults to enabled, so `Disabled` actively sends `type: "disabled"` rather than omitting the field; StepFun `reasoning_effort` (low/medium/high). Reasoning text comes back in `ProviderResponse.thinking`; when streaming, each `StreamChunk.thinking` carries the delta (Anthropic `thinking_delta`, OpenAI-compatible `reasoning_content` / `reasoning`, Moonshot and StepFun likewise, Gemini `thought: true` parts) and `collect_streaming_response` joins them into `LLMResponse.thinking`. `None` disables. |
+| `thinking` | `Option<ThinkingConfig>` | – | Extended-reasoning ("thinking") configuration. Travels as a typed field so Anthropic/Google whitelists don't drop it. Adapters map to native shapes: Anthropic `thinking: { type: "adaptive" }` + `output_config.effort` (Haiku 4.5 and older: `thinking: { budget_tokens }`; chosen by model name), OpenAI `reasoning_effort`, Google `generationConfig.thinkingConfig.thinkingBudget` (plus `includeThoughts: true`, whose `thought: true` parts become `thinking` instead of answer text), DeepSeek V4 / V4.1 (`deepseek-flash` / `deepseek-v4-pro`, model-name-dispatched inside `OpenAIProvider`) `thinking: { type: "enabled" \| "disabled" }` paired with top-level `reasoning_effort` (`"low" \| "high" \| "max"`) — unlike OpenAI, thinking defaults to enabled (`high`), so `Disabled`, structured `json_object`, and forced `tool_choice` (`Required` / `Tool`) actively send `type: "disabled"` rather than omitting the field; StepFun `reasoning_effort` (low/medium/high). Reasoning text comes back in `ProviderResponse.thinking`; when streaming, each `StreamChunk.thinking` carries the delta (Anthropic `thinking_delta`, OpenAI-compatible `reasoning_content` / `reasoning`, Moonshot and StepFun likewise, Gemini `thought: true` parts) and `collect_streaming_response` joins them into `LLMResponse.thinking`. `None` disables. |
 | `response_format` | `Option<ResponseFormat>` | – | Structured-output constraint (V2.1). Travels as a typed field for the same reason `thinking` does — Anthropic/Google whitelists would otherwise silently drop it. OpenAI/Moonshot/StepFun map it to the native `response_format` field unconditionally (works alongside `tools`). Anthropic sends `JsonSchema` as `output_config.format` (structured outputs, Claude 4.5 and later; `additionalProperties: false` is filled in on objects that leave it out), which works when streaming and alongside `tools`. Claude 3.x / 4.0 / 4.1 keep the older emulation: when no `tools` are requested and the call isn't streaming, a single forced synthetic tool call whose `input_schema` is the requested schema, unwrapped back into plain-text content. Forced `tool_choice` (`Required` / `Tool`) is refused up front on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1, which answer it with a 400. Google maps it to `generationConfig.responseMimeType` + `.responseSchema`, also only when no `tools` are requested. When real `tools` are present, Google (and pre-4.5 Claude) skip native wiring and fall back to prompt-only constraint (forcing a tool choice, or an unverified schema+tools combination, would break the caller's own tool-calling turn). `None` leaves output format unconstrained. |
 
 ## ToolChoice modes
@@ -76,17 +76,17 @@ show the selected config path/source and redact credential values.
 
 ## Capability matrix
 
-| Capability | OpenAI | Anthropic | Google | Moonshot | StepFun | GLM | Mock |
-| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| Text completion | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Token usage in response | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
-| Streaming | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Native tool calling (`tool_calls` / `tool_use` / `functionCall`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (injection) |
-| Multimodal text + image (URL or base64) | ✅ | ✅ | ✅ | partial | ✅ | ✅ | n/a |
-| Audio TTS / ASR | – | – | – | – | ✅ | – | n/a |
-| Image generation | – | – | – | – | – | – | n/a |
-| W3C `traceparent` injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
-| `with_client(...)` for custom `reqwest::Client` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
+| Capability | OpenAI | Anthropic | Google | Moonshot | StepFun | GLM | DeepSeek | Mock |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Text completion | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Token usage in response | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
+| Streaming | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Native tool calling (`tool_calls` / `tool_use` / `functionCall`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (injection) |
+| Multimodal text + image (URL or base64) | ✅ | ✅ | ✅ | partial | ✅ | ✅ | ✅ (`deepseek-flash`) | n/a |
+| Audio TTS / ASR | ✅ | – | ✅ | – | ✅ | ✅ (ASR) | ✅ (`deepseek-tts` / `deepseek-asr`) | ✅ |
+| Image generation | ✅ | – | ✅ | – | – | ✅ | – | ✅ |
+| W3C `traceparent` injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
+| `with_client(...)` for custom `reqwest::Client` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a |
 
 Key:
 
@@ -168,7 +168,8 @@ never silently truncate.
 | Moonshot | `kimi-k2.6` (`moonshot-v1-*` retired 2026-08-31) | — | `tested` (live + offline) |
 | StepFun | `step-3.5-flash`, `step-3.5-flash-2603`, `step-3.7-flash` | 256K | `tested` (live + offline) |
 | StepFun | `step-5-preview` | 1M | `best_effort` (offline only) |
-| GLM | `glm-4.5`, `glm-4.5-flash`, `glm-4.5v` | 128K | `tested` (live + offline, vision opt-in) |
+| GLM | `glm-4.5`, `glm-4.5-flash`, `glm-4.5v`, `glm-5.1` | 128K | `tested` (live + offline, vision opt-in) |
+| DeepSeek | `deepseek-flash` (`DeepSeek-V4.1-Flash`, text + image), `deepseek-v4-pro` | 1M (`384K` max output) | `tested` (live + offline, vision & `/v1/tools/{tts,asr}` opt-in) |
 | Mock | `mock-runtime-*`, `mock-*` | configurable per test | n/a |
 
 Status vocabulary:

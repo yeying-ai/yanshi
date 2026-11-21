@@ -1609,8 +1609,8 @@ let result = flow.run().await?;</code></pre>
               </summary>
               <div class="faq-answer">
                 <p>
-                  <span data-i18n-zh>完全可以。只需配置任一文本大模型 Key 即可开箱运行 <code>slides.yml</code>、<code>report.yml</code>、<code>repo_architecture.yml</code>、<code>backend_project_planner.yml</code>、<code>paper_reader.yml</code>、<code>mindmap.yml</code> 等绝大多数生成器。运行时原生支持 OpenAI、Anthropic Claude、Google Gemini、Moonshot（Kimi）、StepFun，以及任意兼容 OpenAI 接口的服务（如 DeepSeek、Qwen、本地 Ollama）。</span>
-                  <span data-i18n-en>Yes. A single text LLM key runs most Studio generators out of the box — including <code>slides.yml</code>, <code>report.yml</code>, <code>repo_architecture.yml</code>, <code>backend_project_planner.yml</code>, <code>paper_reader.yml</code>, and <code>mindmap.yml</code>. Yanshi natively supports OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, and any OpenAI-compatible endpoint (DeepSeek, Qwen, or local Ollama).</span>
+                  <span data-i18n-zh>完全可以。只需配置任一文本大模型 Key（例如单个 <code>DEEPSEEK_API_KEY</code> 即可同时解锁 <code>deepseek-flash</code> 视觉理解以及原生 TTS、ASR、联网搜索、网页抓取与扫描件/图片 OCR）即可开箱运行 <code>slides.yml</code>、<code>report.yml</code>、<code>repo_architecture.yml</code>、<code>backend_project_planner.yml</code>、<code>paper_reader.yml</code>、<code>mindmap.yml</code> 等绝大多数生成器。运行时原生支持 OpenAI、Anthropic Claude、Google Gemini、Moonshot（Kimi）、StepFun、智谱 GLM、阿里百炼 DashScope、DeepSeek、MiniMax 以及本地 Ollama。</span>
+                  <span data-i18n-en>Yes. A single LLM key — for example <code>DEEPSEEK_API_KEY</code>, which unlocks <code>deepseek-flash</code> vision plus native TTS, ASR, web search, Markdown fetch, and PDF/image OCR — runs Studio generators out of the box, including <code>slides.yml</code>, <code>report.yml</code>, <code>repo_architecture.yml</code>, <code>backend_project_planner.yml</code>, <code>paper_reader.yml</code>, and <code>mindmap.yml</code>. Yanshi natively supports OpenAI, Anthropic Claude, Google Gemini, Moonshot, StepFun, GLM, DashScope, DeepSeek, MiniMax, and local Ollama.</span>
                 </p>
               </div>
             </details>
