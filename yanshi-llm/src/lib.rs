@@ -81,7 +81,7 @@
 //! - **Anthropic**: Claude-3.5-Sonnet, Claude-3-Haiku (text-only)  
 //! - **Google**: Gemini-1.5-Pro, Gemini-1.5-Flash (text-only)
 //! - **Moonshot**: Various models (text-only)
-//! - **StepFun**: step-1o-turbo-vision, step-2-16k (multimodal support)
+//! - **StepFun**: step-3.5-flash, step-3.7-flash, step-5-preview, step-1o-turbo-vision (multimodal support)
 
 pub mod client;
 pub mod config;

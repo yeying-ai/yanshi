@@ -168,6 +168,20 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Moonshot model catalogue cleanup, StepFun/GLM live test fixes, `url` advisory (`RUSTSEC-2026-0592`), and harness/content-studio CI races.**
+  Retired 4 Moonshot models confirmed returning HTTP 404 (`kimi-k2-0711-preview`,
+  `kimi-k2.5`, `kimi-latest`, `kimi-thinking-preview`) from
+  `yanshi-llm/templates/models/moonshot.yml` (keeping live `kimi-k2.6`,
+  `kimi-k3`, `kimi-k3.1-pro`). Stabilized `stepfun_live_streaming_reasoning`
+  with a multi-step counting prompt at `ThinkingConfig::Medium`, updated
+  StepFun/GLM live test selectors to match both `type: chat` and legacy
+  `type: text` entries, bumped `url` in `Cargo.lock` to resolve
+  `RUSTSEC-2026-0592`, fixed a spawn-vs-refetch race in `yanshi-server`
+  `resume_harness_session` and `answer_interrupt` so HTTP responses always
+  return the freshly-reset `running` row before spawning the background
+  executor, and serialized `content_studio_cli_tests` planner tool turns so
+  concurrent `WorkflowTool` execution never races on the shared
+  `YANSHI_MOCK_RESPONSES` FIFO queue.
 - **DeepSeek V4.1 Chat Completions wire alignment: top-level `reasoning_effort`, `deepseek-flash` JSON auto-disable, and forced `tool_choice` thinking guard (`462f452`).**
   `OpenAIProvider::build_request_body` now emits `thinking: {"type": "enabled" | "disabled"}`
   alongside a top-level `reasoning_effort` (`"none" | "low" | "high" | "max"`)

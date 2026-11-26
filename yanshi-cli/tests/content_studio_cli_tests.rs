@@ -1,11 +1,12 @@
 //! Y4.4 acceptance: `yanshi skill run examples/applications/content-studio`
 //! with `--input` facts and `--output-dir`, under a scripted mock model.
 //!
-//! The mock serves planner and generator calls from one queue, in call
-//! order: the planner's first turn (native tool calls; its placeholder reply
-//! text is unused), each generator's model calls (workflow tools run one
-//! after another), then the planner's final answer. `YANSHI_MOCK_TOOL_CALLS`
-//! and `YANSHI_MOCK_RESPONSES` advance together one entry per model call.
+//! The mock serves planner and generator calls from one FIFO queue, in call
+//! order. Because `WorkflowTool`s run concurrently within a single tool batch
+//! (AJ1), each generator tool call is scheduled in its own planner turn so
+//! concurrent generators never race on the shared `YANSHI_MOCK_RESPONSES`
+//! queue. `YANSHI_MOCK_TOOL_CALLS` and `YANSHI_MOCK_RESPONSES` advance
+//! together one entry per model call.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -35,18 +36,29 @@ fn tree() -> String {
   json!({"label": "Tides", "children": [{"label": "Moon"}, {"label": "Rhythm"}]}).to_string()
 }
 
-/// Run content-studio with `calls` (the planner's first-turn tool calls)
-/// and `replies` (every model reply after that, in order).
-fn run_studio(want: &str, calls: Vec<Value>, replies: Vec<String>) -> (TempDir, PathBuf) {
+/// Run content-studio with `steps` (each `(tool_call, generator_replies)`
+/// scheduled on its own planner turn so generators consume the global mock
+/// FIFO queue deterministically) followed by the planner's `final_reply`.
+fn run_studio(
+  want: &str,
+  steps: Vec<(Value, Vec<String>)>,
+  final_reply: &str,
+) -> (TempDir, PathBuf) {
   let work = TempDir::new().expect("work");
   fs::create_dir_all(work.path().join("home/.yanshi")).expect("dir");
   fs::write(work.path().join("home/.yanshi/models.yml"), registry()).expect("registry");
-  let model_calls = replies.len();
-  let mut all_replies = Vec::with_capacity(1 + model_calls);
-  all_replies.push("(unused — native tool call)".to_string());
-  all_replies.extend(replies);
-  let mut tool_calls = vec![Value::Array(calls)];
-  tool_calls.extend((0..model_calls).map(|_| json!([])));
+  let mut all_replies = Vec::new();
+  let mut tool_calls = Vec::new();
+  for (call, replies) in steps {
+    all_replies.push("(unused — native tool call)".to_string());
+    tool_calls.push(json!([call]));
+    for reply in replies {
+      all_replies.push(reply);
+      tool_calls.push(json!([]));
+    }
+  }
+  all_replies.push(final_reply.to_string());
+  tool_calls.push(json!([]));
   let out = work.path().join("out");
   Command::cargo_bin("yanshi")
     .expect("binary")
@@ -101,16 +113,20 @@ fn content_studio_makes_a_report_and_a_mindmap() {
   let (_work, out) = run_studio(
     "report,mindmap",
     vec![
-      json!({"id": "c1", "name": "report", "arguments": {"text": SOURCE, "sections": 2, "pdf": false}}),
-      json!({"id": "c2", "name": "mindmap", "arguments": {"text": SOURCE}}),
+      (
+        json!({"id": "c1", "name": "report", "arguments": {"text": SOURCE, "sections": 2, "pdf": false}}),
+        vec![
+          outline(),
+          section("The moon pulls the sea.", "Tides are caused by the moon."),
+          section("Two highs a day.", "High tide comes twice daily."),
+        ],
+      ),
+      (
+        json!({"id": "c2", "name": "mindmap", "arguments": {"text": SOURCE}}),
+        vec![tree()],
+      ),
     ],
-    vec![
-      outline(),
-      section("The moon pulls the sea.", "Tides are caused by the moon."),
-      section("Two highs a day.", "High tide comes twice daily."),
-      tree(),
-      "done".to_string(),
-    ],
+    "done",
   );
   let files = files_under(&out);
   for expected in [
@@ -141,18 +157,24 @@ fn content_studio_makes_all_three_deliverables() {
   let (_work, out) = run_studio(
     "report,mindmap,audio_overview",
     vec![
-      json!({"id": "c1", "name": "report", "arguments": {"text": SOURCE, "sections": 2}}),
-      json!({"id": "c2", "name": "mindmap", "arguments": {"text": SOURCE}}),
-      json!({"id": "c3", "name": "audio_overview", "arguments": {"text": SOURCE, "tts_model": "mock-tts"}}),
+      (
+        json!({"id": "c1", "name": "report", "arguments": {"text": SOURCE, "sections": 2}}),
+        vec![
+          outline(),
+          section("The moon pulls the sea.", "Tides are caused by the moon."),
+          section("Two highs a day.", "High tide comes twice daily."),
+        ],
+      ),
+      (
+        json!({"id": "c2", "name": "mindmap", "arguments": {"text": SOURCE}}),
+        vec![tree()],
+      ),
+      (
+        json!({"id": "c3", "name": "audio_overview", "arguments": {"text": SOURCE, "tts_model": "mock-tts"}}),
+        vec![script],
+      ),
     ],
-    vec![
-      outline(),
-      section("The moon pulls the sea.", "Tides are caused by the moon."),
-      section("Two highs a day.", "High tide comes twice daily."),
-      tree(),
-      script,
-      "done".to_string(),
-    ],
+    "done",
   );
   let files = files_under(&out);
   for expected in [

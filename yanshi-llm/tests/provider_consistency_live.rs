@@ -1147,13 +1147,18 @@ async fn stepfun_live_streaming_reasoning() {
     model: model.clone(),
     messages: vec![json!({
       "role": "user",
-      "content": "What is 17 * 23? Reply with just the number."
+      // step-5-preview at `low` effort occasionally omits reasoning on
+      // trivial arithmetic like 17 * 23 (runs 45271469390 and 45685859272),
+      // so ask a multi-step counting question at `medium` effort: 142
+      // multiples of 7 below 1000, minus the 12 that are multiples of 77.
+      "content": "How many positive integers below 1000 are divisible by 7 but not by 11? \
+                  Reply with just the number."
     })],
     stream: true,
     parameters: HashMap::new(),
     tools: None,
     tool_choice: None,
-    thinking: Some(ThinkingConfig::Low),
+    thinking: Some(ThinkingConfig::Medium),
     response_format: None,
   };
 
@@ -1171,8 +1176,8 @@ async fn stepfun_live_streaming_reasoning() {
     response.thinking.as_deref().map_or(0, str::len)
   );
   assert!(
-    response.content.contains("391"),
-    "stepfun {model}: expected 391, got {:?}",
+    response.content.contains("130"),
+    "stepfun {model}: expected 130, got {:?}",
     response.content
   );
   assert!(
@@ -1191,8 +1196,8 @@ async fn stepfun_live_text_path() {
   let model = stepfun_live_model(
     "TEXT",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text",
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1223,8 +1228,8 @@ async fn stepfun_live_streaming_path() {
   let model = stepfun_live_model(
     "TEXT",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text" && model.supports_streaming_capability(),
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_streaming_capability(),
   )
   .await;
 
@@ -1249,8 +1254,8 @@ async fn stepfun_live_tool_calling_or_fallback_path() {
   let model = stepfun_live_model(
     "TOOLS",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text" && model.supports_tools_capability(),
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_tools_capability(),
   )
   .await;
 
@@ -1405,7 +1410,7 @@ async fn glm_live_text_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text",
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1438,7 +1443,7 @@ async fn glm_live_openai_compatible_chat_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text",
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1472,7 +1477,7 @@ async fn glm_live_streaming_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text" && model.supports_streaming_capability(),
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_streaming_capability(),
   )
   .await;
 
@@ -1499,7 +1504,7 @@ async fn glm_live_tool_calling_or_fallback_path() {
     "TOOLS",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4.7-flash"],
-    |model| model.model_type() == "text" && model.supports_tools_capability(),
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_tools_capability(),
   )
   .await;
 

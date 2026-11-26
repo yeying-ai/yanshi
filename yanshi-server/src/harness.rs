@@ -1241,24 +1241,37 @@ pub async fn resume_harness_session(
     }
   };
 
+  // Refetch before spawning the background task so the HTTP response
+  // always reflects the freshly-reset `running` row rather than racing
+  // a fast executor (such as `StubHarnessExecutor`) that transitions
+  // the session to a terminal state immediately on spawn.
+  let refreshed_session = state
+    .repos
+    .harness_sessions
+    .get(id)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("harness session {} not found", id)))?;
+
   // Spawn the executor in the background. The HTTP request returns
   // immediately with the refreshed row.
   let executor = state.harness_executor.clone();
   let repos = state.repos.clone();
   let broker = state.harness_broker.clone();
-  let workspace_root = session.workspace_root.clone();
-  let profile = session.profile.clone();
-  let runtime_kind = session.runtime_kind.clone();
-  let model = session.model.clone();
-  let skill_name = session.skill_name.clone();
+  let workspace_root = refreshed_session.workspace_root.clone();
+  let profile = refreshed_session.profile.clone();
+  let runtime_kind = refreshed_session.runtime_kind.clone();
+  let model = refreshed_session.model.clone();
+  let skill_name = refreshed_session.skill_name.clone();
   // W4.1c: re-resolve, same as the create path — the session row only
   // persists the name.
   let skill_dir = skill_name
     .as_deref()
     .and_then(|name| state.skills.resolve(name))
     .map(|entry| entry.path);
-  let cost_limit_usd = session.cost_limit_usd;
-  let max_steps = session.max_steps.and_then(|n| usize::try_from(n).ok());
+  let cost_limit_usd = refreshed_session.cost_limit_usd;
+  let max_steps = refreshed_session
+    .max_steps
+    .and_then(|n| usize::try_from(n).ok());
   let user_input_owned = user_input.clone();
   let cancel_guard = state.harness_cancellations.register(id);
   tokio::spawn(async move {
@@ -1283,16 +1296,8 @@ pub async fn resume_harness_session(
       .await;
   });
 
-  // Refetch so the response reflects the freshly-reset row (status,
-  // cleared finished_at / final_answer / error, optional new prompt).
-  let session = state
-    .repos
-    .harness_sessions
-    .get(id)
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("harness session {} not found", id)))?;
   Ok(Json(ResumeHarnessSessionResponse {
-    session,
+    session: refreshed_session,
     resumed: true,
     mode: body.mode,
   }))
@@ -1411,11 +1416,22 @@ pub async fn answer_interrupt(
   let max_seq = state.repos.harness_events.max_seq(session_id).await?;
   let initial_seq = max_seq.map(|m| (m as u64) + 1).unwrap_or(0);
 
+  // Refetch before spawning the background task so the HTTP response
+  // always reflects the freshly-cleared `running` row rather than racing
+  // a fast executor (such as `StubHarnessExecutor`) that marks the
+  // session failed before a post-spawn SELECT completes.
+  let refreshed_session = state
+    .repos
+    .harness_sessions
+    .get(session_id)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("harness session {} not found", session_id)))?;
+
   let executor = state.harness_executor.clone();
   let repos = state.repos.clone();
   let broker = state.harness_broker.clone();
   // W4.1c: re-resolve, same as the create/resume paths.
-  let skill_dir = session
+  let skill_dir = refreshed_session
     .skill_name
     .as_deref()
     .and_then(|name| state.skills.resolve(name))
@@ -1423,15 +1439,17 @@ pub async fn answer_interrupt(
   let cancel_guard = state.harness_cancellations.register(session_id);
   let ctx = HarnessSessionContext {
     session_id,
-    user_input: session.user_input.clone(),
-    workspace_root: session.workspace_root.clone(),
-    profile: session.profile.clone(),
-    runtime_kind: session.runtime_kind.clone(),
-    model: session.model.clone(),
-    skill_name: session.skill_name.clone(),
+    user_input: refreshed_session.user_input.clone(),
+    workspace_root: refreshed_session.workspace_root.clone(),
+    profile: refreshed_session.profile.clone(),
+    runtime_kind: refreshed_session.runtime_kind.clone(),
+    model: refreshed_session.model.clone(),
+    skill_name: refreshed_session.skill_name.clone(),
     skill_dir,
-    cost_limit_usd: session.cost_limit_usd,
-    max_steps: session.max_steps.and_then(|n| usize::try_from(n).ok()),
+    cost_limit_usd: refreshed_session.cost_limit_usd,
+    max_steps: refreshed_session
+      .max_steps
+      .and_then(|n| usize::try_from(n).ok()),
     repos,
     broker,
     initial_seq,
@@ -1443,16 +1461,8 @@ pub async fn answer_interrupt(
     executor.resume_interrupt(ctx, answer_owned).await;
   });
 
-  // Refetch so the response reflects the freshly-cleared row (status
-  // `running`, `pending_question*` cleared).
-  let session = state
-    .repos
-    .harness_sessions
-    .get(session_id)
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("harness session {} not found", session_id)))?;
   Ok(Json(AnswerInterruptResponse {
-    session,
+    session: refreshed_session,
     resumed: true,
   }))
 }
