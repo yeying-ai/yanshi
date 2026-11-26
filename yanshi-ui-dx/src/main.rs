@@ -1,6 +1,7 @@
-//! Yanshi Studio Phase 1 Dioxus 0.7 + `dioxus-shadcn` 0.7 frontend.
+//! Yanshi Studio Dioxus 0.7 + `dioxus-shadcn` frontend.
 //!
 //! Routes served under `/ui-dx/*`:
+//! - `/ui-dx/notebooks` and `/ui-dx/notebooks/:id` — Three-pane Notebook workspace
 //! - `/ui-dx` or `/ui-dx/diagnostics` — System Diagnostics panel
 //! - `/ui-dx/runs/new` — Workflow Run submission + Rust `YamlCodeEditor` + live SSE
 //! - `/ui-dx/harness/sessions` — Harness session list
@@ -9,9 +10,12 @@
 //! - `/ui-dx/spike` — Phase 0 component & strict-CSP verification lab
 
 mod api;
+mod deliverable_viewer;
 mod diagnostics_page;
 mod harness_pages;
 mod model_config_drawer;
+mod notebook_api;
+mod notebook_page;
 mod run_create_page;
 mod yaml_editor;
 
@@ -33,12 +37,14 @@ use api::{
 use diagnostics_page::DiagnosticsPage;
 use harness_pages::{HarnessSessionDetailPage, HarnessSessionListPage, HarnessSubmitPage};
 use model_config_drawer::ModelConfigDrawer;
+use notebook_page::NotebookWorkspacePage;
 use run_create_page::RunCreatePage;
 
 const APP_CSS: Asset = asset!("/assets/app.generated.css");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppRoute {
+  Notebooks { notebook_id: Option<String> },
   Diagnostics,
   RunCreate,
   HarnessList,
@@ -55,12 +61,17 @@ fn parse_route(path: &str, search: &str) -> AppRoute {
     .trim_start_matches('/');
   match rel {
     "" | "diagnostics" => AppRoute::Diagnostics,
+    "notebooks" => AppRoute::Notebooks { notebook_id: None },
     "runs/new" => AppRoute::RunCreate,
     "harness/sessions" => AppRoute::HarnessList,
     "harness/sessions/new" => AppRoute::HarnessNew,
     "spike" => AppRoute::SpikeLab,
     other => {
-      if let Some(sid) = other.strip_prefix("harness/sessions/") {
+      if let Some(nb_id) = other.strip_prefix("notebooks/") {
+        AppRoute::Notebooks {
+          notebook_id: (!nb_id.trim().is_empty()).then(|| nb_id.to_string()),
+        }
+      } else if let Some(sid) = other.strip_prefix("harness/sessions/") {
         let tenant = extract_query_param(search, "tenant")
           .filter(|t| !t.trim().is_empty())
           .unwrap_or_else(|| "default".to_string());
@@ -149,6 +160,13 @@ fn App() -> Element {
 
           nav { class: "flex items-center gap-1", "aria-label": "主导航",
             Button {
+              variant: if matches!(cur_route, AppRoute::Notebooks { .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
+              size: ButtonSize::Sm,
+              "data-testid": "nav-notebooks",
+              onclick: move |_| navigate("/ui-dx/notebooks".to_string()),
+              "Notebooks"
+            }
+            Button {
               variant: if matches!(cur_route, AppRoute::Diagnostics) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-diagnostics",
@@ -227,6 +245,15 @@ fn App() -> Element {
       // Main page outlet
       main { class: "flex-1",
         match cur_route {
+          AppRoute::Notebooks { notebook_id } => rsx! {
+            NotebookWorkspacePage {
+              initial_notebook_id: notebook_id,
+              api_token: api_token(),
+              on_token_change: move |v: String| api_token.set(v),
+              models: cached_models(),
+              on_navigate: move |target: String| navigate(target),
+            }
+          },
           AppRoute::Diagnostics => rsx! {
             DiagnosticsPage {
               api_token: api_token(),
@@ -457,6 +484,16 @@ mod tests {
   #[test]
   fn parse_route_resolves_all_phase1_paths() {
     assert_eq!(parse_route("/ui-dx", ""), AppRoute::Diagnostics);
+    assert_eq!(
+      parse_route("/ui-dx/notebooks", ""),
+      AppRoute::Notebooks { notebook_id: None }
+    );
+    assert_eq!(
+      parse_route("/ui-dx/notebooks/nb-42", ""),
+      AppRoute::Notebooks {
+        notebook_id: Some("nb-42".to_string())
+      }
+    );
     assert_eq!(parse_route("/ui-dx/diagnostics", ""), AppRoute::Diagnostics);
     assert_eq!(parse_route("/ui-dx/runs/new", ""), AppRoute::RunCreate);
     assert_eq!(
