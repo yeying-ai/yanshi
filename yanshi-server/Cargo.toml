@@ -58,6 +58,7 @@ metrics-exporter-prometheus = { version = "0.15", default-features = false }
 
 # Workspace dependencies
 yanshi-db = { path = "../yanshi-db", version = "0.1" }
+yanshi-notebook = { path = "../yanshi-notebook", version = "0.1" }
 yanshi-core = { path = "../yanshi-core", version = "0.2" }
 yanshi-worker-proto = { path = "../yanshi-worker-proto", version = "0.1" }
 # Workflow assembly (config schema + YAML -> Flow) + diagnostics report builder,

@@ -538,6 +538,18 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Shared `yanshi-notebook` domain crate deduplicating server and desktop notebook engines.**
+  Extracted stateless Notebook source ingestion/format sniffing (`ingest`: HTML,
+  PDF + `pdftotext`/OCR fallback, pure-Rust `.docx`/`.pptx`/`.xlsx`, CSV/TSV,
+  JSON, SRT/VTT, smart `arxiv`/`openreview`/`github` URL & repo snapshots, ASR,
+  paragraph chunking), grounded `/ask` schema & citation parsing (`qa`), compiled-in
+  12-generator Content Studio catalogue/planner/chunk budget selection (`studio`),
+  and portable `NotebookExportBundle` validation, ID remapping, deliverable byte
+  synthesis, Markdown brief rendering, and `.zip` archive packing (`bundle`) into
+  a zero-DB/zero-Axum/zero-Tauri workspace crate (`yanshi-notebook`), removing
+  ~5,950 duplicated lines across `yanshi-server/src/notebooks.rs` and
+  `yanshi-ui/src-tauri/src/local_notebooks.rs`.
+
 - **Desktop hardening, lazy storage, native UX, expandable drawer UI, and hot-reloadable visual model/provider configuration.**
   Hardened `yanshi-ui/src-tauri` with rotating file logging (`~/.yanshi/logs/desktop.log`),
   strict WebView CSP, cross-platform single-instance OS file lock (`_instance.lock`),
