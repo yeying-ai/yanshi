@@ -538,6 +538,24 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Dioxus 0.7 Workflow Studio, Pure-Rust DAG Canvas, Classic Console & Trace Compare (`/ui-dx/studio`, `/ui-dx/app`, `/ui-dx/console`, `/ui-dx/runs/:id/compare`, Phase 3).**
+  Migrated the dual-posture Workflow Studio (`studio_yaml.rs`, `studio_api.rs`,
+  `dag_canvas.rs`, `node_inspector.rs`, `studio_page.rs`, `console_compare_pages.rs`)
+  onto `dioxus-shadcn 0.8` (`NativeSelectSize`, `Progress`, `Resizable`,
+  `Combobox`, `Sheet`, `Dialog`, `Checkbox`) with zero JS graph libraries:
+  pure-Rust `serde_yaml` local topology inspector & DAG graph mutator (21 built-in
+  presets incl. all 19 official generator YAMLs, personal template sync via
+  `/v1/preferences`, 27-item categorized node palette, cycle detection, cascade
+  rename & delete), interactive layered SVG+HTML DAG canvas (pan/zoom/fit,
+  MiniMap, multi-column arch edge routing, click-to-connect ports, edge
+  disconnect, breakpoint toggles, live telemetry & cost pills), form-based
+  `NodeConfigEditor` & `NodeIoInspector` (`input_override`/`output_override`
+  debug pause injection + `AuthorizedMedia` previews), inline run approvals,
+  HITL `ask_user` questions, checkpoint `resume-plan` modal, `artifacts.zip`,
+  attach-run to Notebook, Release Mode one-click runner showcase, Classic Event
+  Console with filter expressions, and side-by-side Run Trace Comparison —
+  reaching 100% route parity with the legacy React UI under strict zero-eval CSP.
+
 - **Dioxus 0.7 Notebook Workspace (`/ui-dx/notebooks` & `/ui-dx/notebooks/:id`, Phase 2).**
   Migrated the full three-pane Notebook Studio into `yanshi-ui-dx/`
   (`notebook_api.rs`, `deliverable_viewer.rs`, `notebook_page.rs`) using

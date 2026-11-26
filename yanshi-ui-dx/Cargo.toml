@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "Yanshi Studio Dioxus 0.7 + dioxus-shadcn 0.7 web frontend"
+description = "Yanshi Studio Dioxus 0.7 + dioxus-shadcn 0.8 web frontend"
 
 [dependencies]
 dioxus = { version = "0.7", features = ["web"] }
@@ -19,6 +19,7 @@ dioxus-shadcn = { version = "0.8", default-features = false, features = [
   "input",
   "label",
   "native-select",
+  "progress",
   "resizable",
   "separator",
   "sheet",
@@ -29,6 +30,7 @@ dioxus-shadcn = { version = "0.8", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
