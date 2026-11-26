@@ -853,13 +853,14 @@ impl EventListener for TraceCollector {
       // Q2.3.1: non-blocking send — when the bounded queue is full, drop
       // the newest event and bump the dropped counter. Producers must
       // never block on tracing.
+      // Q3.1.2: increment `submitted_count` *before* `try_send` (and roll
+      // back on `Err`) so `flush()` can never observe `processed >= submitted`
+      // while a concurrently enqueued event is still in flight.
+      self.submitted_count.fetch_add(1, Ordering::SeqCst);
       match tx.try_send((captured_tp, event)) {
-        Ok(()) => {
-          // Q3.1.2: bump the submitted counter so `flush()` can wait
-          // for processed >= submitted before the CLI exits.
-          self.submitted_count.fetch_add(1, Ordering::SeqCst);
-        }
+        Ok(()) => {}
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+          self.submitted_count.fetch_sub(1, Ordering::SeqCst);
           let prev = self.events_dropped.fetch_add(1, Ordering::SeqCst);
           // Log at every power-of-two boundary so a slow consumer
           // leaves a visible breadcrumb without flooding logs.
@@ -872,6 +873,7 @@ impl EventListener for TraceCollector {
           }
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+          self.submitted_count.fetch_sub(1, Ordering::SeqCst);
           // Receiver was dropped — collector going away. Best effort.
         }
       }
@@ -943,8 +945,8 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    // Give async task time to process
-    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    // Wait for async drain task to process
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     // Check trace exists
     let trace = collector.get_trace(&workflow_id).await.unwrap();
@@ -958,7 +960,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     // Check trace is completed and stored
     let trace = storage.get_trace(&workflow_id).await.unwrap();
@@ -980,15 +982,11 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(50)).await;
-
     collector.on_event(&WorkflowEvent::NodeStarted {
       workflow_id: workflow_id.clone(),
       node_id: node_id.clone(),
       timestamp: std::time::Instant::now(),
     });
-
-    tokio::time::sleep(StdDuration::from_millis(50)).await;
 
     collector.on_event(&WorkflowEvent::NodeCompleted {
       workflow_id: workflow_id.clone(),
@@ -997,7 +995,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let trace = collector.get_trace(&workflow_id).await.unwrap().unwrap();
     assert_eq!(trace.nodes.len(), 1);
@@ -1024,7 +1022,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let exported = exporter.workflow_ids.lock().await;
     assert_eq!(exported.as_slice(), &[workflow_id]);
@@ -1082,7 +1080,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let stored = storage
       .get_trace(&workflow_id)
@@ -1168,7 +1166,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let trace = collector.get_trace(&workflow_id).await.unwrap().unwrap();
     assert_eq!(trace.context.run_id, workflow_id);
@@ -1278,7 +1276,7 @@ mod tests {
       .await;
     }
 
-    tokio::time::sleep(StdDuration::from_millis(150)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let trace = storage
       .get_trace(&workflow_id)
@@ -1357,7 +1355,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(150)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let trace = storage.get_trace(&wf).await.unwrap().expect("stored trace");
     assert_eq!(trace.nodes.len(), 2, "two attempts must produce two rows");
@@ -1488,13 +1486,18 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    // 300ms is well over the 100ms timeout but well under the 5s sleep.
-    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    // 2s is well over the two 100ms timeouts (plus disk fsync on busy CI
+    // runners) while still far below the 5s hung exporter sleep.
+    let drained = collector.flush(StdDuration::from_secs(2)).await;
+    assert!(
+      drained,
+      "drain task must finish both workflows well under the 5s hung exporter sleep"
+    );
 
     let stored_2 = storage.get_trace("wf-hung-2").await.unwrap();
     assert!(
       stored_2.is_some(),
-      "second workflow must be storage-persisted within the 500ms window — the hung exporter must NOT block the drain task"
+      "second workflow must be storage-persisted after flush — the hung exporter must NOT block the drain task"
     );
   }
 
@@ -1544,8 +1547,8 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    // Give the drain task time to process the panicking export.
-    tokio::time::sleep(StdDuration::from_millis(150)).await;
+    // Wait for the drain task to process the panicking export.
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     // Drain should still be alive — not poisoned by a single panic.
     assert!(
@@ -1564,7 +1567,7 @@ mod tests {
       timestamp: std::time::Instant::now(),
     });
 
-    tokio::time::sleep(StdDuration::from_millis(150)).await;
+    assert!(collector.flush(StdDuration::from_secs(5)).await);
 
     let exported = exporter.exported.lock().await;
     assert!(

@@ -129,15 +129,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   });
   println!("   ✓ Workflow completed (750ms total)\n");
 
-  // Give async storage time to complete
-  tokio::time::sleep(Duration::from_millis(200)).await;
+  // Wait for the async drain task to persist the terminal trace to storage
+  if !collector.flush(Duration::from_secs(5)).await {
+    return Err("Trace collector did not flush within 5s".into());
+  }
 
   // 4. Query the trace
   println!("📊 Retrieving execution trace...\n");
   let trace = storage
     .get_trace(&workflow_id)
     .await?
-    .expect("Trace should exist");
+    .ok_or("Trace should exist after flush")?;
 
   // 5. Display human-readable trace
   println!("{}", format_trace_human_readable(&trace));

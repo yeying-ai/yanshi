@@ -168,6 +168,16 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Fixed
 
+- **Eliminate `yanshi-tracing` async drain timing flake in `simple_tracing` example and collector tests.**
+  Replaced the hardcoded `200ms` post-completion sleep in
+  `yanshi-tracing/examples/simple_tracing.rs` (and fixed sleeps in
+  `yanshi-tracing/src/collector.rs` unit tests) with deterministic
+  `TraceCollector::flush(...)` awaits so `FileTraceStorage::save_trace`
+  (`sync_data` + atomic rename) never races against `storage.get_trace(...)` on
+  busy CI runners. Also moved `TraceCollector::submitted_count` increment ahead
+  of `mpsc::Sender::try_send` (rolling back on send error) so concurrent
+  `flush()` callers can never return early while an enqueued event is still in
+  flight.
 - **Moonshot model catalogue cleanup, StepFun/GLM live test fixes, `url` advisory (`RUSTSEC-2026-0592`), and harness/content-studio CI races.**
   Retired 4 Moonshot models confirmed returning HTTP 404 (`kimi-k2-0711-preview`,
   `kimi-k2.5`, `kimi-latest`, `kimi-thinking-preview`) from
