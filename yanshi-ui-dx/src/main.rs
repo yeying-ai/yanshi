@@ -1,22 +1,30 @@
-//! Yanshi Studio Dioxus 0.7 + `dioxus-shadcn` frontend.
+//! Yanshi Studio Dioxus 0.7 + `dioxus-shadcn 0.8` frontend.
 //!
 //! Routes served under `/ui-dx/*`:
+//! - `/ui-dx` or `/ui-dx/studio` — Workflow Studio (Debug Mode, pure-Rust DAG canvas)
+//! - `/ui-dx/app` — Workflow Studio (Release Mode, one-click app runner)
 //! - `/ui-dx/notebooks` and `/ui-dx/notebooks/:id` — Three-pane Notebook workspace
-//! - `/ui-dx` or `/ui-dx/diagnostics` — System Diagnostics panel
+//! - `/ui-dx/console` — Classic Event Run Console
+//! - `/ui-dx/runs/:id/compare` — Side-by-side Trace Comparison
 //! - `/ui-dx/runs/new` — Workflow Run submission + Rust `YamlCodeEditor` + live SSE
-//! - `/ui-dx/harness/sessions` — Harness session list
-//! - `/ui-dx/harness/sessions/new` — Harness session submit with free-solo `Combobox`
-//! - `/ui-dx/harness/sessions/:id` — Harness live SSE detail, approvals & HITL
+//! - `/ui-dx/harness/sessions` / `new` / `:id` — Harness sessions, approvals & HITL
+//! - `/ui-dx/diagnostics` — System Diagnostics panel
 //! - `/ui-dx/spike` — Phase 0 component & strict-CSP verification lab
 
 mod api;
+mod console_compare_pages;
+mod dag_canvas;
 mod deliverable_viewer;
 mod diagnostics_page;
 mod harness_pages;
 mod model_config_drawer;
+mod node_inspector;
 mod notebook_api;
 mod notebook_page;
 mod run_create_page;
+mod studio_api;
+mod studio_page;
+mod studio_yaml;
 mod yaml_editor;
 
 use dioxus::prelude::*;
@@ -34,22 +42,42 @@ use api::{
   current_location_path_and_search, fetch_models_config, push_browser_route, resolve_api_base,
   resolve_embedded_token, revoke_blob_url,
 };
+use console_compare_pages::{RunComparePage, RunConsolePage};
 use diagnostics_page::DiagnosticsPage;
 use harness_pages::{HarnessSessionDetailPage, HarnessSessionListPage, HarnessSubmitPage};
 use model_config_drawer::ModelConfigDrawer;
 use notebook_page::NotebookWorkspacePage;
 use run_create_page::RunCreatePage;
+use studio_page::{StudioPosture, WorkflowStudioPage};
 
 const APP_CSS: Asset = asset!("/assets/app.generated.css");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppRoute {
-  Notebooks { notebook_id: Option<String> },
+  Studio {
+    mode: StudioPosture,
+    preset: Option<String>,
+    run_id: Option<String>,
+  },
+  Notebooks {
+    notebook_id: Option<String>,
+  },
+  Console {
+    run_id: Option<String>,
+  },
+  RunCompare {
+    primary_run_id: String,
+    against: Option<String>,
+    tenant: String,
+  },
   Diagnostics,
   RunCreate,
   HarnessList,
   HarnessNew,
-  HarnessDetail { session_id: String, tenant: String },
+  HarnessDetail {
+    session_id: String,
+    tenant: String,
+  },
   SpikeLab,
 }
 
@@ -60,8 +88,25 @@ fn parse_route(path: &str, search: &str) -> AppRoute {
     .unwrap_or(trimmed)
     .trim_start_matches('/');
   match rel {
-    "" | "diagnostics" => AppRoute::Diagnostics,
+    "" | "studio" => AppRoute::Studio {
+      mode: StudioPosture::Debug,
+      preset: extract_query_param(search, "preset").filter(|s| !s.trim().is_empty()),
+      run_id: extract_query_param(search, "run_id")
+        .or_else(|| extract_query_param(search, "run"))
+        .filter(|s| !s.trim().is_empty()),
+    },
+    "app" => AppRoute::Studio {
+      mode: StudioPosture::Release,
+      preset: extract_query_param(search, "preset").filter(|s| !s.trim().is_empty()),
+      run_id: extract_query_param(search, "run_id")
+        .or_else(|| extract_query_param(search, "run"))
+        .filter(|s| !s.trim().is_empty()),
+    },
     "notebooks" => AppRoute::Notebooks { notebook_id: None },
+    "console" => AppRoute::Console {
+      run_id: extract_query_param(search, "run").filter(|s| !s.trim().is_empty()),
+    },
+    "diagnostics" => AppRoute::Diagnostics,
     "runs/new" => AppRoute::RunCreate,
     "harness/sessions" => AppRoute::HarnessList,
     "harness/sessions/new" => AppRoute::HarnessNew,
@@ -70,6 +115,18 @@ fn parse_route(path: &str, search: &str) -> AppRoute {
       if let Some(nb_id) = other.strip_prefix("notebooks/") {
         AppRoute::Notebooks {
           notebook_id: (!nb_id.trim().is_empty()).then(|| nb_id.to_string()),
+        }
+      } else if let Some(rest) = other.strip_prefix("runs/")
+        && let Some(prim) = rest.strip_suffix("/compare")
+        && !prim.is_empty()
+        && !prim.contains('/')
+      {
+        AppRoute::RunCompare {
+          primary_run_id: prim.to_string(),
+          against: extract_query_param(search, "against").filter(|s| !s.trim().is_empty()),
+          tenant: extract_query_param(search, "tenant")
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string()),
         }
       } else if let Some(sid) = other.strip_prefix("harness/sessions/") {
         let tenant = extract_query_param(search, "tenant")
@@ -80,7 +137,11 @@ fn parse_route(path: &str, search: &str) -> AppRoute {
           tenant,
         }
       } else {
-        AppRoute::Diagnostics
+        AppRoute::Studio {
+          mode: StudioPosture::Debug,
+          preset: None,
+          run_id: None,
+        }
       }
     }
   }
@@ -148,7 +209,7 @@ fn App() -> Element {
 
     div { class: "min-h-screen bg-background text-foreground flex flex-col",
       // Top navigation shell
-      header { class: "sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur px-4 py-2.5 flex flex-wrap items-center justify-between gap-3",
+      header { class: "sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur px-4 py-2 flex flex-wrap items-center justify-between gap-2",
         div { class: "flex items-center gap-3 flex-wrap",
           div { class: "flex items-center gap-2",
             span { class: "text-sm font-semibold tracking-tight", "Yanshi Studio · DX" }
@@ -158,7 +219,21 @@ fn App() -> Element {
             }
           }
 
-          nav { class: "flex items-center gap-1", "aria-label": "主导航",
+          nav { class: "flex items-center gap-1 flex-wrap", "aria-label": "主导航",
+            Button {
+              variant: if matches!(cur_route, AppRoute::Studio { mode: StudioPosture::Debug, .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
+              size: ButtonSize::Sm,
+              "data-testid": "nav-studio",
+              onclick: move |_| navigate("/ui-dx/studio".to_string()),
+              "Studio"
+            }
+            Button {
+              variant: if matches!(cur_route, AppRoute::Studio { mode: StudioPosture::Release, .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
+              size: ButtonSize::Sm,
+              "data-testid": "nav-app",
+              onclick: move |_| navigate("/ui-dx/app".to_string()),
+              "App"
+            }
             Button {
               variant: if matches!(cur_route, AppRoute::Notebooks { .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
@@ -167,11 +242,11 @@ fn App() -> Element {
               "Notebooks"
             }
             Button {
-              variant: if matches!(cur_route, AppRoute::Diagnostics) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
+              variant: if matches!(cur_route, AppRoute::Console { .. } | AppRoute::RunCompare { .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
-              "data-testid": "nav-diagnostics",
-              onclick: move |_| navigate("/ui-dx/diagnostics".to_string()),
-              "Diagnostics"
+              "data-testid": "nav-console",
+              onclick: move |_| navigate("/ui-dx/console".to_string()),
+              "Console"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::RunCreate) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
@@ -190,6 +265,13 @@ fn App() -> Element {
               "data-testid": "nav-harness",
               onclick: move |_| navigate("/ui-dx/harness/sessions".to_string()),
               "Harness"
+            }
+            Button {
+              variant: if matches!(cur_route, AppRoute::Diagnostics) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
+              size: ButtonSize::Sm,
+              "data-testid": "nav-diagnostics",
+              onclick: move |_| navigate("/ui-dx/diagnostics".to_string()),
+              "Diagnostics"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::SpikeLab) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
@@ -245,12 +327,41 @@ fn App() -> Element {
       // Main page outlet
       main { class: "flex-1",
         match cur_route {
+          AppRoute::Studio { mode, preset, run_id } => rsx! {
+            WorkflowStudioPage {
+              initial_mode: mode,
+              initial_preset: preset,
+              initial_run_id: run_id,
+              api_token: api_token(),
+              on_token_change: move |v: String| api_token.set(v),
+              models: cached_models(),
+              on_navigate: move |target: String| navigate(target),
+            }
+          },
           AppRoute::Notebooks { notebook_id } => rsx! {
             NotebookWorkspacePage {
               initial_notebook_id: notebook_id,
               api_token: api_token(),
               on_token_change: move |v: String| api_token.set(v),
               models: cached_models(),
+              on_navigate: move |target: String| navigate(target),
+            }
+          },
+          AppRoute::Console { run_id } => rsx! {
+            RunConsolePage {
+              initial_run_id: run_id,
+              api_token: api_token(),
+              on_token_change: move |v: String| api_token.set(v),
+              on_navigate: move |target: String| navigate(target),
+            }
+          },
+          AppRoute::RunCompare { primary_run_id, against, tenant } => rsx! {
+            RunComparePage {
+              primary_run_id,
+              against,
+              tenant,
+              api_token: api_token(),
+              on_token_change: move |v: String| api_token.set(v),
               on_navigate: move |target: String| navigate(target),
             }
           },
@@ -482,11 +593,44 @@ mod tests {
   use super::*;
 
   #[test]
-  fn parse_route_resolves_all_phase1_paths() {
-    assert_eq!(parse_route("/ui-dx", ""), AppRoute::Diagnostics);
+  fn parse_route_resolves_all_phase3_paths() {
     assert_eq!(
-      parse_route("/ui-dx/notebooks", ""),
-      AppRoute::Notebooks { notebook_id: None }
+      parse_route("/ui-dx", ""),
+      AppRoute::Studio {
+        mode: StudioPosture::Debug,
+        preset: None,
+        run_id: None,
+      }
+    );
+    assert_eq!(
+      parse_route("/ui-dx/studio", "?preset=instant_step_debug_demo&run=r-9"),
+      AppRoute::Studio {
+        mode: StudioPosture::Debug,
+        preset: Some("instant_step_debug_demo".to_string()),
+        run_id: Some("r-9".to_string()),
+      }
+    );
+    assert_eq!(
+      parse_route("/ui-dx/app", ""),
+      AppRoute::Studio {
+        mode: StudioPosture::Release,
+        preset: None,
+        run_id: None,
+      }
+    );
+    assert_eq!(
+      parse_route("/ui-dx/console", "?run=r-1"),
+      AppRoute::Console {
+        run_id: Some("r-1".to_string()),
+      }
+    );
+    assert_eq!(
+      parse_route("/ui-dx/runs/r-1/compare", "?against=r-2&tenant=acme"),
+      AppRoute::RunCompare {
+        primary_run_id: "r-1".to_string(),
+        against: Some("r-2".to_string()),
+        tenant: "acme".to_string(),
+      }
     );
     assert_eq!(
       parse_route("/ui-dx/notebooks/nb-42", ""),
@@ -496,14 +640,6 @@ mod tests {
     );
     assert_eq!(parse_route("/ui-dx/diagnostics", ""), AppRoute::Diagnostics);
     assert_eq!(parse_route("/ui-dx/runs/new", ""), AppRoute::RunCreate);
-    assert_eq!(
-      parse_route("/ui-dx/harness/sessions", ""),
-      AppRoute::HarnessList
-    );
-    assert_eq!(
-      parse_route("/ui-dx/harness/sessions/new", ""),
-      AppRoute::HarnessNew
-    );
     assert_eq!(
       parse_route("/ui-dx/harness/sessions/sess-42", "?tenant=acme"),
       AppRoute::HarnessDetail {
