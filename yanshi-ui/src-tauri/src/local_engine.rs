@@ -858,7 +858,118 @@ fn build_embedded_ui_router(state: LocalEngineState) -> Router {
     .route("/ui/diagnostics", get(embedded_index_html))
     .route("/ui/assets/app.js", get(embedded_app_js))
     .route("/ui/assets/styles.css", get(embedded_styles_css))
+    .route("/ui-dx", get(serve_dx_ui_index))
+    .route("/ui-dx/", get(serve_dx_ui_index))
+    .route("/ui-dx/*asset_path", get(serve_dx_ui_asset))
     .with_state(state)
+}
+
+const DX_UI_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-src 'self' blob:; object-src 'none'; base-uri 'self'";
+
+fn resolve_dx_ui_dir() -> Option<std::path::PathBuf> {
+  if let Ok(raw) = std::env::var("YANSHI_DX_UI_DIR") {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+      let candidate = std::path::PathBuf::from(trimmed);
+      if candidate.is_dir() {
+        return Some(candidate);
+      }
+    }
+  }
+  let candidates = [
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("..")
+      .join("..")
+      .join("yanshi-ui-dx/dist/public"),
+    std::path::PathBuf::from("yanshi-ui-dx/dist/public"),
+  ];
+  candidates.into_iter().find(|p| p.is_dir())
+}
+
+fn sanitize_dx_asset_path(raw: &str) -> Option<std::path::PathBuf> {
+  let trimmed = raw.trim_start_matches('/');
+  if trimmed.is_empty() {
+    return Some(std::path::PathBuf::new());
+  }
+  let mut clean = std::path::PathBuf::new();
+  for comp in std::path::Path::new(trimmed).components() {
+    match comp {
+      std::path::Component::Normal(seg) => clean.push(seg),
+      std::path::Component::CurDir => {}
+      std::path::Component::ParentDir
+      | std::path::Component::RootDir
+      | std::path::Component::Prefix(_) => return None,
+    }
+  }
+  Some(clean)
+}
+
+fn dx_asset_content_type(path: &std::path::Path) -> &'static str {
+  match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+    "html" => "text/html; charset=utf-8",
+    "js" | "mjs" => "application/javascript; charset=utf-8",
+    "css" => "text/css; charset=utf-8",
+    "wasm" => "application/wasm",
+    "svg" => "image/svg+xml",
+    "png" => "image/png",
+    "json" => "application/json; charset=utf-8",
+    _ => "application/octet-stream",
+  }
+}
+
+async fn serve_dx_ui_index() -> Response {
+  serve_dx_ui_rel("").await
+}
+
+async fn serve_dx_ui_asset(
+  axum::extract::Path(asset_path): axum::extract::Path<String>,
+) -> Response {
+  serve_dx_ui_rel(&asset_path).await
+}
+
+async fn serve_dx_ui_rel(raw_rel: &str) -> Response {
+  let Some(base_dir) = resolve_dx_ui_dir() else {
+    return (
+      StatusCode::NOT_FOUND,
+      [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+      "Dioxus UI dist not built yet; run ./yanshi-ui-dx/scripts/build.sh or set YANSHI_DX_UI_DIR.",
+    )
+      .into_response();
+  };
+  let Some(rel) = sanitize_dx_asset_path(raw_rel) else {
+    return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
+  };
+  let mut target = if rel.as_os_str().is_empty() {
+    base_dir.join("index.html")
+  } else {
+    base_dir.join(&rel)
+  };
+  let looks_like_file = rel.extension().is_some();
+  if !target.is_file() {
+    if looks_like_file {
+      return (StatusCode::NOT_FOUND, "asset not found").into_response();
+    }
+    target = base_dir.join("index.html");
+  }
+  let Ok(bytes) = tokio::fs::read(&target).await else {
+    return (StatusCode::NOT_FOUND, "asset unreadable").into_response();
+  };
+  let content_type = dx_asset_content_type(&target);
+  let cache = if content_type.starts_with("text/html") {
+    "no-store"
+  } else {
+    "public, max-age=300"
+  };
+  (
+    StatusCode::OK,
+    [
+      (header::CONTENT_TYPE, content_type),
+      (header::CACHE_CONTROL, cache),
+      (header::CONTENT_SECURITY_POLICY, DX_UI_STRICT_CSP),
+    ],
+    Body::from(bytes),
+  )
+    .into_response()
 }
 
 async fn embedded_index_html(State(state): State<LocalEngineState>) -> Response {
@@ -4919,5 +5030,21 @@ nodes:
       &format!("/v1/runs/{run_id}/artifacts/{art_id}"),
     );
     assert_eq!(wrong_tenant.unwrap_err().0, StatusCode::NOT_FOUND);
+  }
+
+  #[test]
+  fn dx_ui_path_sanitizer_and_mime_work() {
+    assert_eq!(
+      sanitize_dx_asset_path("assets/app.wasm"),
+      Some(std::path::PathBuf::from("assets/app.wasm"))
+    );
+    assert!(sanitize_dx_asset_path("../secret").is_none());
+    assert!(sanitize_dx_asset_path("assets/../../etc/passwd").is_none());
+    assert_eq!(
+      dx_asset_content_type(std::path::Path::new("app.wasm")),
+      "application/wasm"
+    );
+    assert!(DX_UI_STRICT_CSP.contains("'wasm-unsafe-eval'"));
+    assert!(!DX_UI_STRICT_CSP.contains("'unsafe-eval'"));
   }
 }
