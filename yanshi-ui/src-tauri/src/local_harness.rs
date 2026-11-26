@@ -145,6 +145,35 @@ impl LocalHarnessState {
   pub(crate) fn approvals(&self) -> &LocalApprovalRegistry {
     &self.approvals
   }
+
+  /// Cancel every currently executing harness session and drop parked approvals
+  /// so the desktop or `--web` process can exit cleanly.
+  pub fn cancel_all_active(&self) -> usize {
+    let cancelled = self.cancellations.cancel_all();
+    self.approvals.clear_all();
+    if cancelled > 0 {
+      let mut to_flush: Vec<(PathBuf, LocalHarnessSession)> = Vec::new();
+      {
+        let mut sessions = self.lock_sessions();
+        for entry in sessions.values_mut() {
+          if !is_terminal_harness_status(&entry.session.status) {
+            entry.session.status = "cancelled".to_string();
+            entry.session.finished_at = Some(Utc::now());
+            to_flush.push((self.session_dir(entry.session.id), entry.session.clone()));
+          }
+        }
+      }
+      for (dir, session) in to_flush {
+        let _ = write_session_sync(&dir, &session);
+      }
+    }
+    cancelled
+  }
+
+  /// Return true while at least one harness session is still running.
+  pub fn has_active_sessions(&self) -> bool {
+    !self.cancellations.is_empty()
+  }
 }
 
 fn is_terminal_harness_status(status: &str) -> bool {
@@ -275,6 +304,20 @@ impl LocalCancellationRegistry {
       None => false,
     }
   }
+
+  fn cancel_all(&self) -> usize {
+    let tokens: Vec<AgentCancellationToken> =
+      self.lock().values().map(|(_, t)| t.clone()).collect();
+    let count = tokens.len();
+    for token in tokens {
+      token.cancel();
+    }
+    count
+  }
+
+  fn is_empty(&self) -> bool {
+    self.lock().is_empty()
+  }
 }
 
 struct CancellationGuard {
@@ -345,6 +388,10 @@ impl LocalApprovalRegistry {
     self
       .lock()
       .remove(&(session_id.to_string(), request_id.to_string()));
+  }
+
+  fn clear_all(&self) {
+    self.lock().clear();
   }
 
   pub(crate) fn list(&self, session_id: &str) -> Vec<ApprovalRequest> {

@@ -92,16 +92,23 @@ fn parse_launch_mode() -> Result<LaunchMode, String> {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn run_local_web_mode(bind: std::net::SocketAddr) -> Result<(), String> {
+  let base_dir = yanshi_studio_lib::local_engine::default_studio_runs_dir();
+  let _instance_lock =
+    yanshi_studio_lib::runtime_guard::InstanceLockGuard::acquire(&base_dir, "web")?;
+
   let rt = tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()
     .map_err(|err| format!("failed to initialize Tokio runtime: {err}"))?;
 
   rt.block_on(async move {
-    let (listener, app, _token) =
-      yanshi_studio_lib::local_engine::bind_authenticated_local_web_listener(bind, None)
-        .await
-        .map_err(|err| err.to_string())?;
+    let (listener, app, _token, engine_state) =
+      yanshi_studio_lib::local_engine::bind_authenticated_local_web_listener_with_state(
+        bind,
+        Some(base_dir),
+      )
+      .await
+      .map_err(|err| err.to_string())?;
     let actual = listener
       .local_addr()
       .map_err(|err| format!("failed to inspect bound address: {err}"))?;
@@ -115,9 +122,18 @@ fn run_local_web_mode(bind: std::net::SocketAddr) -> Result<(), String> {
     );
     println!("   Press Ctrl+C to stop.");
 
+    let shutdown_state = engine_state.clone();
     axum::serve(listener, app)
-      .with_graceful_shutdown(async {
+      .with_graceful_shutdown(async move {
         let _ = tokio::signal::ctrl_c().await;
+        let (runs, sessions) = shutdown_state.cancel_all_active();
+        if runs > 0 || sessions > 0 {
+          tracing::info!(
+            cancelled_runs = runs,
+            cancelled_sessions = sessions,
+            "cancelled active local web work on Ctrl+C"
+          );
+        }
       })
       .await
       .map_err(|err| format!("server error: {err}"))
@@ -133,7 +149,11 @@ fn main() {
 
   #[cfg(not(any(target_os = "android", target_os = "ios")))]
   match parse_launch_mode() {
-    Ok(LaunchMode::Desktop) => {}
+    Ok(LaunchMode::Desktop) => {
+      let log_dir = yanshi_studio_lib::runtime_guard::default_log_dir();
+      let _ =
+        yanshi_studio_lib::runtime_guard::init_desktop_logging(&log_dir, cfg!(debug_assertions));
+    }
     Ok(LaunchMode::Help) => {
       println!("Usage: yanshi-studio [--web [127.0.0.1:18080]] [--bind <127.0.0.1:port>]");
       println!("  (no args)              Launch native desktop window (zero-Postgres)");
@@ -143,7 +163,10 @@ fn main() {
       return;
     }
     Ok(LaunchMode::Web(bind)) => {
+      let log_dir = yanshi_studio_lib::runtime_guard::default_log_dir();
+      let _ = yanshi_studio_lib::runtime_guard::init_desktop_logging(&log_dir, true);
       if let Err(err) = run_local_web_mode(bind) {
+        tracing::error!(error = %err, "local web mode exited with error");
         eprintln!("Error: {err}");
         std::process::exit(1);
       }

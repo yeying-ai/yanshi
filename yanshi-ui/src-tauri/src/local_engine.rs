@@ -236,6 +236,81 @@ impl LocalEngineState {
       Err(poisoned) => poisoned.into_inner(),
     }
   }
+
+  /// Return true if any DAG run or Harness session is currently non-terminal.
+  pub fn has_active_work(&self) -> bool {
+    let active_run = self
+      .lock_runs()
+      .values()
+      .any(|entry| !is_terminal_status(&entry.record.status));
+    active_run || self.harness.has_active_sessions()
+  }
+
+  /// Gracefully cancel every in-flight DAG run and Harness session and flush
+  /// their cancelled metadata to disk before process exit.
+  pub fn cancel_all_active(&self) -> (usize, usize) {
+    let mut to_flush: Vec<(PathBuf, PersistedRunMeta, Option<LocalStreamedEvent>)> = Vec::new();
+    {
+      let mut guard = self.lock_runs();
+      for (&run_id, entry) in guard.iter_mut() {
+        if is_terminal_status(&entry.record.status) {
+          continue;
+        }
+        entry.cancel_token.cancel();
+        self.questions.clear_run(run_id);
+        if let Some(ctrl) = entry.debug_controller.take() {
+          ctrl.abort();
+        }
+        entry.record.status = "cancelled".to_string();
+        entry.record.finished_at = Some(Utc::now());
+        let synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
+        let run_dir = self.base_dir.join(run_id.to_string());
+        let meta = PersistedRunMeta::from_entry(entry);
+        to_flush.push((run_dir, meta, synthetic));
+      }
+    }
+
+    let cancelled_runs = to_flush.len();
+    for (run_dir, meta, synthetic_ev) in to_flush {
+      if let Err(err) = write_persisted_run_meta_sync(&run_dir, &meta) {
+        tracing::warn!(run_dir = %run_dir.display(), error = %err, "failed to flush cancelled run meta on shutdown");
+      }
+      if let Some(ev) = synthetic_ev
+        && let Err(err) = append_run_event_jsonl_sync(&run_dir, &ev)
+      {
+        tracing::warn!(run_dir = %run_dir.display(), error = %err, "failed to flush cancelled run event on shutdown");
+      }
+    }
+
+    let cancelled_sessions = self.harness.cancel_all_active();
+    (cancelled_runs, cancelled_sessions)
+  }
+}
+
+impl PersistedRunMeta {
+  fn from_entry(entry: &RunEntry) -> Self {
+    Self {
+      record: entry.record.clone(),
+      artifacts: entry
+        .artifacts
+        .iter()
+        .map(PersistedArtifactRecord::from)
+        .collect(),
+      model: entry.model.clone(),
+      cost_limit_usd: entry.cost_limit_usd,
+      notebook_id: entry.notebook_id,
+      notebook_kind: entry.notebook_kind.clone(),
+    }
+  }
+}
+
+fn write_persisted_run_meta_sync(run_dir: &Path, meta: &PersistedRunMeta) -> std::io::Result<()> {
+  std::fs::create_dir_all(run_dir)?;
+  let bytes = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
+  let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
+  let dst = run_dir.join("run_meta.json");
+  std::fs::write(&tmp, bytes)?;
+  std::fs::rename(tmp, dst)
 }
 
 fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
@@ -243,24 +318,8 @@ fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
 }
 
 fn write_run_meta_sync(run_dir: &Path, entry: &RunEntry) -> std::io::Result<()> {
-  std::fs::create_dir_all(run_dir)?;
-  let meta = PersistedRunMeta {
-    record: entry.record.clone(),
-    artifacts: entry
-      .artifacts
-      .iter()
-      .map(PersistedArtifactRecord::from)
-      .collect(),
-    model: entry.model.clone(),
-    cost_limit_usd: entry.cost_limit_usd,
-    notebook_id: entry.notebook_id,
-    notebook_kind: entry.notebook_kind.clone(),
-  };
-  let bytes = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
-  let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
-  let dst = run_dir.join("run_meta.json");
-  std::fs::write(&tmp, bytes)?;
-  std::fs::rename(tmp, dst)
+  let meta = PersistedRunMeta::from_entry(entry);
+  write_persisted_run_meta_sync(run_dir, &meta)
 }
 
 fn append_run_event_jsonl_sync(run_dir: &Path, event: &LocalStreamedEvent) -> std::io::Result<()> {
@@ -367,7 +426,7 @@ pub(crate) fn extract_tenant(headers: &HeaderMap) -> String {
     .to_string()
 }
 
-fn default_studio_runs_dir() -> PathBuf {
+pub fn default_studio_runs_dir() -> PathBuf {
   if let Ok(explicit) = std::env::var("YANSHI_RUN_DIR") {
     let trimmed = explicit.trim();
     if !trimmed.is_empty() {
@@ -464,22 +523,32 @@ pub fn generate_loopback_api_token() -> String {
 }
 
 /// Start the embedded loopback engine on `127.0.0.1:0` with bearer-token
-/// authentication enabled and return `(base_url, api_token)`.
-pub async fn start_authenticated_loopback_engine(
+/// authentication enabled and return `(base_url, api_token, state)`.
+pub async fn start_authenticated_loopback_engine_with_state(
   custom_base_dir: Option<PathBuf>,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, String, LocalEngineState)> {
   let base_dir = custom_base_dir.unwrap_or_else(default_studio_runs_dir);
   tokio::fs::create_dir_all(&base_dir).await?;
   let token = generate_loopback_api_token();
   let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
-  let app = build_local_router(state);
+  let app = build_local_router(state.clone());
 
   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
   let addr: SocketAddr = listener.local_addr()?;
   tokio::spawn(async move {
     let _ = axum::serve(listener, app).await;
   });
-  Ok((format!("http://127.0.0.1:{}", addr.port()), token))
+  Ok((format!("http://127.0.0.1:{}", addr.port()), token, state))
+}
+
+/// Start the embedded loopback engine on `127.0.0.1:0` with bearer-token
+/// authentication enabled and return `(base_url, api_token)`.
+pub async fn start_authenticated_loopback_engine(
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(String, String)> {
+  let (url, token, _state) =
+    start_authenticated_loopback_engine_with_state(custom_base_dir).await?;
+  Ok((url, token))
 }
 
 /// Start the embedded loopback engine on `127.0.0.1:0` and return its base URL
@@ -499,11 +568,12 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
 }
 
 /// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
-/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication.
-pub async fn bind_authenticated_local_web_listener(
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication,
+/// returning the `LocalEngineState` handle for graceful shutdown cancellation.
+pub async fn bind_authenticated_local_web_listener_with_state(
   bind: SocketAddr,
   custom_base_dir: Option<PathBuf>,
-) -> anyhow::Result<(tokio::net::TcpListener, Router, String)> {
+) -> anyhow::Result<(tokio::net::TcpListener, Router, String, LocalEngineState)> {
   if !bind.ip().is_loopback() {
     anyhow::bail!(
       "refusing to bind local web engine on non-loopback address {bind}; \
@@ -514,8 +584,19 @@ pub async fn bind_authenticated_local_web_listener(
   tokio::fs::create_dir_all(&base_dir).await?;
   let token = generate_loopback_api_token();
   let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
-  let app = build_local_router(state);
+  let app = build_local_router(state.clone());
   let listener = tokio::net::TcpListener::bind(bind).await?;
+  Ok((listener, app, token, state))
+}
+
+/// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication.
+pub async fn bind_authenticated_local_web_listener(
+  bind: SocketAddr,
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(tokio::net::TcpListener, Router, String)> {
+  let (listener, app, token, _state) =
+    bind_authenticated_local_web_listener_with_state(bind, custom_base_dir).await?;
   Ok((listener, app, token))
 }
 
@@ -4298,5 +4379,54 @@ nodes:
     let unwrapped = unwrap_local_captured_deliverable(&wrapped).expect("unwrap");
     assert_eq!(unwrapped["kind"], "report");
     assert_eq!(unwrapped["title"], "Studio Report");
+  }
+
+  #[test]
+  fn cancel_all_active_marks_running_entries_cancelled_and_persists_meta() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    let run_id = Uuid::new_v4();
+    let cancel_token = FlowCancellationToken::new();
+    let (tx, _rx) = broadcast::channel(8);
+    let record = LocalRunRecord {
+      id: run_id,
+      workflow: "name: shutdown-test".to_string(),
+      status: "running".to_string(),
+      tenant_id: "default".to_string(),
+      started_at: Utc::now(),
+      finished_at: None,
+      run_dir: Some(tmp.path().join(run_id.to_string()).display().to_string()),
+      error: None,
+    };
+    state.lock_runs().insert(
+      run_id,
+      RunEntry {
+        record,
+        events: Vec::new(),
+        artifacts: Vec::new(),
+        tx,
+        cancel_token: cancel_token.clone(),
+        debug_controller: None,
+        attempt_start_seq: 0,
+        model: None,
+        cost_limit_usd: None,
+        notebook_id: None,
+        notebook_kind: None,
+        on_complete: None,
+      },
+    );
+    assert!(state.has_active_work());
+
+    let (runs, sessions) = state.cancel_all_active();
+    assert_eq!(runs, 1);
+    assert_eq!(sessions, 0);
+    assert!(cancel_token.is_cancelled());
+    assert!(!state.has_active_work());
+
+    let persisted_bytes =
+      std::fs::read(tmp.path().join(run_id.to_string()).join("run_meta.json")).expect("meta file");
+    let persisted: PersistedRunMeta = serde_json::from_slice(&persisted_bytes).expect("parse meta");
+    assert_eq!(persisted.record.status, "cancelled");
+    assert!(persisted.record.finished_at.is_some());
   }
 }

@@ -183,9 +183,9 @@ jobs:
       - name: Format check desktop crate
         run: cargo fmt --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --check
       - name: Clippy desktop crate
-        run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - name: Run desktop local-engine & notebook tests
-        run: cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --test-threads=1
+        run: cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml --locked -- --test-threads=1
 
   gateway-check:
     # AG5: `crates/gateway` is an isolated Cargo workspace so Pingora's
@@ -291,7 +291,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
-        run: cargo audit
+        run: |
+          cargo audit
+          cargo audit --file yanshi-ui/src-tauri/Cargo.lock
 
   linux-sandbox-check:
     # P7.4-FU1: the Linux seccomp backend in yanshi-tools/src/sandbox/linux.rs
