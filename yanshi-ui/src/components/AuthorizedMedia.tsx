@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { apiFetch, resolveApiUrl, resolveEffectiveApiToken } from '../lib/api';
+import {
+  apiFetch,
+  isLocalDesktopEngine,
+  openDesktopArtifact,
+  resolveApiUrl,
+  resolveEffectiveApiToken,
+} from '../lib/api';
 import { appendInlineQuery, type MediaPreviewItem } from '../studio/mediaExtractor';
 import { InteractiveSortableTable, parseDelimitedTable } from './NotebookDeliverableViewer';
 
@@ -43,6 +49,20 @@ export function AuthorizedMedia({
   const [textPreview, setTextPreview] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [nativeBusy, setNativeBusy] = useState<'open' | 'reveal' | null>(null);
+  const desktopNativeActions = isLocalDesktopEngine();
+
+  const triggerNativeAction = async (mode: 'open' | 'reveal') => {
+    setNativeBusy(mode);
+    setLoadError(null);
+    try {
+      await openDesktopArtifact(apiToken, item.apiPath, mode, tenantId);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNativeBusy(null);
+    }
+  };
 
   const wantsTextBody =
     item.kind === 'subtitle' || item.kind === 'markdown' || item.kind === 'table';
@@ -172,13 +192,39 @@ export function AuthorizedMedia({
             {sizeLabel ? ` · ${sizeLabel}` : ''}
           </small>
         </div>
-        <button
-          type="button"
-          className="studio-btn-ghost studio-btn-sm"
-          onClick={() => void triggerDownload()}
-        >
-          下载 / 打开
-        </button>
+        <div className="studio-media-card__actions">
+          {desktopNativeActions ? (
+            <>
+              <button
+                type="button"
+                data-testid="media-native-open"
+                className="studio-btn-ghost studio-btn-sm"
+                disabled={nativeBusy !== null}
+                onClick={() => void triggerNativeAction('open')}
+                title="使用系统默认应用打开本地产物"
+              >
+                {nativeBusy === 'open' ? '打开中…' : '本地打开'}
+              </button>
+              <button
+                type="button"
+                data-testid="media-native-reveal"
+                className="studio-btn-ghost studio-btn-sm"
+                disabled={nativeBusy !== null}
+                onClick={() => void triggerNativeAction('reveal')}
+                title="在文件管理器中定位该文件"
+              >
+                {nativeBusy === 'reveal' ? '定位中…' : '在文件夹中显示'}
+              </button>
+            </>
+          ) : null}
+          <button
+            type="button"
+            className="studio-btn-ghost studio-btn-sm"
+            onClick={() => void triggerDownload()}
+          >
+            下载 / 打开
+          </button>
+        </div>
       </header>
 
       {!headerOnly && (

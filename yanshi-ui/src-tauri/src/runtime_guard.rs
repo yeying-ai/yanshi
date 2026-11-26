@@ -12,6 +12,217 @@ use tracing_subscriber::fmt::MakeWriter;
 
 const MAX_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
 const INSTANCE_LOCK_FILENAME: &str = "_instance.lock";
+const WINDOW_STATE_FILENAME: &str = "_window_state.json";
+
+/// Persisted desktop window geometry stored in `<base_dir>/_window_state.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindowState {
+  pub width: f64,
+  pub height: f64,
+  #[serde(default)]
+  pub x: Option<i32>,
+  #[serde(default)]
+  pub y: Option<i32>,
+  #[serde(default)]
+  pub maximized: bool,
+}
+
+impl SavedWindowState {
+  pub fn sanitized(mut self) -> Self {
+    if !self.width.is_finite() {
+      self.width = 1440.0;
+    }
+    if !self.height.is_finite() {
+      self.height = 900.0;
+    }
+    self.width = self.width.clamp(960.0, 3840.0);
+    self.height = self.height.clamp(640.0, 2400.0);
+    self
+  }
+}
+
+pub fn load_window_state(base_dir: &Path) -> Option<SavedWindowState> {
+  let path = base_dir.join(WINDOW_STATE_FILENAME);
+  let bytes = std::fs::read(path).ok()?;
+  serde_json::from_slice::<SavedWindowState>(&bytes)
+    .ok()
+    .map(SavedWindowState::sanitized)
+}
+
+pub fn save_window_state(base_dir: &Path, state: &SavedWindowState) -> io::Result<()> {
+  std::fs::create_dir_all(base_dir)?;
+  let sanitized = state.clone().sanitized();
+  let bytes = serde_json::to_vec_pretty(&sanitized).map_err(io::Error::other)?;
+  let tmp = base_dir.join(format!(
+    "{WINDOW_STATE_FILENAME}.tmp.{}",
+    uuid::Uuid::new_v4()
+  ));
+  let dst = base_dir.join(WINDOW_STATE_FILENAME);
+  std::fs::write(&tmp, bytes)?;
+  std::fs::rename(tmp, dst)
+}
+
+/// Open the operating system's native folder picker dialog. Returns `Ok(None)`
+/// if the user cancels the dialog.
+pub fn pick_directory_native(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+  #[cfg(target_os = "macos")]
+  {
+    let mut script = String::from("POSIX path of (choose folder with prompt \"选择工作区目录\"");
+    if let Some(dir) = initial_dir.filter(|p| p.is_dir()) {
+      let escaped = dir
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+      script.push_str(&format!(" default location POSIX file \"{escaped}\""));
+    }
+    script.push(')');
+    let output = std::process::Command::new("osascript")
+      .arg("-e")
+      .arg(&script)
+      .output()
+      .map_err(|err| format!("failed to invoke macOS folder picker: {err}"))?;
+    if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      if stderr.contains("-128") || stderr.to_ascii_lowercase().contains("cancel") {
+        return Ok(None);
+      }
+      return Err(format!("folder picker failed: {}", stderr.trim()));
+    }
+    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if chosen.is_empty() {
+      return Ok(None);
+    }
+    let trimmed = chosen.trim_end_matches('/');
+    let path = if trimmed.is_empty() { "/" } else { trimmed };
+    Ok(Some(PathBuf::from(path)))
+  }
+
+  #[cfg(target_os = "linux")]
+  {
+    let mut cmd = std::process::Command::new("zenity");
+    cmd.args([
+      "--file-selection",
+      "--directory",
+      "--title=Select Workspace",
+    ]);
+    if let Some(dir) = initial_dir.filter(|p| p.is_dir()) {
+      cmd.arg(format!("--filename={}/", dir.display()));
+    }
+    match cmd.output() {
+      Ok(output) if output.status.success() => {
+        let chosen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!chosen.is_empty()).then(|| PathBuf::from(chosen)))
+      }
+      Ok(output) if output.status.code() == Some(1) => Ok(None),
+      Ok(output) => Err(format!(
+        "zenity folder picker failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+      )),
+      Err(err) => Err(format!(
+        "failed to launch folder picker (install `zenity` on Linux): {err}"
+      )),
+    }
+  }
+
+  #[cfg(target_os = "windows")]
+  {
+    let initial = initial_dir
+      .filter(|p| p.is_dir())
+      .map(|p| p.to_string_lossy().replace('\'', "''"))
+      .unwrap_or_default();
+    let ps = format!(
+      "Add-Type -AssemblyName System.Windows.Forms; \
+       $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+       if ('{initial}' -ne '') {{ $d.SelectedPath = '{initial}' }}; \
+       if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }}"
+    );
+    let output = std::process::Command::new("powershell")
+      .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+      .output()
+      .map_err(|err| format!("failed to invoke Windows folder picker: {err}"))?;
+    if !output.status.success() {
+      return Err(format!(
+        "Windows folder picker failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+      ));
+    }
+    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!chosen.is_empty()).then(|| PathBuf::from(chosen)))
+  }
+
+  #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+  {
+    let _ = initial_dir;
+    Err("native directory picker is not supported on this platform".to_string())
+  }
+}
+
+/// Open a local artifact with the system default application, or reveal it in
+/// the OS file manager (Finder / Explorer / xdg-open parent directory).
+pub fn open_or_reveal_path_native(path: &Path, reveal: bool) -> Result<(), String> {
+  if !path.exists() {
+    return Err(format!("file does not exist: {}", path.display()));
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    let mut cmd = std::process::Command::new("open");
+    if reveal {
+      cmd.arg("-R");
+    }
+    cmd.arg(path);
+    let status = cmd
+      .status()
+      .map_err(|err| format!("failed to launch `open`: {err}"))?;
+    if !status.success() {
+      return Err(format!("`open` exited with status {status}"));
+    }
+    Ok(())
+  }
+
+  #[cfg(target_os = "linux")]
+  {
+    let target = if reveal {
+      path.parent().unwrap_or(path)
+    } else {
+      path
+    };
+    let status = std::process::Command::new("xdg-open")
+      .arg(target)
+      .status()
+      .map_err(|err| format!("failed to launch `xdg-open`: {err}"))?;
+    if !status.success() {
+      return Err(format!("`xdg-open` exited with status {status}"));
+    }
+    Ok(())
+  }
+
+  #[cfg(target_os = "windows")]
+  {
+    let status = if reveal {
+      std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .status()
+        .map_err(|err| format!("failed to launch explorer: {err}"))?
+    } else {
+      std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .status()
+        .map_err(|err| format!("failed to open file: {err}"))?
+    };
+    if !status.success() {
+      return Err(format!("OS opener exited with status {status}"));
+    }
+    Ok(())
+  }
+
+  #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+  {
+    let _ = (path, reveal);
+    Err("native file opener is not supported on this platform".to_string())
+  }
+}
 
 /// Default log directory under the user's home (`~/.yanshi/logs`).
 pub fn default_log_dir() -> PathBuf {
@@ -227,5 +438,24 @@ mod tests {
     rotate_log_if_oversized(&log_path);
     assert!(!log_path.exists());
     assert!(tmp.path().join("desktop.log.1").is_file());
+  }
+
+  #[test]
+  fn window_state_round_trips_and_clamps_bounds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let raw = SavedWindowState {
+      width: 200.0,
+      height: 9999.0,
+      x: Some(120),
+      y: Some(80),
+      maximized: true,
+    };
+    save_window_state(tmp.path(), &raw).expect("save window state");
+    let loaded = load_window_state(tmp.path()).expect("load window state");
+    assert_eq!(loaded.width, 960.0);
+    assert_eq!(loaded.height, 2400.0);
+    assert_eq!(loaded.x, Some(120));
+    assert_eq!(loaded.y, Some(80));
+    assert!(loaded.maximized);
   }
 }

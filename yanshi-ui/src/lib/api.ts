@@ -56,6 +56,63 @@ export const isTauriRuntime = (): boolean =>
   typeof window !== 'undefined' &&
   (Boolean(window.__TAURI_INTERNALS__) || Boolean(window.__YANSHI_API_BASE__));
 
+/**
+ * True when connected to the local desktop loopback engine (Tauri GUI or
+ * `yanshi-studio --web`) without a remote operator API override.
+ */
+export const isLocalDesktopEngine = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const overrideBase = normalizeApiBaseUrl(readStorage(apiBaseUrlKey, ''));
+  if (overrideBase && !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(overrideBase)) {
+    return false;
+  }
+  return isTauriRuntime() || Boolean(getEmbeddedApiToken());
+};
+
+/** Open the OS native directory picker on the desktop loopback engine. */
+export const pickDesktopDirectory = async (
+  apiToken: string,
+  initialDir?: string,
+): Promise<{ path: string | null; cancelled: boolean }> => {
+  const res = await apiFetch('/v1/desktop/pick-directory', apiToken, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ initial_dir: initialDir?.trim() || undefined }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as { path?: unknown; cancelled?: unknown };
+  return {
+    path: typeof json.path === 'string' && json.path.trim() ? json.path : null,
+    cancelled: Boolean(json.cancelled),
+  };
+};
+
+/** Open or reveal a run artifact in the OS default app / file manager. */
+export const openDesktopArtifact = async (
+  apiToken: string,
+  apiPath: string,
+  mode: 'open' | 'reveal',
+  tenantId?: string,
+): Promise<void> => {
+  const res = await apiFetch(
+    '/v1/desktop/open-artifact',
+    apiToken,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_path: apiPath, mode }),
+    },
+    tenantId,
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+};
+
 /** Resolve a gateway path like `/v1/runs` against the active API base URL. */
 export const resolveApiUrl = (path: string): string => {
   if (/^https?:\/\//i.test(path)) {

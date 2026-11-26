@@ -5969,3 +5969,23 @@ button.nb-citation-chip:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+
+/* ── Desktop native controls (Phase 3) ───────────────────────────────── */
+.harness-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.harness-workspace-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.studio-media-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}

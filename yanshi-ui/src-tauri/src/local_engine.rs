@@ -780,6 +780,8 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
   let ui_router = build_embedded_ui_router(state.clone());
   let v1_router = Router::new()
     .route("/v1/diagnostics", get(get_diagnostics))
+    .route("/v1/desktop/pick-directory", post(desktop_pick_directory))
+    .route("/v1/desktop/open-artifact", post(desktop_open_artifact))
     .route(
       "/v1/preferences",
       get(list_preferences).put(put_preferences),
@@ -2873,6 +2875,177 @@ async fn download_artifacts_zip(
 }
 
 #[derive(Debug, Deserialize)]
+struct DesktopPickDirectoryRequest {
+  #[serde(default)]
+  initial_dir: Option<String>,
+}
+
+async fn desktop_pick_directory(Json(req): Json<DesktopPickDirectoryRequest>) -> Response {
+  let initial = req
+    .initial_dir
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .map(PathBuf::from);
+  match tokio::task::spawn_blocking(move || {
+    crate::runtime_guard::pick_directory_native(initial.as_deref())
+  })
+  .await
+  {
+    Ok(Ok(Some(chosen))) => Json(serde_json::json!({
+      "path": chosen.display().to_string(),
+      "cancelled": false,
+    }))
+    .into_response(),
+    Ok(Ok(None)) => Json(serde_json::json!({
+      "path": null,
+      "cancelled": true,
+    }))
+    .into_response(),
+    Ok(Err(msg)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("folder picker task failed: {err}"),
+    ),
+  }
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopOpenArtifactRequest {
+  api_path: String,
+  #[serde(default)]
+  mode: Option<String>,
+}
+
+fn resolve_run_artifact_api_path(
+  state: &LocalEngineState,
+  tenant: &str,
+  api_path: &str,
+) -> Result<PathBuf, (StatusCode, String)> {
+  let trimmed = api_path.trim();
+  let parsed = url::Url::parse(&format!("http://127.0.0.1{trimmed}"))
+    .or_else(|_| url::Url::parse(trimmed))
+    .map_err(|_| {
+      (
+        StatusCode::BAD_REQUEST,
+        "invalid artifact api_path".to_string(),
+      )
+    })?;
+  let segments: Vec<&str> = parsed.path().trim_matches('/').split('/').collect();
+  if segments.len() < 4 || segments[0] != "v1" || segments[1] != "runs" {
+    return Err((
+      StatusCode::BAD_REQUEST,
+      "api_path must point to a run preview or artifact endpoint".to_string(),
+    ));
+  }
+  let run_id = Uuid::parse_str(segments[2]).map_err(|_| {
+    (
+      StatusCode::BAD_REQUEST,
+      "invalid run UUID in api_path".to_string(),
+    )
+  })?;
+
+  if segments.len() == 4 && segments[3] == "preview" {
+    {
+      let guard = state.lock_runs();
+      if !guard
+        .get(&run_id)
+        .is_some_and(|e| e.record.tenant_id == tenant)
+      {
+        return Err((StatusCode::NOT_FOUND, "run not found".to_string()));
+      }
+    }
+    let rel_path = parsed
+      .query_pairs()
+      .find(|(k, _)| k == "path")
+      .map(|(_, v)| v.into_owned())
+      .ok_or_else(|| {
+        (
+          StatusCode::BAD_REQUEST,
+          "preview api_path is missing `path` query parameter".to_string(),
+        )
+      })?;
+    let run_dir = state.base_dir.join(run_id.to_string());
+    return resolve_confined_path(&run_dir, &rel_path)
+      .map_err(|msg| (StatusCode::BAD_REQUEST, msg));
+  }
+
+  if segments.len() == 5 && segments[3] == "artifacts" {
+    let artifact_id = Uuid::parse_str(segments[4]).map_err(|_| {
+      (
+        StatusCode::BAD_REQUEST,
+        "invalid artifact UUID in api_path".to_string(),
+      )
+    })?;
+    let found = {
+      let guard = state.lock_runs();
+      guard
+        .get(&run_id)
+        .filter(|e| e.record.tenant_id == tenant)
+        .and_then(|e| e.artifacts.iter().find(|a| a.id == artifact_id).cloned())
+    };
+    let Some(artifact) = found else {
+      return Err((StatusCode::NOT_FOUND, "artifact not found".to_string()));
+    };
+    let run_dir = state.base_dir.join(run_id.to_string());
+    let canonical_root = std::fs::canonicalize(&run_dir)
+      .map_err(|err| (StatusCode::NOT_FOUND, format!("run dir not found: {err}")))?;
+    let canonical_file = std::fs::canonicalize(&artifact.file_path).map_err(|err| {
+      (
+        StatusCode::NOT_FOUND,
+        format!("artifact file not found: {err}"),
+      )
+    })?;
+    if !canonical_file.starts_with(&canonical_root) {
+      return Err((
+        StatusCode::BAD_REQUEST,
+        "artifact path escapes run directory".to_string(),
+      ));
+    }
+    return Ok(canonical_file);
+  }
+
+  Err((
+    StatusCode::BAD_REQUEST,
+    "unsupported artifact api_path".to_string(),
+  ))
+}
+
+async fn desktop_open_artifact(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  Json(req): Json<DesktopOpenArtifactRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let reveal = matches!(
+    req.mode.as_deref().map(str::trim),
+    Some("reveal" | "folder" | "finder")
+  );
+  let resolved = match resolve_run_artifact_api_path(&state, &tenant, &req.api_path) {
+    Ok(p) => p,
+    Err((code, msg)) => return error_json(code, &msg),
+  };
+  let display = resolved.display().to_string();
+  match tokio::task::spawn_blocking(move || {
+    crate::runtime_guard::open_or_reveal_path_native(&resolved, reveal)
+  })
+  .await
+  {
+    Ok(Ok(())) => Json(serde_json::json!({
+      "ok": true,
+      "path": display,
+      "mode": if reveal { "reveal" } else { "open" },
+    }))
+    .into_response(),
+    Ok(Err(msg)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("native opener task failed: {err}"),
+    ),
+  }
+}
+
+#[derive(Debug, Deserialize)]
 struct PreviewQuery {
   path: String,
 }
@@ -4554,5 +4727,90 @@ nodes:
       assert_eq!(entry.events.len(), 1);
       assert_eq!(entry.events[0].kind, "workflow.completed");
     }
+  }
+
+  #[test]
+  fn desktop_open_artifact_resolver_enforces_tenant_and_run_dir_confinement() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let run_id = Uuid::new_v4();
+    let run_dir = tmp.path().join(run_id.to_string());
+    let sample = run_dir.join("outputs").join("deck.pptx");
+    std::fs::create_dir_all(sample.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&sample, b"pptx-bytes").expect("write");
+
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    let (tx, _rx) = broadcast::channel(8);
+    let art_id = Uuid::new_v4();
+    state.lock_runs().insert(
+      run_id,
+      RunEntry {
+        record: LocalRunRecord {
+          id: run_id,
+          workflow: "name: opener-test".to_string(),
+          status: "succeeded".to_string(),
+          tenant_id: "default".to_string(),
+          started_at: Utc::now(),
+          finished_at: Some(Utc::now()),
+          run_dir: Some(run_dir.display().to_string()),
+          error: None,
+        },
+        events: Vec::new(),
+        events_loaded: true,
+        artifacts: vec![LocalArtifactSummary {
+          id: art_id,
+          node_id: "slides".to_string(),
+          name: "deck.pptx".to_string(),
+          mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            .to_string(),
+          size_bytes: 10,
+          sha256: None,
+          created_at: Utc::now(),
+          file_path: sample.clone(),
+        }],
+        tx,
+        cancel_token: FlowCancellationToken::new(),
+        debug_controller: None,
+        attempt_start_seq: 0,
+        model: None,
+        cost_limit_usd: None,
+        notebook_id: None,
+        notebook_kind: None,
+        on_complete: None,
+      },
+    );
+
+    // Valid preview path resolves inside run_dir.
+    let preview_ok = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/preview?path=outputs/deck.pptx"),
+    )
+    .expect("preview resolves");
+    assert_eq!(preview_ok, std::fs::canonicalize(&sample).expect("canon"));
+
+    // Valid artifact ID resolves inside run_dir.
+    let art_ok = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/artifacts/{art_id}"),
+    )
+    .expect("artifact resolves");
+    assert_eq!(art_ok, std::fs::canonicalize(&sample).expect("canon"));
+
+    // Path traversal is rejected.
+    let traversal = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/preview?path=../../etc/passwd"),
+    );
+    assert!(traversal.is_err());
+
+    // Wrong tenant is rejected with 404.
+    let wrong_tenant = resolve_run_artifact_api_path(
+      &state,
+      "other-tenant",
+      &format!("/v1/runs/{run_id}/artifacts/{art_id}"),
+    );
+    assert_eq!(wrong_tenant.unwrap_err().0, StatusCode::NOT_FOUND);
   }
 }
