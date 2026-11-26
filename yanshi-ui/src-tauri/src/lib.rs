@@ -91,6 +91,13 @@ fn position_is_on_any_monitor(app: &tauri::App, x: i32, y: i32) -> bool {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resolve_desktop_webview_url(api_base: &str) -> Result<WebviewUrl, Box<dyn std::error::Error>> {
+  if std::env::var("YANSHI_DESKTOP_UI")
+    .ok()
+    .is_some_and(|v| v.trim().eq_ignore_ascii_case("dx"))
+  {
+    let dx_url: tauri::Url = format!("{api_base}/ui-dx").parse()?;
+    return Ok(WebviewUrl::External(dx_url));
+  }
   if cfg!(feature = "custom-protocol") {
     return Ok(WebviewUrl::App("index.html".into()));
   }

@@ -1,0 +1,8 @@
+# Copy this file to `yanshi-ui-dx/.cargo/config.toml` (gitignored) when doing
+# live two-way component development against a local checkout of `dioxus-ui`.
+# Remove or rename `.cargo/config.toml` to verify against published crates.io.
+
+[patch.crates-io]
+dioxus-shadcn-core = { path = "/Users/hal/arch/dioxus-ui/crates/dioxus-shadcn-core" }
+dioxus-shadcn-primitives = { path = "/Users/hal/arch/dioxus-ui/crates/dioxus-shadcn-primitives" }
+dioxus-shadcn = { path = "/Users/hal/arch/dioxus-ui/crates/dioxus-shadcn" }
