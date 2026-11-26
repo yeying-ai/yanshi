@@ -227,7 +227,7 @@ impl LLMClient {
       false,                // requires streaming (this is non-streaming)
       self.tools.is_some(), // uses tools
     )?;
-    let provider = registry.get_provider(&model_config.vendor)?;
+    let provider = registry.get_provider_for_model(&self.model_name, &model_config.vendor)?;
     // P-LLM2.7: wait for this vendor's token bucket before dispatching —
     // `None` means no `rate_limit` configured for this vendor (no
     // enforcement, matching pre-fix behavior).
@@ -375,7 +375,7 @@ impl LLMClient {
       false,
       self.tools.is_some(),
     )?;
-    let provider = registry.get_provider(&model_config.vendor)?;
+    let provider = registry.get_provider_for_model(&self.model_name, &model_config.vendor)?;
     // P-LLM2.7: wait for this vendor's token bucket before dispatching —
     // `None` means no `rate_limit` configured for this vendor (no
     // enforcement, matching pre-fix behavior).
@@ -469,7 +469,7 @@ impl LLMClient {
       self.tools.is_some(), // uses tools
     )?;
 
-    let provider = registry.get_provider(&model_config.vendor)?;
+    let provider = registry.get_provider_for_model(&self.model_name, &model_config.vendor)?;
     // P-LLM2.7: wait for this vendor's token bucket before dispatching —
     // `None` means no `rate_limit` configured for this vendor (no
     // enforcement, matching pre-fix behavior).

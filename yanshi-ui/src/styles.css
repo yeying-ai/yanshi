@@ -6351,3 +6351,200 @@ dialog.ys-drawer--full {
     border-radius: 0;
   }
 }
+
+
+/* ── Model & Provider Configuration Drawer (Phase 5) ─────────────────── */
+.ys-model-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px;
+  background: #e2e8f0;
+  border-radius: 8px;
+}
+
+.ys-model-tab--active {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.ys-model-grid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 520px;
+}
+
+.ys-model-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-right: 1px solid #e2e8f0;
+  padding-right: 14px;
+  min-width: 0;
+}
+
+.ys-model-add-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.ys-model-search,
+.ys-model-filter {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 12.5px;
+  background: #ffffff;
+}
+
+.ys-provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+.ys-provider-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ys-provider-item:hover {
+  border-color: #93c5fd;
+  background: #f8fafc;
+}
+
+.ys-provider-item--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.ys-provider-item__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.ys-provider-item small {
+  font-size: 11.5px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ys-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.ys-status-dot--ok {
+  background: #16a34a;
+}
+
+.ys-status-dot--idle {
+  background: #cbd5e1;
+}
+
+.ys-pill {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.ys-pill--custom {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.ys-pill--override {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.ys-model-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ys-preset-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: #475569;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+}
+
+.ys-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.ys-modality-checks {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #334155;
+}
+
+.ys-check-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.ys-model-form__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid #e2e8f0;
+}
+
+@media (max-width: 720px) {
+  .ys-model-grid {
+    grid-template-columns: 1fr;
+  }
+  .ys-model-sidebar {
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+    padding-right: 0;
+    padding-bottom: 12px;
+  }
+}

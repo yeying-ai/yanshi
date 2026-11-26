@@ -8,6 +8,74 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+
+static RUNTIME_ENV_OVERRIDES: OnceLock<RwLock<HashMap<String, Option<String>>>> = OnceLock::new();
+
+fn runtime_env_overrides() -> &'static RwLock<HashMap<String, Option<String>>> {
+  RUNTIME_ENV_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Set or clear an in-process runtime environment override for `key` without
+/// mutating process-global env vars (`std::env::set_var` is `unsafe` in
+/// multi-threaded runtimes).
+///
+/// - `Some(value)` overrides `key` with `value`.
+/// - `None` marks `key` as explicitly unset, masking any inherited env var.
+pub fn set_runtime_env_override(key: impl Into<String>, value: Option<String>) {
+  let mut guard = match runtime_env_overrides().write() {
+    Ok(g) => g,
+    Err(poisoned) => poisoned.into_inner(),
+  };
+  guard.insert(key.into(), value);
+}
+
+/// Remove a previously installed runtime override so `key` falls back to
+/// `std::env::var(key)`.
+pub fn clear_runtime_env_override(key: &str) {
+  let mut guard = match runtime_env_overrides().write() {
+    Ok(g) => g,
+    Err(poisoned) => poisoned.into_inner(),
+  };
+  guard.remove(key);
+}
+
+/// Resolve an environment variable, honoring thread-safe in-process runtime
+/// overrides installed by hot-reloadable configuration stores before falling
+/// back to `std::env::var`.
+pub fn resolve_env_var(key: &str) -> Option<String> {
+  let guard = match runtime_env_overrides().read() {
+    Ok(g) => g,
+    Err(poisoned) => poisoned.into_inner(),
+  };
+  if let Some(overridden) = guard.get(key) {
+    return overridden.clone();
+  }
+  drop(guard);
+  env::var(key).ok()
+}
+
+/// Built-in vendor names supported directly by `create_provider` / modality dispatch.
+pub const BUILTIN_VENDORS: &[&str] = &[
+  "openai",
+  "anthropic",
+  "google",
+  "gemini",
+  "moonshot",
+  "dashscope",
+  "step",
+  "stepfun",
+  "glm",
+  "bigmodel",
+  "zhipu",
+  "deepseek",
+  "minimax",
+  "kling",
+  "mock",
+];
+
+/// Wire protocols supported for user-defined custom providers.
+pub const SUPPORTED_CUSTOM_PROTOCOLS: &[&str] = &["openai", "anthropic", "google"];
 
 /// Configuration for a specific model
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +446,11 @@ pub struct ProviderConfig {
   /// Environment variable name for the API key
   pub api_key_env: String,
 
+  /// Optional wire protocol for custom/third-party providers
+  /// (`"openai"`, `"anthropic"`, or `"google"`). Built-in vendors omit this.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub protocol: Option<String>,
+
   /// Default base URL for this provider
   pub base_url: Option<String>,
 
@@ -697,6 +770,32 @@ impl LLMConfig {
     self.providers.get(provider_name)
   }
 
+  /// Return true if `vendor` is a built-in vendor or a user-defined provider
+  /// declaring a supported wire `protocol` (`openai` / `anthropic` / `google`).
+  pub fn is_supported_vendor(&self, vendor: &str) -> bool {
+    let lower = vendor.to_ascii_lowercase();
+    if BUILTIN_VENDORS.contains(&lower.as_str()) {
+      return true;
+    }
+    self
+      .providers
+      .get(vendor)
+      .and_then(|p| p.protocol.as_deref())
+      .map(|proto| proto.trim().to_ascii_lowercase())
+      .is_some_and(|proto| SUPPORTED_CUSTOM_PROTOCOLS.contains(&proto.as_str()))
+  }
+
+  /// Resolve the wire protocol adapter name for `provider_name`: explicit
+  /// `ProviderConfig.protocol` when set, otherwise `provider_name` itself.
+  pub fn effective_provider_protocol<'a>(&'a self, provider_name: &'a str) -> &'a str {
+    self
+      .get_provider(provider_name)
+      .and_then(|p| p.protocol.as_deref())
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+      .unwrap_or(provider_name)
+  }
+
   /// Resolve an explicit non-empty `<VENDOR>_BASE_URL` environment override
   /// for `provider_name`, when set by the operator or container runtime.
   pub fn env_base_url_for_vendor(provider_name: &str) -> Option<String> {
@@ -715,7 +814,7 @@ impl LLMConfig {
     };
 
     for env_var in env_vars {
-      if let Ok(raw) = env::var(env_var) {
+      if let Some(raw) = resolve_env_var(env_var) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
           return Some(trimmed.to_string());
@@ -739,7 +838,7 @@ impl LLMConfig {
       .map(ToOwned::to_owned)
   }
 
-  /// Get API key for a provider from environment variables.
+  /// Get API key for a provider from runtime overrides or environment variables.
   ///
   /// Empty or whitespace-only values (commonly injected by Docker Compose
   /// `${VAR:-}` interpolation when a host `.env` leaves optional provider keys
@@ -752,7 +851,7 @@ impl LLMConfig {
 
     // First try provider-specific config
     if let Some(provider_config) = self.get_provider(provider_name)
-      && let Ok(api_key) = env::var(&provider_config.api_key_env)
+      && let Some(api_key) = resolve_env_var(&provider_config.api_key_env)
     {
       let trimmed = api_key.trim();
       if !trimmed.is_empty() {
@@ -776,7 +875,7 @@ impl LLMConfig {
     };
 
     for env_var in common_env_vars {
-      if let Ok(api_key) = env::var(env_var) {
+      if let Some(api_key) = resolve_env_var(env_var) {
         let trimmed = api_key.trim();
         if !trimmed.is_empty() {
           return Ok(trimmed.to_string());
@@ -834,26 +933,8 @@ impl LLMConfig {
     }
 
     for (model_name, model_config) in &self.models {
-      // Check if vendor is supported — always a hard error.
-      if ![
-        "openai",
-        "anthropic",
-        "google",
-        "gemini",
-        "moonshot",
-        "dashscope",
-        "step",
-        "stepfun",
-        "glm",
-        "bigmodel",
-        "zhipu",
-        "deepseek",
-        "minimax",
-        "kling",
-        "mock",
-      ]
-      .contains(&model_config.vendor.as_str())
-      {
+      // Check if vendor is supported (built-in or custom provider with protocol) — always a hard error.
+      if !self.is_supported_vendor(&model_config.vendor) {
         return Err(LLMError::UnsupportedProvider {
           provider: model_config.vendor.clone(),
         });

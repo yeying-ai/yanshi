@@ -38,6 +38,7 @@ pub mod harness_approval;
 pub mod harness_live;
 pub mod live_state_registry;
 pub mod metrics;
+pub mod models_config;
 pub mod notebooks;
 pub mod preferences;
 pub mod run_questions;
@@ -800,6 +801,20 @@ pub fn create_router(state: AppState) -> Router {
       post(answer_interrupt),
     )
     .route("/v1/diagnostics", get(diagnostics::get_diagnostics))
+    .route("/v1/models/config", get(models_config::get_models_config))
+    .route(
+      "/v1/models/providers/:name",
+      axum::routing::put(models_config::put_model_provider)
+        .delete(models_config::delete_model_provider),
+    )
+    .route(
+      "/v1/models/providers/:name/test",
+      post(models_config::test_model_provider),
+    )
+    .route(
+      "/v1/models/items/:name",
+      axum::routing::put(models_config::put_model_item).delete(models_config::delete_model_item),
+    )
     .route(
       "/v1/preferences",
       get(preferences::list_preferences).put(preferences::put_preferences),

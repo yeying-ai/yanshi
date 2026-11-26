@@ -6,6 +6,11 @@ import {
 } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { ExpandableDrawer } from '../components/ExpandableDrawer';
+import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelConfigDrawer,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
 import { SpaLink } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
 import { usePaneLayout } from '../lib/usePaneLayout';
@@ -440,6 +445,7 @@ export function WorkflowStudioPage({
   const [releaseFormCollapsed, setReleaseFormCollapsed] = useState<boolean>(false);
   const [configDrawerOpen, setConfigDrawerOpen] = useState<boolean>(false);
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState<boolean>(false);
+  const [modelConfigOpen, setModelConfigOpen] = useState<boolean>(false);
   const [showYamlEditor, setShowYamlEditor] = useState<boolean>(true);
   const [yamlModalOpen, setYamlModalOpen] = useState<boolean>(false);
   const [mobilePane, setMobilePane] = useState<MobilePane>('canvas');
@@ -1937,6 +1943,16 @@ export function WorkflowStudioPage({
             )}
           </div>
 
+          <button
+            type="button"
+            data-testid="open-model-config-btn"
+            className="studio-btn-ghost studio-btn-sm"
+            onClick={() => setModelConfigOpen(true)}
+            title="配置各厂商 Base URL、API Key、自定义中转与模型参数"
+          >
+            ⚙ 模型配置
+          </button>
+
           <nav className="studio-aux-links" aria-label="辅助控制台导航">
             <SpaLink to="/ui/notebooks" data-testid="studio-nav-notebooks">
               📚 内容笔记本
@@ -2403,6 +2419,7 @@ export function WorkflowStudioPage({
                     </small>
                     <input
                       type="text"
+                      list={MODEL_SUGGESTIONS_DATALIST_ID}
                       placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
                       value={modelOverride}
                       onChange={(ev) => setModelOverride(ev.target.value)}
@@ -2827,6 +2844,7 @@ export function WorkflowStudioPage({
                 </small>
                 <input
                   type="text"
+                  list={MODEL_SUGGESTIONS_DATALIST_ID}
                   placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
                   value={modelOverride}
                   onChange={(ev) => setModelOverride(ev.target.value)}
@@ -3408,6 +3426,13 @@ export function WorkflowStudioPage({
           ) : null}
         </div>
       </ExpandableDrawer>
+
+      <ModelSuggestionsDatalist apiToken={apiToken} />
+      <ModelConfigDrawer
+        open={modelConfigOpen}
+        onClose={() => setModelConfigOpen(false)}
+        apiToken={apiToken}
+      />
     </div>
   );
 }

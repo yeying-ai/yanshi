@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
 import { ExpandableDrawer } from '../components/ExpandableDrawer';
 import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
+import {
   NotebookDeliverableViewer,
   hasExclusiveDeliverableView,
 } from '../components/NotebookDeliverableViewer';
@@ -3058,6 +3062,7 @@ export function NotebookWorkspacePage({
                   id="nb-model-input"
                   name="model"
                   type="text"
+                  list={MODEL_SUGGESTIONS_DATALIST_ID}
                   data-testid="notebook-model-input"
                   autoCorrect="off"
                   autoCapitalize="none"
@@ -3601,6 +3606,8 @@ export function NotebookWorkspacePage({
           </div>
         ) : null}
       </ExpandableDrawer>
+
+      <ModelSuggestionsDatalist apiToken={apiToken} />
 
       <dialog
         ref={deleteDialogRef}

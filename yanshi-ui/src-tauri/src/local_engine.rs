@@ -780,6 +780,16 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
   let ui_router = build_embedded_ui_router(state.clone());
   let v1_router = Router::new()
     .route("/v1/diagnostics", get(get_diagnostics))
+    .route("/v1/models/config", get(get_models_config))
+    .route(
+      "/v1/models/providers/:name",
+      axum::routing::put(put_model_provider).delete(delete_model_provider),
+    )
+    .route("/v1/models/providers/:name/test", post(test_model_provider))
+    .route(
+      "/v1/models/items/:name",
+      axum::routing::put(put_model_item).delete(delete_model_item),
+    )
     .route("/v1/desktop/pick-directory", post(desktop_pick_directory))
     .route("/v1/desktop/open-artifact", post(desktop_open_artifact))
     .route(
@@ -2872,6 +2882,103 @@ async fn download_artifacts_zip(
     res.headers_mut().insert(header::CONTENT_DISPOSITION, val);
   }
   res
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeleteProviderQuery {
+  #[serde(default)]
+  clear_api_key: Option<bool>,
+}
+
+fn desktop_models_config_dir() -> Result<PathBuf, String> {
+  yanshi_llm::config::user_store::default_yanshi_config_dir().map_err(|err| err.to_string())
+}
+
+async fn get_models_config() -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match tokio::task::spawn_blocking(move || {
+    yanshi_llm::config::user_store::get_model_config_snapshot(&dir)
+  })
+  .await
+  {
+    Ok(Ok(snapshot)) => Json(snapshot).into_response(),
+    Ok(Err(err)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("models config task failed: {err}"),
+    ),
+  }
+}
+
+async fn put_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Json(patch): Json<yanshi_llm::config::user_store::UpsertProviderPatch>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::upsert_provider_config(&dir, &name, patch, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn delete_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Query(query): Query<DeleteProviderQuery>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  let clear_key = query.clear_api_key.unwrap_or(false);
+  match yanshi_llm::config::user_store::delete_provider_config(&dir, &name, clear_key, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn put_model_item(
+  RoutePath(name): RoutePath<String>,
+  Json(patch): Json<yanshi_llm::config::user_store::UpsertModelPatch>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::upsert_model_config(&dir, &name, patch, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn delete_model_item(RoutePath(name): RoutePath<String>) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::delete_model_config(&dir, &name, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn test_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Json(req): Json<yanshi_llm::config::user_store::TestProviderRequest>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::test_provider_connection(&dir, &name, req).await {
+    Ok(result) => Json(result).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
 }
 
 #[derive(Debug, Deserialize)]

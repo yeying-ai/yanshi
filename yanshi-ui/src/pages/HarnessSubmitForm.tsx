@@ -4,6 +4,10 @@
 
 import React, { useEffect, useState } from 'react';
 
+import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, isLocalDesktopEngine, pickDesktopDirectory } from '../lib/api';
 import { navigateTo } from '../lib/router';
@@ -249,6 +253,7 @@ export function HarnessSubmitForm({
             <span>Model (optional)</span>
             <input
               data-testid="harness-new-model"
+              list={MODEL_SUGGESTIONS_DATALIST_ID}
               value={model}
               onChange={(event) => setModel(event.target.value)}
               placeholder="留空使用服务端默认模型（如 deepseek-chat）"
@@ -312,6 +317,7 @@ export function HarnessSubmitForm({
           </small>
         </footer>
       </form>
+      <ModelSuggestionsDatalist apiToken={apiToken} />
     </main>
   );
 }

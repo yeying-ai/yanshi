@@ -58,24 +58,8 @@ impl ConfigValidator {
     _model_name: &str,
     model_config: &crate::config::ModelConfig,
   ) -> Result<()> {
-    // Check vendor is supported
-    let supported_vendors = [
-      "openai",
-      "anthropic",
-      "google",
-      "gemini",
-      "moonshot",
-      "dashscope",
-      "step",
-      "stepfun",
-      "glm",
-      "bigmodel",
-      "zhipu",
-      "deepseek",
-      "minimax",
-      "kling",
-    ];
-    if !supported_vendors.contains(&model_config.vendor.as_str()) {
+    // Check vendor is supported (built-in or custom provider with protocol)
+    if !self.config.is_supported_vendor(&model_config.vendor) {
       return Err(LLMError::UnsupportedProvider {
         provider: model_config.vendor.clone(),
       });
