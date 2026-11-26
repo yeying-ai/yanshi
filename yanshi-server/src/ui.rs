@@ -28,7 +28,7 @@ pub const DX_UI_DIR_ENV: &str = "YANSHI_DX_UI_DIR";
 
 /// Strict CSP applied to `/ui-dx/*` responses to verify `dioxus-shadcn` RFC 0080
 /// (zero JS `eval` / zero inline script execution; only `'wasm-unsafe-eval'`).
-pub const DX_UI_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*; frame-src 'self' blob:; object-src 'none'; base-uri 'self'";
+pub const DX_UI_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-src 'self' blob:; object-src 'none'; base-uri 'self'";
 
 /// Static UI routes mounted by [`crate::create_router`].
 ///

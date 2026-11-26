@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "Phase 0 Dioxus 0.7 + dioxus-shadcn 0.7.0 web spike for Yanshi Studio"
+description = "Yanshi Studio Dioxus 0.7 + dioxus-shadcn 0.7 web frontend"
 
 [dependencies]
 dioxus = { version = "0.7", features = ["web"] }
@@ -13,13 +13,16 @@ dioxus-shadcn = { version = "0.7", default-features = false, features = [
   "badge",
   "button",
   "card",
+  "checkbox",
   "combobox",
   "dialog",
   "input",
   "label",
+  "native-select",
   "resizable",
   "separator",
   "sheet",
+  "table",
   "tabs",
   "textarea",
   "theme-controller",
@@ -36,13 +39,20 @@ web-sys = { version = "0.3", features = [
   "AbortSignal",
   "Blob",
   "BlobPropertyBag",
+  "Document",
+  "Element",
   "Headers",
+  "History",
+  "HtmlElement",
+  "HtmlTextAreaElement",
+  "Location",
   "ReadableStream",
   "ReadableStreamDefaultReader",
   "Request",
   "RequestInit",
   "RequestMode",
   "Response",
+  "Storage",
   "TextDecoder",
   "Url",
   "Window",
