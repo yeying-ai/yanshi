@@ -151,6 +151,8 @@ pub(crate) type RunCompletionHook =
 struct RunEntry {
   record: LocalRunRecord,
   events: Vec<LocalStreamedEvent>,
+  /// False for hydrated terminal runs until their `events.jsonl` is lazily read.
+  events_loaded: bool,
   artifacts: Vec<LocalArtifactSummary>,
   tx: broadcast::Sender<LocalStreamedEvent>,
   cancel_token: FlowCancellationToken,
@@ -237,6 +239,49 @@ impl LocalEngineState {
     }
   }
 
+  /// Lazily hydrate `events.jsonl` from disk into memory for a previously
+  /// persisted run without holding `self.runs` during filesystem I/O.
+  async fn ensure_run_events_loaded_async(&self, run_id: Uuid) {
+    let needs_load = {
+      let guard = self.lock_runs();
+      guard.get(&run_id).is_some_and(|entry| !entry.events_loaded)
+    };
+    if !needs_load {
+      return;
+    }
+    let path = self.base_dir.join(run_id.to_string()).join("events.jsonl");
+    let loaded = tokio::task::spawn_blocking(move || read_run_events_jsonl(&path))
+      .await
+      .unwrap_or_default();
+    let mut guard = self.lock_runs();
+    if let Some(entry) = guard.get_mut(&run_id)
+      && !entry.events_loaded
+    {
+      entry.events = loaded;
+      entry.events_loaded = true;
+    }
+  }
+
+  /// Sync variant used by synchronous helper paths (e.g. attach-run).
+  fn ensure_run_events_loaded_sync(&self, run_id: Uuid) {
+    let needs_load = {
+      let guard = self.lock_runs();
+      guard.get(&run_id).is_some_and(|entry| !entry.events_loaded)
+    };
+    if !needs_load {
+      return;
+    }
+    let path = self.base_dir.join(run_id.to_string()).join("events.jsonl");
+    let loaded = read_run_events_jsonl(&path);
+    let mut guard = self.lock_runs();
+    if let Some(entry) = guard.get_mut(&run_id)
+      && !entry.events_loaded
+    {
+      entry.events = loaded;
+      entry.events_loaded = true;
+    }
+  }
+
   /// Return true if any DAG run or Harness session is currently non-terminal.
   pub fn has_active_work(&self) -> bool {
     let active_run = self
@@ -313,6 +358,15 @@ fn write_persisted_run_meta_sync(run_dir: &Path, meta: &PersistedRunMeta) -> std
   std::fs::rename(tmp, dst)
 }
 
+async fn write_persisted_run_meta_async(
+  run_dir: PathBuf,
+  meta: PersistedRunMeta,
+) -> std::io::Result<()> {
+  tokio::task::spawn_blocking(move || write_persisted_run_meta_sync(&run_dir, &meta))
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
   base_dir.join(run_id.to_string()).join("checkpoint")
 }
@@ -375,12 +429,12 @@ fn hydrate_runs_from_disk(base_dir: &Path) -> HashMap<Uuid, RunEntry> {
       meta.record.error = Some("desktop_restarted_while_running".to_string());
       needs_rewrite = true;
     }
-    let events = read_run_events_jsonl(&path.join("events.jsonl"));
     let attempt_start_seq = 0;
     let (tx, _rx) = broadcast::channel(512);
     let entry = RunEntry {
       record: meta.record,
-      events,
+      events: Vec::new(),
+      events_loaded: false,
       artifacts: meta
         .artifacts
         .into_iter()
@@ -1124,6 +1178,7 @@ impl LocalEngineState {
     let entry = RunEntry {
       record,
       events: Vec::new(),
+      events_loaded: true,
       artifacts: reg.artifacts,
       tx,
       cancel_token: FlowCancellationToken::new(),
@@ -1144,6 +1199,7 @@ impl LocalEngineState {
     tenant_id: &str,
     run_id: Uuid,
   ) -> Result<CompletedRunForAttach, (StatusCode, String)> {
+    self.ensure_run_events_loaded_sync(run_id);
     let (record, artifacts, events, nb_kind) = {
       let guard = self.lock_runs();
       let Some(entry) = guard
@@ -1290,6 +1346,7 @@ impl LocalEngineState {
     let entry = RunEntry {
       record,
       events: Vec::new(),
+      events_loaded: true,
       artifacts: Vec::new(),
       tx,
       cancel_token: cancel_token.clone(),
@@ -1607,7 +1664,7 @@ async fn execute_local_flow(
     .and_then(yanshi_config::content::extract_deliverable_from_state);
 
   let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
-  let (completion_hook, persisted_nb, tenant_id, final_artifacts) = {
+  let (completion_hook, persisted_nb, tenant_id, final_artifacts, meta_to_persist) = {
     let mut guard = state.lock_runs();
     if let Some(entry) = guard.get_mut(&run_id) {
       entry.debug_controller = None;
@@ -1651,17 +1708,22 @@ async fn execute_local_flow(
           }
         }
       }
-      let _ = write_run_meta_sync(&run_dir, entry);
+      let meta_snapshot = PersistedRunMeta::from_entry(entry);
       (
         entry.on_complete.clone(),
         entry.notebook_id.zip(entry.notebook_kind.clone()),
         entry.record.tenant_id.clone(),
         entry.artifacts.clone(),
+        Some(meta_snapshot),
       )
     } else {
-      (None, None, String::new(), Vec::new())
+      (None, None, String::new(), Vec::new(), None)
     }
   };
+
+  if let Some(meta) = meta_to_persist {
+    let _ = write_persisted_run_meta_async(run_dir.clone(), meta).await;
+  }
 
   if let Some(hook) = completion_hook {
     hook(
@@ -2012,7 +2074,7 @@ async fn post_run_action(
     };
     let tenant = extract_tenant(&headers);
     let run_dir = state.base_dir.join(run_id.to_string());
-    let (record, was_active, synthetic_ev) = {
+    let (record, was_active, synthetic_ev, meta_snapshot) = {
       let mut guard = state.lock_runs();
       let Some(entry) = guard
         .get_mut(&run_id)
@@ -2032,9 +2094,10 @@ async fn post_run_action(
         entry.record.finished_at = Some(Utc::now());
         synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
       }
-      let _ = write_run_meta_sync(&run_dir, entry);
-      (entry.record.clone(), was_active, synthetic)
+      let meta = PersistedRunMeta::from_entry(entry);
+      (entry.record.clone(), was_active, synthetic, meta)
     };
+    let _ = write_persisted_run_meta_async(run_dir.clone(), meta_snapshot).await;
     if let Some(ev) = synthetic_ev {
       let _ = append_run_event_jsonl_sync(&run_dir, &ev);
     }
@@ -2103,7 +2166,15 @@ async fn post_run_action(
     }
 
     let run_dir = state.base_dir.join(run_id.to_string());
-    let (reopened_record, workflow_yaml, model_override, cost_limit_usd, cancel_token) = {
+    state.ensure_run_events_loaded_async(run_id).await;
+    let (
+      reopened_record,
+      workflow_yaml,
+      model_override,
+      cost_limit_usd,
+      cancel_token,
+      meta_snapshot,
+    ) = {
       let mut guard = state.lock_runs();
       let Some(entry) = guard
         .get_mut(&run_id)
@@ -2125,15 +2196,17 @@ async fn post_run_action(
       entry.record.status = "running".to_string();
       entry.record.finished_at = None;
       entry.record.error = None;
-      let _ = write_run_meta_sync(&run_dir, entry);
+      let meta = PersistedRunMeta::from_entry(entry);
       (
         entry.record.clone(),
         entry.record.workflow.clone(),
         entry.model.clone(),
         entry.cost_limit_usd,
         new_cancel,
+        meta,
       )
     };
+    let _ = write_persisted_run_meta_async(run_dir, meta_snapshot).await;
 
     let state_bg = state.clone();
     let base_dir_bg = state.base_dir.clone();
@@ -2409,6 +2482,7 @@ async fn events_history(
   };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
+  state.ensure_run_events_loaded_async(run_id).await;
   let guard = state.lock_runs();
   let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
     return error_json(StatusCode::NOT_FOUND, "run not found");
@@ -2434,6 +2508,7 @@ async fn stream_events(
   };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
+  state.ensure_run_events_loaded_async(run_id).await;
   let (backfill, last_backfill_seq, rx, already_done) = {
     let guard = state.lock_runs();
     let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
@@ -4403,6 +4478,7 @@ nodes:
       RunEntry {
         record,
         events: Vec::new(),
+        events_loaded: true,
         artifacts: Vec::new(),
         tx,
         cancel_token: cancel_token.clone(),
@@ -4428,5 +4504,55 @@ nodes:
     let persisted: PersistedRunMeta = serde_json::from_slice(&persisted_bytes).expect("parse meta");
     assert_eq!(persisted.record.status, "cancelled");
     assert!(persisted.record.finished_at.is_some());
+  }
+
+  #[tokio::test]
+  async fn hydrated_runs_lazy_load_events_on_demand() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let run_id = Uuid::new_v4();
+    let run_dir = tmp.path().join(run_id.to_string());
+    let meta = PersistedRunMeta {
+      record: LocalRunRecord {
+        id: run_id,
+        workflow: "name: lazy-events".to_string(),
+        status: "succeeded".to_string(),
+        tenant_id: "default".to_string(),
+        started_at: Utc::now(),
+        finished_at: Some(Utc::now()),
+        run_dir: Some(run_dir.display().to_string()),
+        error: None,
+      },
+      artifacts: Vec::new(),
+      model: None,
+      cost_limit_usd: None,
+      notebook_id: None,
+      notebook_kind: None,
+    };
+    write_persisted_run_meta_sync(&run_dir, &meta).expect("write meta");
+    let ev = LocalStreamedEvent {
+      run_id,
+      seq: 0,
+      kind: "workflow.completed".to_string(),
+      payload: serde_json::json!({ "ok": true }),
+      ts: Utc::now(),
+    };
+    append_run_event_jsonl_sync(&run_dir, &ev).expect("append event");
+
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    {
+      let guard = state.lock_runs();
+      let entry = guard.get(&run_id).expect("hydrated run");
+      assert!(!entry.events_loaded, "startup hydration must stay lazy");
+      assert!(entry.events.is_empty());
+    }
+
+    state.ensure_run_events_loaded_async(run_id).await;
+    {
+      let guard = state.lock_runs();
+      let entry = guard.get(&run_id).expect("hydrated run");
+      assert!(entry.events_loaded);
+      assert_eq!(entry.events.len(), 1);
+      assert_eq!(entry.events[0].kind, "workflow.completed");
+    }
   }
 }
