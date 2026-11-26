@@ -8,6 +8,7 @@ import {
 } from '../lib/api';
 import { appendInlineQuery, type MediaPreviewItem } from '../studio/mediaExtractor';
 import { InteractiveSortableTable, parseDelimitedTable } from './NotebookDeliverableViewer';
+import { ExpandableDrawer } from './ExpandableDrawer';
 
 export interface AuthorizedMediaProps {
   item: MediaPreviewItem;
@@ -15,6 +16,8 @@ export interface AuthorizedMediaProps {
   tenantId?: string;
   compact?: boolean;
   headerOnly?: boolean;
+  /** Internal flag preventing recursive expand buttons inside the zoom drawer. */
+  inDrawer?: boolean;
 }
 
 function formatBytes(size?: number | null): string {
@@ -40,6 +43,7 @@ export function AuthorizedMedia({
   tenantId,
   compact = false,
   headerOnly = false,
+  inDrawer = false,
 }: AuthorizedMediaProps): React.ReactElement {
   const needsHeaderFetch = requiresHeaderMediaFetch(apiToken, tenantId);
   const inlineApiPath = appendInlineQuery(item.apiPath);
@@ -50,6 +54,7 @@ export function AuthorizedMedia({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [nativeBusy, setNativeBusy] = useState<'open' | 'reveal' | null>(null);
+  const [previewDrawerOpen, setPreviewDrawerOpen] = useState<boolean>(false);
   const desktopNativeActions = isLocalDesktopEngine();
 
   const triggerNativeAction = async (mode: 'open' | 'reveal') => {
@@ -193,6 +198,17 @@ export function AuthorizedMedia({
           </small>
         </div>
         <div className="studio-media-card__actions">
+          {!headerOnly && !inDrawer && item.kind !== 'document' ? (
+            <button
+              type="button"
+              data-testid="media-expand-preview"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={() => setPreviewDrawerOpen(true)}
+              title="在宽抽屉 / 全屏中放大预览"
+            >
+              ⤢ 放大
+            </button>
+          ) : null}
           {desktopNativeActions ? (
             <>
               <button
@@ -283,6 +299,27 @@ export function AuthorizedMedia({
           )}
         </div>
       )}
+
+      {!inDrawer && previewDrawerOpen ? (
+        <ExpandableDrawer
+          open={previewDrawerOpen}
+          onClose={() => setPreviewDrawerOpen(false)}
+          title={item.label}
+          badge={kindLabelMap[item.kind]}
+          subtitle={`#${item.nodeId}${sizeLabel ? ` · ${sizeLabel}` : ''}`}
+          side="right"
+          defaultSize="full"
+          testId="media-preview-drawer"
+          bodyClassName="ys-drawer__body--media"
+        >
+          <AuthorizedMedia
+            item={item}
+            apiToken={apiToken}
+            tenantId={tenantId}
+            inDrawer
+          />
+        </ExpandableDrawer>
+      ) : null}
     </article>
   );
 }

@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+import { ExpandableDrawer } from '../components/ExpandableDrawer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
 import { apiFetch, parseSseChunk } from '../lib/api';
 import { getCurrentRoute } from '../lib/router';
@@ -75,6 +76,11 @@ export function HarnessSessionDetail({
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [expandedDetail, setExpandedDetail] = useState<{
+    title: string;
+    badge?: string;
+    content: string;
+  } | null>(null);
   const [streamState, setStreamState] = useState<ConnectionState>('idle');
   const [resumeBusy, setResumeBusy] = useState(false);
   const [resumePrompt, setResumePrompt] = useState('');
@@ -629,7 +635,23 @@ export function HarnessSessionDetail({
               ) : null}
               {session.final_answer ? (
                 <div className="harness-summary-answer">
-                  <dt>Final answer</dt>
+                  <dt className="harness-dt-with-action">
+                    <span>Final answer</span>
+                    <button
+                      type="button"
+                      data-testid="harness-expand-answer"
+                      className="studio-btn-ghost studio-btn-sm"
+                      onClick={() =>
+                        setExpandedDetail({
+                          title: 'Final answer',
+                          badge: session.status,
+                          content: session.final_answer ?? '',
+                        })
+                      }
+                    >
+                      ⤢ 放大
+                    </button>
+                  </dt>
                   <dd>
                     <pre>{session.final_answer}</pre>
                   </dd>
@@ -713,7 +735,25 @@ export function HarnessSessionDetail({
         </section>
 
         <section className="harness-event-payload">
-          <h2>Event payload</h2>
+          <div className="harness-section-head">
+            <h2>Event payload</h2>
+            {selectedEvent ? (
+              <button
+                type="button"
+                data-testid="harness-expand-payload"
+                className="studio-btn-ghost studio-btn-sm"
+                onClick={() =>
+                  setExpandedDetail({
+                    title: `Event #${selectedEvent.seq} · ${selectedEvent.kind}`,
+                    badge: formatTime(selectedEvent.ts),
+                    content: prettyJson(selectedEvent.payload),
+                  })
+                }
+              >
+                ⤢ 放大
+              </button>
+            ) : null}
+          </div>
           {selectedEvent ? (
             <pre>{prettyJson(selectedEvent.payload)}</pre>
           ) : (
@@ -721,6 +761,18 @@ export function HarnessSessionDetail({
           )}
         </section>
       </section>
+
+      <ExpandableDrawer
+        open={expandedDetail !== null}
+        onClose={() => setExpandedDetail(null)}
+        title={expandedDetail?.title ?? '详情'}
+        badge={expandedDetail?.badge}
+        side="right"
+        defaultSize="drawer"
+        testId="harness-detail-drawer"
+      >
+        <pre className="ys-drawer__code-pre">{expandedDetail?.content ?? ''}</pre>
+      </ExpandableDrawer>
     </main>
   );
 }
