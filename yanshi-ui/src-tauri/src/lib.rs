@@ -191,7 +191,6 @@ pub fn run() {
     Err(err) => {
       #[cfg(not(any(target_os = "android", target_os = "ios")))]
       tracing::error!(error = %err, "failed to initialize Yanshi Studio desktop app");
-      eprintln!("Error starting Yanshi Studio: {err}");
       std::process::exit(if err.to_string().is_empty() { 1 } else { 2 });
     }
   }
