@@ -1,15 +1,15 @@
 //! Yanshi Studio Dioxus 0.7 + `dioxus-shadcn 0.8` frontend.
 //!
-//! Routes served under `/ui-dx/*`:
-//! - `/ui-dx` or `/ui-dx/studio` — Workflow Studio (Debug Mode, pure-Rust DAG canvas)
-//! - `/ui-dx/app` — Workflow Studio (Release Mode, one-click app runner)
-//! - `/ui-dx/notebooks` and `/ui-dx/notebooks/:id` — Three-pane Notebook workspace
-//! - `/ui-dx/console` — Classic Event Run Console
-//! - `/ui-dx/runs/:id/compare` — Side-by-side Trace Comparison
-//! - `/ui-dx/runs/new` — Workflow Run submission + Rust `YamlCodeEditor` + live SSE
-//! - `/ui-dx/harness/sessions` / `new` / `:id` — Harness sessions, approvals & HITL
-//! - `/ui-dx/diagnostics` — System Diagnostics panel
-//! - `/ui-dx/spike` — Phase 0 component & strict-CSP verification lab
+//! Routes served under `/ui/*` (with `/ui-dx/*` prefix compatibility):
+//! - `/ui` or `/ui/studio` — Workflow Studio (Debug Mode, pure-Rust DAG canvas)
+//! - `/ui/app` — Workflow Studio (Release Mode, one-click app runner)
+//! - `/ui/notebooks` and `/ui/notebooks/:id` — Three-pane Notebook workspace
+//! - `/ui/console` — Classic Event Run Console
+//! - `/ui/runs/:id/compare` — Side-by-side Trace Comparison
+//! - `/ui/runs/new` — Workflow Run submission + Rust `YamlCodeEditor` + live SSE
+//! - `/ui/harness/sessions` / `new` / `:id` — Harness sessions, approvals & HITL
+//! - `/ui/diagnostics` — System Diagnostics panel
+//! - `/ui/spike` — Component & strict-CSP verification lab
 
 mod api;
 mod console_compare_pages;
@@ -85,6 +85,7 @@ fn parse_route(path: &str, search: &str) -> AppRoute {
   let trimmed = path.trim_end_matches('/');
   let rel = trimmed
     .strip_prefix("/ui-dx")
+    .or_else(|| trimmed.strip_prefix("/ui"))
     .unwrap_or(trimmed)
     .trim_start_matches('/');
   match rel {
@@ -212,8 +213,8 @@ fn App() -> Element {
       header { class: "sticky top-0 z-30 border-b border-border bg-card/90 backdrop-blur px-4 py-2 flex flex-wrap items-center justify-between gap-2",
         div { class: "flex items-center gap-3 flex-wrap",
           div { class: "flex items-center gap-2",
-            span { class: "text-sm font-semibold tracking-tight", "Yanshi Studio · DX" }
-            Badge { variant: BadgeVariant::Secondary, "Dioxus 0.7" }
+            span { class: "text-sm font-semibold tracking-tight", "Yanshi Studio" }
+            Badge { variant: BadgeVariant::Secondary, "Dioxus" }
             if !api_base.is_empty() {
               Badge { variant: BadgeVariant::Outline, "Desktop Engine" }
             }
@@ -224,35 +225,35 @@ fn App() -> Element {
               variant: if matches!(cur_route, AppRoute::Studio { mode: StudioPosture::Debug, .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-studio",
-              onclick: move |_| navigate("/ui-dx/studio".to_string()),
+              onclick: move |_| navigate("/ui/studio".to_string()),
               "Studio"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::Studio { mode: StudioPosture::Release, .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-app",
-              onclick: move |_| navigate("/ui-dx/app".to_string()),
+              onclick: move |_| navigate("/ui/app".to_string()),
               "App"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::Notebooks { .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-notebooks",
-              onclick: move |_| navigate("/ui-dx/notebooks".to_string()),
+              onclick: move |_| navigate("/ui/notebooks".to_string()),
               "Notebooks"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::Console { .. } | AppRoute::RunCompare { .. }) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-console",
-              onclick: move |_| navigate("/ui-dx/console".to_string()),
+              onclick: move |_| navigate("/ui/console".to_string()),
               "Console"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::RunCreate) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-runs-new",
-              onclick: move |_| navigate("/ui-dx/runs/new".to_string()),
+              onclick: move |_| navigate("/ui/runs/new".to_string()),
               "New Run"
             }
             Button {
@@ -263,22 +264,15 @@ fn App() -> Element {
               },
               size: ButtonSize::Sm,
               "data-testid": "nav-harness",
-              onclick: move |_| navigate("/ui-dx/harness/sessions".to_string()),
+              onclick: move |_| navigate("/ui/harness/sessions".to_string()),
               "Harness"
             }
             Button {
               variant: if matches!(cur_route, AppRoute::Diagnostics) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
               size: ButtonSize::Sm,
               "data-testid": "nav-diagnostics",
-              onclick: move |_| navigate("/ui-dx/diagnostics".to_string()),
+              onclick: move |_| navigate("/ui/diagnostics".to_string()),
               "Diagnostics"
-            }
-            Button {
-              variant: if matches!(cur_route, AppRoute::SpikeLab) { ButtonVariant::Secondary } else { ButtonVariant::Ghost },
-              size: ButtonSize::Sm,
-              "data-testid": "nav-spike",
-              onclick: move |_| navigate("/ui-dx/spike".to_string()),
-              "Spike Lab"
             }
           }
         }
@@ -593,60 +587,80 @@ mod tests {
   use super::*;
 
   #[test]
-  fn parse_route_resolves_all_phase3_paths() {
-    assert_eq!(
-      parse_route("/ui-dx", ""),
-      AppRoute::Studio {
-        mode: StudioPosture::Debug,
-        preset: None,
-        run_id: None,
-      }
-    );
-    assert_eq!(
-      parse_route("/ui-dx/studio", "?preset=instant_step_debug_demo&run=r-9"),
-      AppRoute::Studio {
-        mode: StudioPosture::Debug,
-        preset: Some("instant_step_debug_demo".to_string()),
-        run_id: Some("r-9".to_string()),
-      }
-    );
-    assert_eq!(
-      parse_route("/ui-dx/app", ""),
-      AppRoute::Studio {
-        mode: StudioPosture::Release,
-        preset: None,
-        run_id: None,
-      }
-    );
-    assert_eq!(
-      parse_route("/ui-dx/console", "?run=r-1"),
-      AppRoute::Console {
-        run_id: Some("r-1".to_string()),
-      }
-    );
-    assert_eq!(
-      parse_route("/ui-dx/runs/r-1/compare", "?against=r-2&tenant=acme"),
-      AppRoute::RunCompare {
-        primary_run_id: "r-1".to_string(),
-        against: Some("r-2".to_string()),
-        tenant: "acme".to_string(),
-      }
-    );
-    assert_eq!(
-      parse_route("/ui-dx/notebooks/nb-42", ""),
-      AppRoute::Notebooks {
-        notebook_id: Some("nb-42".to_string())
-      }
-    );
-    assert_eq!(parse_route("/ui-dx/diagnostics", ""), AppRoute::Diagnostics);
-    assert_eq!(parse_route("/ui-dx/runs/new", ""), AppRoute::RunCreate);
-    assert_eq!(
-      parse_route("/ui-dx/harness/sessions/sess-42", "?tenant=acme"),
-      AppRoute::HarnessDetail {
-        session_id: "sess-42".to_string(),
-        tenant: "acme".to_string()
-      }
-    );
-    assert_eq!(parse_route("/ui-dx/spike", ""), AppRoute::SpikeLab);
+  fn parse_route_resolves_all_canonical_and_legacy_dx_paths() {
+    for prefix in ["/ui", "/ui-dx"] {
+      assert_eq!(
+        parse_route(prefix, ""),
+        AppRoute::Studio {
+          mode: StudioPosture::Debug,
+          preset: None,
+          run_id: None,
+        }
+      );
+      assert_eq!(
+        parse_route(
+          &format!("{prefix}/studio"),
+          "?preset=instant_step_debug_demo&run=r-9"
+        ),
+        AppRoute::Studio {
+          mode: StudioPosture::Debug,
+          preset: Some("instant_step_debug_demo".to_string()),
+          run_id: Some("r-9".to_string()),
+        }
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/app"), ""),
+        AppRoute::Studio {
+          mode: StudioPosture::Release,
+          preset: None,
+          run_id: None,
+        }
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/console"), "?run=r-1"),
+        AppRoute::Console {
+          run_id: Some("r-1".to_string()),
+        }
+      );
+      assert_eq!(
+        parse_route(
+          &format!("{prefix}/runs/r-1/compare"),
+          "?against=r-2&tenant=acme"
+        ),
+        AppRoute::RunCompare {
+          primary_run_id: "r-1".to_string(),
+          against: Some("r-2".to_string()),
+          tenant: "acme".to_string(),
+        }
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/notebooks/nb-42"), ""),
+        AppRoute::Notebooks {
+          notebook_id: Some("nb-42".to_string())
+        }
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/diagnostics"), ""),
+        AppRoute::Diagnostics
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/runs/new"), ""),
+        AppRoute::RunCreate
+      );
+      assert_eq!(
+        parse_route(
+          &format!("{prefix}/harness/sessions/sess-42"),
+          "?tenant=acme"
+        ),
+        AppRoute::HarnessDetail {
+          session_id: "sess-42".to_string(),
+          tenant: "acme".to_string()
+        }
+      );
+      assert_eq!(
+        parse_route(&format!("{prefix}/spike"), ""),
+        AppRoute::SpikeLab
+      );
+    }
   }
 }

@@ -1,4 +1,4 @@
 [web.app]
 # Set page title here rather than with `document::Title`, which uses JS eval
 # and violates strict CSP (`script-src 'self' 'wasm-unsafe-eval'`).
-title = "Yanshi Studio · Dioxus Spike"
+title = "Yanshi Studio"

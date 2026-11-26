@@ -548,6 +548,25 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Phase 4 default `/ui/*` cutover to Dioxus 0.7 + `dioxus-shadcn 0.8` (`yanshi-ui-dx`), Tauri default switch, CI gate & Docker UI build.**
+  Switched `yanshi-ui-dx` to canonical `--base-path ui` routes (`/ui/studio`,
+  `/ui/app`, `/ui/notebooks`, `/ui/console`, `/ui/runs/new`,
+  `/ui/harness/sessions`, `/ui/diagnostics`, keeping `/ui-dx/*` client & HTTP
+  `307` redirect compatibility), verified clean zero-patch builds directly
+  against published crates.io `dioxus-shadcn 0.8.0`, and polished the production
+  header & `Dioxus.toml` title (`Yanshi Studio`). `yanshi-server` and Tauri
+  `local_engine` now serve the built Dioxus WASM bundle by default at `/ui/*`
+  under strict zero-eval CSP (`YANSHI_UI_DIR` / `YANSHI_DX_UI_DIR` /
+  `yanshi-ui-dx/dist/public` / `/usr/share/yanshi/ui`) with CSP-safe
+  `<meta name="yanshi-api-token">` loopback auth injection, while retaining the
+  embedded legacy React bundle as an automatic fallback when `dist/public` is
+  not built or `YANSHI_LEGACY_UI=1` / `YANSHI_DESKTOP_UI=legacy` is set. Added
+  `yanshi-ui/src-tauri/tauri.dx.conf.json` for packaged Dioxus desktop bundles,
+  a `ui-dx-check` (`fmt` + host `test` + host/`wasm32` `clippy`) release gate in
+  `.github/workflows/quality.yml`, and a native `$BUILDPLATFORM` `ui-builder`
+  stage in `Dockerfile` (controlled by `BUILD_DX_UI=1`, serving from
+  `/usr/share/yanshi/ui`).
+
 - **Dioxus 0.7 Workflow Studio, Pure-Rust DAG Canvas, Classic Console & Trace Compare (`/ui-dx/studio`, `/ui-dx/app`, `/ui-dx/console`, `/ui-dx/runs/:id/compare`, Phase 3).**
   Migrated the dual-posture Workflow Studio (`studio_yaml.rs`, `studio_api.rs`,
   `dag_canvas.rs`, `node_inspector.rs`, `studio_page.rs`, `console_compare_pages.rs`)

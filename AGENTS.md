@@ -98,8 +98,11 @@ so the tool tier carries no capability dependencies.
   and `source_ids`, SSE, skills, Harness sessions/approvals),
   Postgres-backed `yanshi-db` (18 tables / 14 repos, migrations `0001`–`0018`), per-tenant run admission
   control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
-  (gRPC `WorkerProtocol`, 7 node payload types), and a React/Vite Web UI
-  embedded at `/ui` (`/ui/notebooks`, `/ui/studio`, `/ui/app`, `/ui/console`)
+  (gRPC `WorkerProtocol`, 7 node payload types), a Dioxus 0.7 + `dioxus-shadcn 0.8`
+  WebAssembly UI (`yanshi-ui-dx/`) served by default at `/ui` (`/ui/studio`,
+  `/ui/app`, `/ui/notebooks`, `/ui/console`, `/ui/runs/new`, `/ui/harness/sessions`,
+  `/ui/diagnostics`) under strict zero-eval CSP (with automatic embedded legacy
+  React fallback when `yanshi-ui-dx/dist/public` is absent or `YANSHI_LEGACY_UI=1`),
   plus a 1:1 Tauri v2 desktop app (`yanshi-ui/src-tauri/`).
 - **Plugins & marketplace** — subprocess JSON-RPC plugin runtime,
   signed manifests (Ed25519), remote registry client.

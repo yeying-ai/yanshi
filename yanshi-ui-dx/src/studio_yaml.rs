@@ -456,26 +456,24 @@ pub fn built_in_workflow_presets() -> Vec<WorkflowPreset> {
 
   rows
     .iter()
-    .map(|(id, title, subtitle, badge, category, yaml)| WorkflowPreset {
-      id: (*id).to_string(),
-      title: (*title).to_string(),
-      subtitle: (*subtitle).to_string(),
-      badge: (*badge).to_string(),
-      category: (*category).to_string(),
-      yaml: (*yaml).to_string(),
-      personal_id: None,
-    })
+    .map(
+      |(id, title, subtitle, badge, category, yaml)| WorkflowPreset {
+        id: (*id).to_string(),
+        title: (*title).to_string(),
+        subtitle: (*subtitle).to_string(),
+        badge: (*badge).to_string(),
+        category: (*category).to_string(),
+        yaml: (*yaml).to_string(),
+        personal_id: None,
+      },
+    )
     .collect()
 }
 
 // ── 27-Item Node Palette ─────────────────────────────────────────────────────
 
-pub const NODE_PALETTE_CATEGORIES: &[&str] = &[
-  "LLM / Agent",
-  "多模态生成",
-  "内容渲染器",
-  "工具与控制流",
-];
+pub const NODE_PALETTE_CATEGORIES: &[&str] =
+  &["LLM / Agent", "多模态生成", "内容渲染器", "工具与控制流"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodePaletteItem {
@@ -959,7 +957,9 @@ pub fn inspect_yaml_locally(yaml_text: &str) -> InspectWorkflowResponse {
     .get("name")
     .and_then(serde_json::Value::as_str)
     .map(str::to_string);
-  let cost_limit_usd = doc.get("cost_limit_usd").and_then(serde_json::Value::as_f64);
+  let cost_limit_usd = doc
+    .get("cost_limit_usd")
+    .and_then(serde_json::Value::as_f64);
 
   let mut inputs: Vec<InspectedInput> = doc
     .get("inputs")
@@ -988,7 +988,11 @@ pub fn inspect_yaml_locally(yaml_text: &str) -> InspectWorkflowResponse {
         .collect()
     })
     .unwrap_or_default();
-  inputs.sort_by(|a, b| b.required.cmp(&a.required).then_with(|| a.name.cmp(&b.name)));
+  inputs.sort_by(|a, b| {
+    b.required
+      .cmp(&a.required)
+      .then_with(|| a.name.cmp(&b.name))
+  });
 
   let raw_nodes = doc
     .get("nodes")
@@ -1042,7 +1046,10 @@ pub fn inspect_yaml_locally(yaml_text: &str) -> InspectWorkflowResponse {
       .unwrap_or_default();
 
     let mut input_mapping = BTreeMap::new();
-    if let Some(map_obj) = obj.get("input_mapping").and_then(serde_json::Value::as_object) {
+    if let Some(map_obj) = obj
+      .get("input_mapping")
+      .and_then(serde_json::Value::as_object)
+    {
       for (k, v) in map_obj {
         if let Some(s) = v.as_str() {
           input_mapping.insert(k.clone(), s.to_string());
@@ -1299,8 +1306,7 @@ fn parse_workflow_root_and_nodes(yaml_text: &str) -> Result<(Mapping, Vec<YamlVa
 
 fn serialize_workflow(mut root: Mapping, nodes: Vec<YamlValue>) -> Result<String, String> {
   root.insert(ykey("nodes"), YamlValue::Sequence(nodes));
-  serde_yaml::to_string(&YamlValue::Mapping(root))
-    .map_err(|err| format!("YAML 序列化失败：{err}"))
+  serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|err| format!("YAML 序列化失败：{err}"))
 }
 
 fn node_map_id(map: &Mapping) -> Option<String> {
@@ -1447,7 +1453,10 @@ fn default_mapping_for_target(
     } else {
       "output"
     };
-    return (key, format!("{{{{ nodes.{source_id}.outputs.{out_field} }}}}"));
+    return (
+      key,
+      format!("{{{{ nodes.{source_id}.outputs.{out_field} }}}}"),
+    );
   }
   (key, format!("{{{{ nodes.{source_id}.outputs.output }}}}"))
 }
@@ -1460,7 +1469,11 @@ fn generate_unique_node_id(
   let raw_base = preferred
     .map(str::trim)
     .filter(|s| !s.is_empty())
-    .unwrap_or(if node_type.is_empty() { "step" } else { node_type });
+    .unwrap_or(if node_type.is_empty() {
+      "step"
+    } else {
+      node_type
+    });
   let base: String = raw_base
     .chars()
     .map(|c| {
@@ -1679,7 +1692,10 @@ pub fn disconnect_edge_in_yaml(
   })
 }
 
-pub fn delete_node_from_yaml(yaml_text: &str, node_id: &str) -> Result<YamlMutationSuccess, String> {
+pub fn delete_node_from_yaml(
+  yaml_text: &str,
+  node_id: &str,
+) -> Result<YamlMutationSuccess, String> {
   let (root, mut nodes) = parse_workflow_root_and_nodes(yaml_text)?;
   let pos = nodes
     .iter()
@@ -1726,7 +1742,10 @@ pub fn update_node_in_yaml(
       {
         return Err(format!("节点 ID \"{candidate}\" 已存在，请换一个名称"));
       }
-      if let Some(map) = nodes.get_mut(target_idx).and_then(YamlValue::as_mapping_mut) {
+      if let Some(map) = nodes
+        .get_mut(target_idx)
+        .and_then(YamlValue::as_mapping_mut)
+      {
         map.insert(ykey("id"), YamlValue::String(candidate.to_string()));
       }
       effective_id = candidate.to_string();
@@ -1810,7 +1829,11 @@ pub fn update_node_in_yaml(
   }
 
   if let Some(run_if_opt) = &patch.run_if {
-    match run_if_opt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    match run_if_opt
+      .as_deref()
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+    {
       Some(expr) => {
         target_map.insert(ykey("run_if"), YamlValue::String(expr.to_string()));
       }
@@ -2115,7 +2138,11 @@ mod tests {
         "preset '{}' failed local inspect: {:?}",
         preset.id, inspected.diagnostics.issues
       );
-      assert!(!inspected.nodes.is_empty(), "preset '{}' has no nodes", preset.id);
+      assert!(
+        !inspected.nodes.is_empty(),
+        "preset '{}' has no nodes",
+        preset.id
+      );
     }
   }
 
@@ -2125,18 +2152,20 @@ mod tests {
     assert!(inspected.valid);
     assert_eq!(inspected.nodes.len(), 4);
     assert_eq!(inspected.levels.len(), 3);
-    assert!(
-      inspected
-        .edges
-        .iter()
-        .any(|e| e.from == "normalize_brief" && e.to == "quiz_branch" && e.kind == InspectedEdgeKind::Condition)
-    );
+    assert!(inspected.edges.iter().any(|e| e.from == "normalize_brief"
+      && e.to == "quiz_branch"
+      && e.kind == InspectedEdgeKind::Condition));
   }
 
   #[test]
   fn graph_mutator_adds_connects_detects_cycles_renames_and_deletes() {
-    let added = add_node_to_yaml(INSTANT_STEP_DEBUG_YAML, "llm", Some("assemble_handout"), None)
-      .expect("add node");
+    let added = add_node_to_yaml(
+      INSTANT_STEP_DEBUG_YAML,
+      "llm",
+      Some("assemble_handout"),
+      None,
+    )
+    .expect("add node");
     let new_id = added.created_node_id.expect("created id");
     assert_eq!(new_id, "llm_1");
 
@@ -2147,7 +2176,12 @@ mod tests {
     // Valid extra edge
     let connected = connect_nodes_in_yaml(&added.yaml, "core_outline", "llm_1").expect("connect");
     let insp = inspect_yaml_locally(&connected.yaml);
-    assert!(insp.edges.iter().any(|e| e.from == "core_outline" && e.to == "llm_1"));
+    assert!(
+      insp
+        .edges
+        .iter()
+        .any(|e| e.from == "core_outline" && e.to == "llm_1")
+    );
 
     // Rename node and verify cascade rewrite
     let renamed = update_node_in_yaml(
@@ -2166,7 +2200,12 @@ mod tests {
     // Disconnect edge
     let disc = disconnect_edge_in_yaml(&renamed.yaml, "core_outline", "llm_1").expect("disconnect");
     let insp_disc = inspect_yaml_locally(&disc.yaml);
-    assert!(!insp_disc.edges.iter().any(|e| e.from == "core_outline" && e.to == "llm_1"));
+    assert!(
+      !insp_disc
+        .edges
+        .iter()
+        .any(|e| e.from == "core_outline" && e.to == "llm_1")
+    );
 
     // Delete node cascades cleanup
     let deleted = delete_node_from_yaml(&disc.yaml, "quiz_branch").expect("delete");
@@ -2177,7 +2216,10 @@ mod tests {
 
   #[test]
   fn personal_templates_round_trip_and_filename_slug() {
-    assert_eq!(build_yaml_download_filename(Some("My Flow!")), "my_flow.yml");
+    assert_eq!(
+      build_yaml_download_filename(Some("My Flow!")),
+      "my_flow.yml"
+    );
     assert_eq!(build_yaml_download_filename(Some("demo.yaml")), "demo.yaml");
 
     let (list, patch) = build_personal_templates_preference_patch(

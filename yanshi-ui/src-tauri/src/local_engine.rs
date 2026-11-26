@@ -838,41 +838,44 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
 fn build_embedded_ui_router(state: LocalEngineState) -> Router {
   Router::new()
     .route("/", get(|| async { Redirect::temporary("/ui/studio") }))
-    .route("/ui", get(embedded_index_html))
-    .route("/ui/", get(embedded_index_html))
-    .route("/ui/studio", get(embedded_index_html))
-    .route("/ui/studio/", get(embedded_index_html))
-    .route("/ui/notebooks", get(embedded_index_html))
-    .route("/ui/notebooks/", get(embedded_index_html))
-    .route("/ui/notebooks/:id", get(embedded_index_html))
-    .route("/ui/app", get(embedded_index_html))
-    .route("/ui/app/", get(embedded_index_html))
-    .route("/ui/console", get(embedded_index_html))
-    .route("/ui/console/", get(embedded_index_html))
-    .route("/ui/runs/new", get(embedded_index_html))
-    .route("/ui/runs/:id/compare", get(embedded_index_html))
-    .route("/ui/harness/sessions", get(embedded_index_html))
-    .route("/ui/harness/sessions/", get(embedded_index_html))
-    .route("/ui/harness/sessions/new", get(embedded_index_html))
-    .route("/ui/harness/sessions/:id", get(embedded_index_html))
-    .route("/ui/diagnostics", get(embedded_index_html))
-    .route("/ui/assets/app.js", get(embedded_app_js))
-    .route("/ui/assets/styles.css", get(embedded_styles_css))
-    .route("/ui-dx", get(serve_dx_ui_index))
-    .route("/ui-dx/", get(serve_dx_ui_index))
-    .route("/ui-dx/*asset_path", get(serve_dx_ui_asset))
+    .route("/ui", get(serve_ui_index))
+    .route("/ui/", get(serve_ui_index))
+    .route("/ui/*asset_path", get(serve_ui_asset))
+    .route("/ui-dx", get(redirect_ui_dx_root))
+    .route("/ui-dx/", get(redirect_ui_dx_root))
+    .route("/ui-dx/*rest", get(redirect_ui_dx_subpath))
     .with_state(state)
 }
 
 const DX_UI_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-src 'self' blob:; object-src 'none'; base-uri 'self'";
 
+fn desktop_legacy_ui_forced() -> bool {
+  for key in ["YANSHI_DESKTOP_UI", "YANSHI_LEGACY_UI"] {
+    if let Ok(raw) = std::env::var(key)
+      && matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "legacy"
+      )
+    {
+      return true;
+    }
+  }
+  false
+}
+
+fn has_dx_index(dir: &std::path::Path) -> bool {
+  dir.is_dir() && dir.join("index.html").is_file()
+}
+
 fn resolve_dx_ui_dir() -> Option<std::path::PathBuf> {
-  if let Ok(raw) = std::env::var("YANSHI_DX_UI_DIR") {
-    let trimmed = raw.trim();
-    if !trimmed.is_empty() {
-      let candidate = std::path::PathBuf::from(trimmed);
-      if candidate.is_dir() {
-        return Some(candidate);
+  for key in ["YANSHI_UI_DIR", "YANSHI_DX_UI_DIR"] {
+    if let Ok(raw) = std::env::var(key) {
+      let trimmed = raw.trim();
+      if !trimmed.is_empty() {
+        let candidate = std::path::PathBuf::from(trimmed);
+        if has_dx_index(&candidate) {
+          return Some(candidate);
+        }
       }
     }
   }
@@ -882,8 +885,9 @@ fn resolve_dx_ui_dir() -> Option<std::path::PathBuf> {
       .join("..")
       .join("yanshi-ui-dx/dist/public"),
     std::path::PathBuf::from("yanshi-ui-dx/dist/public"),
+    std::path::PathBuf::from("/usr/share/yanshi/ui"),
   ];
-  candidates.into_iter().find(|p| p.is_dir())
+  candidates.into_iter().find(|p| has_dx_index(p))
 }
 
 fn sanitize_dx_asset_path(raw: &str) -> Option<std::path::PathBuf> {
@@ -912,30 +916,100 @@ fn dx_asset_content_type(path: &std::path::Path) -> &'static str {
     "wasm" => "application/wasm",
     "svg" => "image/svg+xml",
     "png" => "image/png",
+    "ico" => "image/x-icon",
     "json" => "application/json; charset=utf-8",
     _ => "application/octet-stream",
   }
 }
 
-async fn serve_dx_ui_index() -> Response {
-  serve_dx_ui_rel("").await
+fn html_escape_attr(value: &str) -> String {
+  value
+    .replace('&', "&amp;")
+    .replace('"', "&quot;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
 }
 
-async fn serve_dx_ui_asset(
+fn inject_token_meta_into_dx_html(html: String, token: Option<&str>) -> String {
+  let Some(tok) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+    return html;
+  };
+  let meta = format!(
+    "<meta name=\"yanshi-api-token\" content=\"{}\"></head>",
+    html_escape_attr(tok)
+  );
+  if html.contains("</head>") {
+    html.replacen("</head>", &meta, 1)
+  } else {
+    format!(
+      "<meta name=\"yanshi-api-token\" content=\"{}\">{html}",
+      html_escape_attr(tok)
+    )
+  }
+}
+
+async fn serve_ui_index(State(state): State<LocalEngineState>) -> Response {
+  if !desktop_legacy_ui_forced()
+    && let Some(base_dir) = resolve_dx_ui_dir()
+  {
+    return serve_dx_ui_from_dir(&base_dir, "", state.api_token()).await;
+  }
+  embedded_index_html(State(state)).await
+}
+
+async fn serve_ui_asset(
+  State(state): State<LocalEngineState>,
   axum::extract::Path(asset_path): axum::extract::Path<String>,
 ) -> Response {
-  serve_dx_ui_rel(&asset_path).await
+  if !desktop_legacy_ui_forced()
+    && let Some(base_dir) = resolve_dx_ui_dir()
+  {
+    return serve_dx_ui_from_dir(&base_dir, &asset_path, state.api_token()).await;
+  }
+  let Some(clean) = sanitize_dx_asset_path(&asset_path) else {
+    return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
+  };
+  let normalized = clean.to_string_lossy().replace('\\', "/");
+  match normalized.as_str() {
+    "assets/app.js" => embedded_app_js().await,
+    "assets/styles.css" => embedded_styles_css().await,
+    _ if clean.extension().is_none() => embedded_index_html(State(state)).await,
+    _ => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+  }
 }
 
-async fn serve_dx_ui_rel(raw_rel: &str) -> Response {
-  let Some(base_dir) = resolve_dx_ui_dir() else {
-    return (
-      StatusCode::NOT_FOUND,
-      [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-      "Dioxus UI dist not built yet; run ./yanshi-ui-dx/scripts/build.sh or set YANSHI_DX_UI_DIR.",
-    )
-      .into_response();
+fn redirect_with_query(path: &str, query: Option<&str>) -> Redirect {
+  match query.filter(|q| !q.is_empty()) {
+    Some(q) => Redirect::temporary(&format!("{path}?{q}")),
+    None => Redirect::temporary(path),
+  }
+}
+
+async fn redirect_ui_dx_root(uri: axum::http::Uri) -> Redirect {
+  redirect_with_query("/ui/studio", uri.query())
+}
+
+async fn redirect_ui_dx_subpath(
+  axum::extract::Path(rest): axum::extract::Path<String>,
+  uri: axum::http::Uri,
+) -> Response {
+  let Some(clean) = sanitize_dx_asset_path(&rest) else {
+    return (StatusCode::BAD_REQUEST, "invalid redirect path").into_response();
   };
+  let suffix = clean.to_string_lossy().replace('\\', "/");
+  let target = if suffix.is_empty() {
+    "/ui/studio".to_string()
+  } else {
+    format!("/ui/{suffix}")
+  };
+  redirect_with_query(&target, uri.query()).into_response()
+}
+
+async fn serve_dx_ui_from_dir(
+  base_dir: &std::path::Path,
+  raw_rel: &str,
+  api_token: Option<&str>,
+) -> Response {
   let Some(rel) = sanitize_dx_asset_path(raw_rel) else {
     return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
   };
@@ -955,10 +1029,12 @@ async fn serve_dx_ui_rel(raw_rel: &str) -> Response {
     return (StatusCode::NOT_FOUND, "asset unreadable").into_response();
   };
   let content_type = dx_asset_content_type(&target);
-  let cache = if content_type.starts_with("text/html") {
-    "no-store"
+  let (cache, body_bytes) = if content_type.starts_with("text/html") {
+    let html = String::from_utf8_lossy(&bytes).into_owned();
+    let injected = inject_token_meta_into_dx_html(html, api_token);
+    ("no-store", injected.into_bytes())
   } else {
-    "public, max-age=300"
+    ("public, max-age=300", bytes)
   };
   (
     StatusCode::OK,
@@ -967,7 +1043,7 @@ async fn serve_dx_ui_rel(raw_rel: &str) -> Response {
       (header::CACHE_CONTROL, cache),
       (header::CONTENT_SECURITY_POLICY, DX_UI_STRICT_CSP),
     ],
-    Body::from(bytes),
+    Body::from(body_bytes),
   )
     .into_response()
 }
@@ -4534,6 +4610,57 @@ nodes:
       Some("/ui/studio")
     );
 
+    let dx_redirect = client
+      .get(format!("{base_url}/ui-dx/notebooks/demo-nb?tab=sources"))
+      .send()
+      .await
+      .expect("ui-dx redirect");
+    assert_eq!(dx_redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+      dx_redirect
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok()),
+      Some("/ui/notebooks/demo-nb?tab=sources")
+    );
+
+    let dx_dir = tempfile::tempdir().expect("dx tempdir");
+    std::fs::write(
+      dx_dir.path().join("index.html"),
+      "<!doctype html><html><head><title>Yanshi Studio</title></head><body><div id=\"main\"></div></body></html>",
+    )
+    .expect("write dx index");
+    std::fs::create_dir_all(dx_dir.path().join("assets")).expect("mkdir dx assets");
+    std::fs::write(dx_dir.path().join("assets/app.wasm"), b"\0asm").expect("write dx wasm");
+
+    let dx_html_resp = serve_dx_ui_from_dir(dx_dir.path(), "studio", Some("secret-tok")).await;
+    assert_eq!(dx_html_resp.status(), StatusCode::OK);
+    assert_eq!(
+      dx_html_resp
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok()),
+      Some(DX_UI_STRICT_CSP)
+    );
+    let dx_html_body = axum::body::to_bytes(dx_html_resp.into_body(), 1024 * 64)
+      .await
+      .expect("read dx html");
+    let dx_html = String::from_utf8_lossy(&dx_html_body);
+    assert!(
+      dx_html.contains("<meta name=\"yanshi-api-token\" content=\"secret-tok\">"),
+      "Dioxus HTML should receive CSP-safe meta token injection"
+    );
+
+    let dx_wasm_resp = serve_dx_ui_from_dir(dx_dir.path(), "assets/app.wasm", None).await;
+    assert_eq!(dx_wasm_resp.status(), StatusCode::OK);
+    assert_eq!(
+      dx_wasm_resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()),
+      Some("application/wasm")
+    );
+
     for path in ["/ui/studio", "/ui/notebooks", "/ui/notebooks/demo-nb"] {
       let res = client
         .get(format!("{base_url}{path}"))
@@ -4546,22 +4673,27 @@ nodes:
         "route {path} should return 200"
       );
       let html = res.text().await.expect("html text");
-      assert!(html.contains("yanshi-debugger"));
+      assert!(
+        html.contains("yanshi-debugger") || html.contains("Yanshi Studio"),
+        "route {path} should serve either built Dioxus UI or embedded fallback"
+      );
     }
 
-    let js_res = client
-      .get(format!("{base_url}/ui/assets/app.js"))
-      .send()
-      .await
-      .expect("app.js");
-    assert_eq!(js_res.status(), StatusCode::OK);
-    assert_eq!(
-      js_res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok()),
-      Some("application/javascript; charset=utf-8")
-    );
+    if resolve_dx_ui_dir().is_none() || desktop_legacy_ui_forced() {
+      let js_res = client
+        .get(format!("{base_url}/ui/assets/app.js"))
+        .send()
+        .await
+        .expect("app.js");
+      assert_eq!(js_res.status(), StatusCode::OK);
+      assert_eq!(
+        js_res
+          .headers()
+          .get(header::CONTENT_TYPE)
+          .and_then(|v| v.to_str().ok()),
+        Some("application/javascript; charset=utf-8")
+      );
+    }
   }
 
   #[tokio::test]
@@ -4778,7 +4910,12 @@ nodes:
       .text()
       .await
       .expect("html text");
-    assert!(ui_html.contains("window.__YANSHI_API_TOKEN__"));
+    assert!(
+      ui_html.contains(&token)
+        && (ui_html.contains("<meta name=\"yanshi-api-token\"")
+          || ui_html.contains("window.__YANSHI_API_TOKEN__")),
+      "loopback UI shell must embed the session token"
+    );
 
     // 3. Evil cross-origin preflight receives NO Access-Control-Allow-Origin, whereas `tauri://localhost` is allowed.
     let evil_preflight = client

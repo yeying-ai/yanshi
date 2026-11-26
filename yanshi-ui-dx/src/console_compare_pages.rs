@@ -45,7 +45,11 @@ pub fn RunConsolePage(
   let mut run_id_input = use_signal(|| initial_run_id.clone().unwrap_or_default());
   let mut tenant_id = use_signal(|| {
     let t = read_storage("yanshi.ui.tenant", "default");
-    if t.trim().is_empty() { "default".to_string() } else { t }
+    if t.trim().is_empty() {
+      "default".to_string()
+    } else {
+      t
+    }
   });
   let mut workflow_draft = use_signal(|| CONSOLE_STARTER_YAML.to_string());
   let mut runs = use_signal(Vec::<RunRecord>::new);
@@ -179,7 +183,11 @@ pub fn RunConsolePage(
   }
   let node_summaries: Vec<(String, String, &'static str, i64)> = node_order
     .into_iter()
-    .filter_map(|k| node_map.remove(&k).map(|(st, tone, seq)| (k, st, tone, seq)))
+    .filter_map(|k| {
+      node_map
+        .remove(&k)
+        .map(|(st, tone, seq)| (k, st, tone, seq))
+    })
     .collect();
 
   let tok_conn = api_token.clone();
@@ -246,11 +254,11 @@ pub fn RunConsolePage(
                 .map(|r| r.id.clone());
               let href = match other {
                 Some(o) => format!(
-                  "/ui-dx/runs/{}/compare?against={}",
+                  "/ui/runs/{}/compare?against={}",
                   encode_uri_component(cur_run_id.trim()),
                   encode_uri_component(&o)
                 ),
-                None => format!("/ui-dx/runs/{}/compare", encode_uri_component(cur_run_id.trim())),
+                None => format!("/ui/runs/{}/compare", encode_uri_component(cur_run_id.trim())),
               };
               rsx! {
                 Button {
@@ -538,7 +546,7 @@ pub fn RunComparePage(
                 other_run_id.set(picked.clone());
                 if !picked.is_empty() {
                   on_navigate.call(format!(
-                    "/ui-dx/runs/{}/compare?against={}",
+                    "/ui/runs/{}/compare?against={}",
                     encode_uri_component(&prim_for_select),
                     encode_uri_component(&picked)
                   ));
@@ -575,7 +583,7 @@ pub fn RunComparePage(
             onclick: move |_| {
               let o = other_run_id.peek().clone();
               on_navigate.call(format!(
-                "/ui-dx/runs/{}/compare?against={}",
+                "/ui/runs/{}/compare?against={}",
                 encode_uri_component(&prim_for_go),
                 encode_uri_component(&o)
               ));
@@ -589,7 +597,7 @@ pub fn RunComparePage(
               onclick: move |_| {
                 let o = other_run_id.peek().clone();
                 on_navigate.call(format!(
-                  "/ui-dx/runs/{}/compare?against={}",
+                  "/ui/runs/{}/compare?against={}",
                   encode_uri_component(&o),
                   encode_uri_component(&prim_for_swap)
                 ));

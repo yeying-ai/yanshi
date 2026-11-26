@@ -479,9 +479,9 @@ pub fn NotebookWorkspacePage(
               on_value_change: move |next_id: String| {
                 selected_notebook_id.set(next_id.clone());
                 if next_id.is_empty() {
-                  on_navigate.call("/ui-dx/notebooks".to_string());
+                  on_navigate.call("/ui/notebooks".to_string());
                 } else {
-                  on_navigate.call(format!("/ui-dx/notebooks/{}", encode_uri_component(&next_id)));
+                  on_navigate.call(format!("/ui/notebooks/{}", encode_uri_component(&next_id)));
                 }
               },
               if notebooks().is_empty() {
@@ -533,7 +533,7 @@ pub fn NotebookWorkspacePage(
                         list.insert(0, created);
                         notebooks.set(list);
                         selected_notebook_id.set(id.clone());
-                        on_navigate.call(format!("/ui-dx/notebooks/{}", encode_uri_component(&id)));
+                        on_navigate.call(format!("/ui/notebooks/{}", encode_uri_component(&id)));
                         notice_banner.set(Some(format!("已创建笔记本「{t}」，请添加资料来源。")));
                       }
                       Err(err) => error_banner.set(Some(format!("创建笔记本失败：{err}"))),
@@ -769,7 +769,7 @@ pub fn NotebookWorkspacePage(
                               list.insert(0, nb);
                               notebooks.set(list);
                               selected_notebook_id.set(id.clone());
-                              on_navigate.call(format!("/ui-dx/notebooks/{}", encode_uri_component(&id)));
+                              on_navigate.call(format!("/ui/notebooks/{}", encode_uri_component(&id)));
                               let deliv = imported
                                 .imported_deliverables
                                 .filter(|n| *n > 0)
@@ -2648,9 +2648,9 @@ pub fn NotebookWorkspacePage(
                         notebooks.set(list);
                         selected_notebook_id.set(next_id.clone());
                         if next_id.is_empty() {
-                          on_navigate.call("/ui-dx/notebooks".to_string());
+                          on_navigate.call("/ui/notebooks".to_string());
                         } else {
-                          on_navigate.call(format!("/ui-dx/notebooks/{}", encode_uri_component(&next_id)));
+                          on_navigate.call(format!("/ui/notebooks/{}", encode_uri_component(&next_id)));
                         }
                         notice_banner.set(Some(format!("已删除笔记本「{title}」。")));
                       }

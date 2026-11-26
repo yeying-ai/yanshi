@@ -80,7 +80,7 @@ pub fn HarnessSessionListPage(
             variant: ButtonVariant::Primary,
             size: ButtonSize::Sm,
             "data-testid": "harness-new-link",
-            onclick: move |_| on_navigate.call("/ui-dx/harness/sessions/new".to_string()),
+            onclick: move |_| on_navigate.call("/ui/harness/sessions/new".to_string()),
             "+ New session"
           }
         }
@@ -195,7 +195,7 @@ pub fn HarnessSessionListPage(
                                 String::new()
                               };
                               on_navigate.call(format!(
-                                "/ui-dx/harness/sessions/{}{}",
+                                "/ui/harness/sessions/{}{}",
                                 encode_uri_component(&sid),
                                 suffix
                               ));
@@ -265,7 +265,7 @@ pub fn HarnessSubmitPage(
           Button {
             variant: ButtonVariant::Ghost,
             size: ButtonSize::Sm,
-            onclick: move |_| on_navigate.call("/ui-dx/harness/sessions".to_string()),
+            onclick: move |_| on_navigate.call("/ui/harness/sessions".to_string()),
             "← Sessions"
           }
         }
@@ -489,7 +489,7 @@ pub fn HarnessSubmitPage(
                         String::new()
                       };
                       on_navigate.call(format!(
-                        "/ui-dx/harness/sessions/{}{}",
+                        "/ui/harness/sessions/{}{}",
                         encode_uri_component(&sid),
                         suffix
                       ));
@@ -634,7 +634,7 @@ pub fn HarnessSessionDetailPage(
           Button {
             variant: ButtonVariant::Ghost,
             size: ButtonSize::Sm,
-            onclick: move |_| on_navigate.call("/ui-dx/harness/sessions".to_string()),
+            onclick: move |_| on_navigate.call("/ui/harness/sessions".to_string()),
             "← Sessions"
           }
           Button {

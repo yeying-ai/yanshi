@@ -125,8 +125,8 @@ fn build_node_patch_from_draft(
   let mut parsed_params = serde_json::Map::new();
   let raw_json = draft.params_json_draft.trim();
   if !raw_json.is_empty() {
-    let val: serde_json::Value = serde_json::from_str(raw_json)
-      .map_err(|err| format!("parameters JSON 解析失败：{err}"))?;
+    let val: serde_json::Value =
+      serde_json::from_str(raw_json).map_err(|err| format!("parameters JSON 解析失败：{err}"))?;
     match val {
       serde_json::Value::Object(map) => parsed_params = map,
       _ => {
@@ -218,10 +218,7 @@ pub fn NodeConfigEditor(
     saved_toast.set(false);
   }));
 
-  let other_nodes: Vec<InspectedNode> = all_nodes
-    .into_iter()
-    .filter(|c| c.id != node.id)
-    .collect();
+  let other_nodes: Vec<InspectedNode> = all_nodes.into_iter().filter(|c| c.id != node.id).collect();
 
   let cur_draft = draft();
   let mut type_options: Vec<(String, String)> = node_palette()
@@ -628,11 +625,14 @@ pub fn NodeIoInspector(
     .map(|p| format!("{}:{}", p.node_id, p.phase))
     .unwrap_or_default();
   let run_id_for_eff = run_id.clone();
-  use_effect(use_reactive((&run_id_for_eff, &pause_key), move |(rid, pk)| {
-    if !rid.is_empty() || !pk.is_empty() {
-      active_tab.set(InspectorTab::Io);
-    }
-  }));
+  use_effect(use_reactive(
+    (&run_id_for_eff, &pause_key),
+    move |(rid, pk)| {
+      if !rid.is_empty() || !pk.is_empty() {
+        active_tab.set(InspectorTab::Io);
+      }
+    },
+  ));
 
   let node_id_eff = node.as_ref().map(|n| n.id.clone()).unwrap_or_default();
   let cap_in_eff = captured_input.clone();
@@ -691,9 +691,7 @@ pub fn NodeIoInspector(
   };
 
   let media_previews = extract_node_media_previews(&run_id, &node.id, captured_output.as_ref());
-  let is_paused_here = paused_at
-    .as_ref()
-    .is_some_and(|p| p.node_id == node.id);
+  let is_paused_here = paused_at.as_ref().is_some_and(|p| p.node_id == node.id);
   let cur_tab = if active_tab() == InspectorTab::Media && media_previews.is_empty() {
     InspectorTab::Io
   } else {
