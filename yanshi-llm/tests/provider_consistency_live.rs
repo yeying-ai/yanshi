@@ -1196,8 +1196,8 @@ async fn stepfun_live_text_path() {
   let model = stepfun_live_model(
     "TEXT",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text",
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1228,8 +1228,8 @@ async fn stepfun_live_streaming_path() {
   let model = stepfun_live_model(
     "TEXT",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text" && model.supports_streaming_capability(),
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_streaming_capability(),
   )
   .await;
 
@@ -1254,8 +1254,8 @@ async fn stepfun_live_tool_calling_or_fallback_path() {
   let model = stepfun_live_model(
     "TOOLS",
     "step-3.5-flash",
-    &["step-3.5-flash-2603", "step-3.5-flash"],
-    |model| model.model_type() == "text" && model.supports_tools_capability(),
+    &["step-3.5-flash", "step-3.5-flash-2603"],
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_tools_capability(),
   )
   .await;
 
@@ -1410,7 +1410,7 @@ async fn glm_live_text_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text",
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1443,7 +1443,7 @@ async fn glm_live_openai_compatible_chat_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text",
+    |model| matches!(model.model_type(), "chat" | "text"),
   )
   .await;
 
@@ -1477,7 +1477,7 @@ async fn glm_live_streaming_path() {
     "TEXT",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4-flash-250414"],
-    |model| model.model_type() == "text" && model.supports_streaming_capability(),
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_streaming_capability(),
   )
   .await;
 
@@ -1504,7 +1504,7 @@ async fn glm_live_tool_calling_or_fallback_path() {
     "TOOLS",
     "glm-5.1",
     &["glm-5.1", "glm-4.5-flash", "glm-4.7-flash"],
-    |model| model.model_type() == "text" && model.supports_tools_capability(),
+    |model| matches!(model.model_type(), "chat" | "text") && model.supports_tools_capability(),
   )
   .await;
 
