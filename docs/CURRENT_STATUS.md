@@ -63,8 +63,11 @@ shared contracts (enforced by `cargo xtask check-arch`; see
   `yanshi-harness`, `yanshi-config` (shared config-first workflow assembly
   + diagnostics, consumed by both the CLI and server), `yanshi-cli`.
 - L4 operations and productization: `yanshi-tracing`,
-  `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui`, plus the
-  standalone Cloudflare Pingora TLS/HTTP2 reverse proxy in `crates/gateway`.
+  `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui-dx` (default Dioxus 0.7 +
+  `dioxus-shadcn 0.8` WebAssembly frontend mounted at `/ui/*` under strict zero-eval
+  CSP; legacy React UI in `yanshi-ui/` retained temporarily as fallback), `yanshi-ui/src-tauri`
+  (Tauri v2 desktop shell), plus the standalone Cloudflare Pingora TLS/HTTP2 reverse
+  proxy in `crates/gateway`.
 
 ## Implemented Surfaces
 

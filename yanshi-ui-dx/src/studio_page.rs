@@ -9,10 +9,10 @@ use dioxus_shadcn::{
   Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
   Checkbox, Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList,
   Dialog, DialogClose, DialogContent, DialogDescription, DialogOverlay, DialogTitle, Input,
-  LayoutOrientation, NativeSelect, NativeSelectOption, NativeSelectSize, Progress,
-  ResizableHandle, ResizablePanel, ResizablePanelGroup, ResizablePanelState, Separator, Sheet,
-  SheetClose, SheetContent, SheetDescription, SheetHeader, SheetOverlay, SheetSide, SheetSize,
-  SheetTitle, Textarea, resizable_resize_pair,
+  LayoutOrientation, NativeSelect, NativeSelectOption, NativeSelectSize, Progress, ResizableHandle,
+  ResizablePanel, ResizablePanelGroup, ResizablePanelState, Separator, Sheet, SheetClose,
+  SheetContent, SheetDescription, SheetHeader, SheetOverlay, SheetSide, SheetSize, SheetTitle,
+  Textarea, resizable_resize_pair,
 };
 
 use crate::api::{
@@ -28,8 +28,8 @@ use crate::studio_api::{
   ArtifactSummary, DebugResumeOverrides, FlowDebugPause, LaunchStudioRunRequest,
   PendingRunQuestion, ResumePlan, RunRecord, StreamedEvent, answer_run_question,
   attach_run_to_notebook, cancel_run, collect_run_deliverables, decide_run_approval,
-  extract_final_text_summary, fetch_preferences, format_spend_usd, get_debug_status, get_resume_plan,
-  get_run, get_run_artifacts, get_run_events_history, inspect_workflow_server,
+  extract_final_text_summary, fetch_preferences, format_spend_usd, get_debug_status,
+  get_resume_plan, get_run, get_run_artifacts, get_run_events_history, inspect_workflow_server,
   is_terminal_run_record, launch_studio_run, list_run_approvals, list_run_questions, list_runs,
   put_preferences, reduce_workflow_events, resume_run, send_debug_command,
 };
@@ -471,7 +471,15 @@ pub fn WorkflowStudioPage(
 
   let pause_sig = effective_paused
     .as_ref()
-    .map(|p| format!("{}:{}:{}:{}", run_id(), p.node_id, p.phase, all_events.len()))
+    .map(|p| {
+      format!(
+        "{}:{}:{}:{}",
+        run_id(),
+        p.node_id,
+        p.phase,
+        all_events.len()
+      )
+    })
     .unwrap_or_default();
   let pause_target_id = effective_paused.as_ref().map(|p| p.node_id.clone());
   use_effect(use_reactive((&pause_sig,), move |(sig,)| {
@@ -600,7 +608,11 @@ pub fn WorkflowStudioPage(
     let parsed_cost_limit = if cost_raw.is_empty() {
       None
     } else {
-      match cost_raw.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0) {
+      match cost_raw
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+      {
         Some(v) => Some(v),
         None => {
           banner_error.set(Some(
@@ -662,10 +674,7 @@ pub fn WorkflowStudioPage(
       body.insert("action".to_string(), serde_json::json!(action));
       if let Some(ov) = overrides {
         if let Some(inp) = ov.input_override {
-          body.insert(
-            "input_override".to_string(),
-            serde_json::Value::Object(inp),
-          );
+          body.insert("input_override".to_string(), serde_json::Value::Object(inp));
         }
         if let Some(out) = ov.output_override {
           body.insert(
@@ -871,7 +880,13 @@ pub fn WorkflowStudioPage(
           let next_bps: Vec<String> = breakpoints
             .peek()
             .iter()
-            .map(|b| if b == &nid { renamed.clone() } else { b.clone() })
+            .map(|b| {
+              if b == &nid {
+                renamed.clone()
+              } else {
+                b.clone()
+              }
+            })
             .collect();
           breakpoints.set(next_bps);
         }
@@ -889,7 +904,8 @@ pub fn WorkflowStudioPage(
   };
 
   // Shared typed inputs renderer
-  let render_inputs_form = |specs: &[crate::studio_yaml::InspectedInput], drafts: &HashMap<String, String>| {
+  let render_inputs_form = |specs: &[crate::studio_yaml::InspectedInput],
+                            drafts: &HashMap<String, String>| {
     if specs.is_empty() {
       return rsx! {
         p { class: "text-xs text-muted-foreground", "该工作流未声明外部 inputs 参数，可直接启动运行。" }
@@ -1082,7 +1098,7 @@ pub fn WorkflowStudioPage(
               mode.set(StudioPosture::Debug);
               let rid = run_id.peek().clone();
               let suffix = if rid.is_empty() { String::new() } else { format!("?run={}", encode_uri_component(&rid)) };
-              on_navigate.call(format!("/ui-dx/studio{suffix}"));
+              on_navigate.call(format!("/ui/studio{suffix}"));
             },
             "🔍 调试状态"
           }
@@ -1095,7 +1111,7 @@ pub fn WorkflowStudioPage(
               mode.set(StudioPosture::Release);
               let rid = run_id.peek().clone();
               let suffix = if rid.is_empty() { String::new() } else { format!("?run={}", encode_uri_component(&rid)) };
-              on_navigate.call(format!("/ui-dx/app{suffix}"));
+              on_navigate.call(format!("/ui/app{suffix}"));
             },
             "🚀 发布状态"
           }
@@ -1123,11 +1139,11 @@ pub fn WorkflowStudioPage(
                 .map(|r| r.id.clone());
               let href = match against {
                 Some(other) => format!(
-                  "/ui-dx/runs/{}/compare?against={}",
+                  "/ui/runs/{}/compare?against={}",
                   encode_uri_component(&primary),
                   encode_uri_component(&other)
                 ),
-                None => format!("/ui-dx/runs/{}/compare", encode_uri_component(&primary)),
+                None => format!("/ui/runs/{}/compare", encode_uri_component(&primary)),
               };
               rsx! {
                 Button {
@@ -1261,7 +1277,7 @@ pub fn WorkflowStudioPage(
                 variant: ButtonVariant::Secondary,
                 size: ButtonSize::Sm,
                 class: "h-7 px-2 text-xs".to_string(),
-                onclick: move |_| on_navigate.call(format!("/ui-dx/notebooks/{}", encode_uri_component(&nb_id))),
+                onclick: move |_| on_navigate.call(format!("/ui/notebooks/{}", encode_uri_component(&nb_id))),
                 "前往笔记本查看 →"
               }
               Button {
@@ -1815,12 +1831,12 @@ pub fn WorkflowStudioPage(
                               onclick: move |_| {
                                 let href = if !cur_r_for_cmp.is_empty() && cur_r_for_cmp != rid_cmp {
                                   format!(
-                                    "/ui-dx/runs/{}/compare?against={}",
+                                    "/ui/runs/{}/compare?against={}",
                                     encode_uri_component(&cur_r_for_cmp),
                                     encode_uri_component(&rid_cmp)
                                   )
                                 } else {
-                                  format!("/ui-dx/runs/{}/compare", encode_uri_component(&rid_cmp))
+                                  format!("/ui/runs/{}/compare", encode_uri_component(&rid_cmp))
                                 };
                                 on_navigate.call(href);
                               },
@@ -2250,7 +2266,7 @@ pub fn WorkflowStudioPage(
                       onclick: move |_| {
                         let rid = run_id.peek().clone();
                         mode.set(StudioPosture::Debug);
-                        on_navigate.call(format!("/ui-dx/studio?run={}", encode_uri_component(&rid)));
+                        on_navigate.call(format!("/ui/studio?run={}", encode_uri_component(&rid)));
                       },
                       "切至调试视图核查 I/O →"
                     }

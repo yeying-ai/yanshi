@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build the Phase 0 Dioxus Web Spike (`yanshi-ui-dx`) with Tailwind CSS v4.
+# Build the Dioxus 0.7 Web frontend (`yanshi-ui-dx`) with Tailwind CSS v4.
 #
 # - Prefers Tailwind CSS v4 standalone CLI (zero Node.js) and caches it under
 #   `${YANSHI_TAILWIND_CACHE:-$HOME/.cache/yanshi-tailwind}`.
 # - Automatically resolves `@source` for `dioxus-shadcn` via `cargo metadata`
 #   so both crates.io and local `[patch.crates-io]` builds scan exact sources.
-# - Runs `dx build --platform web --release --base-path ui-dx` and emits a
-#   compact raw + gzip artifact size report.
+# - Runs `dx build --platform web --release --base-path "${DX_BASE_PATH:-ui}"`
+#   and emits a compact raw + gzip artifact size report.
 # ==============================================================================
 set -euo pipefail
 
@@ -121,9 +121,9 @@ if TW_BIN="$(resolve_tailwind_bin)"; then
   log "Using standalone Tailwind CLI: ${TW_BIN}"
   "${TW_BIN}" -i "${CSS_RESOLVED}" -o "${CSS_OUTPUT}" --minify
 else
-  log "Standalone Tailwind CLI unavailable; falling back to Node @tailwindcss/node"
-  NODE_TW_BASE="/Users/hal/arch/dioxus-ui"
-  if [[ -d "${NODE_TW_BASE}/node_modules/tailwindcss" ]]; then
+  log "Standalone Tailwind CLI unavailable; checking optional NODE_TW_BASE fallback"
+  NODE_TW_BASE="${NODE_TW_BASE:-}"
+  if [[ -n "${NODE_TW_BASE}" && -d "${NODE_TW_BASE}/node_modules/tailwindcss" ]]; then
     node - "${CSS_RESOLVED}" "${CSS_OUTPUT}" "${NODE_TW_BASE}" <<'JS'
 const fs = require("node:fs");
 const path = require("node:path");
@@ -158,20 +158,21 @@ JS
   fi
 fi
 
+DX_BASE_PATH="${DX_BASE_PATH:-ui}"
 TARGET_DIR="$(cd "${APP_DIR}" && cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 DX_PUBLIC="${TARGET_DIR}/dx/yanshi-ui-dx/release/web/public"
 rm -rf "${DX_PUBLIC}"
 
-log "Building Dioxus Web WASM bundle (--release --base-path ui-dx)..."
+log "Building Dioxus Web WASM bundle (--release --base-path ${DX_BASE_PATH})..."
 mkdir -p "${OUT_DIR}"
 (
   cd "${APP_DIR}"
   # Note: wasm-opt can SIGBUS on some local arm64 toolchains; allow opting out via DX_WASM_OPT=0.
   if [[ "${DX_WASM_OPT:-1}" == "0" ]]; then
     PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/opt/homebrew/bin' | paste -sd ':' -)" \
-      dx build --platform web --release --base-path ui-dx
+      dx build --platform web --release --base-path "${DX_BASE_PATH}"
   else
-    dx build --platform web --release --base-path ui-dx
+    dx build --platform web --release --base-path "${DX_BASE_PATH}"
   fi
 )
 

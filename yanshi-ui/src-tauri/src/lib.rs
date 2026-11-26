@@ -91,22 +91,23 @@ fn position_is_on_any_monitor(app: &tauri::App, x: i32, y: i32) -> bool {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resolve_desktop_webview_url(api_base: &str) -> Result<WebviewUrl, Box<dyn std::error::Error>> {
-  if std::env::var("YANSHI_DESKTOP_UI")
+  let legacy_requested = std::env::var("YANSHI_DESKTOP_UI")
     .ok()
-    .is_some_and(|v| v.trim().eq_ignore_ascii_case("dx"))
-  {
-    let dx_url: tauri::Url = format!("{api_base}/ui-dx").parse()?;
-    return Ok(WebviewUrl::External(dx_url));
-  }
+    .is_some_and(|v| v.trim().eq_ignore_ascii_case("legacy"));
   if cfg!(feature = "custom-protocol") {
     return Ok(WebviewUrl::App("index.html".into()));
   }
-  let vite_dev_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 5173));
-  if std::net::TcpStream::connect_timeout(&vite_dev_addr, std::time::Duration::from_millis(60))
-    .is_ok()
-  {
-    return Ok(WebviewUrl::App("index.html".into()));
+  if legacy_requested {
+    let vite_dev_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 5173));
+    if std::net::TcpStream::connect_timeout(&vite_dev_addr, std::time::Duration::from_millis(60))
+      .is_ok()
+    {
+      return Ok(WebviewUrl::App("index.html".into()));
+    }
   }
+  // Default desktop route: loopback `/ui/studio`, which serves the built Dioxus
+  // WASM bundle under strict CSP (with automatic fallback to legacy embedded UI
+  // if `yanshi-ui-dx/dist/public` is absent or `YANSHI_DESKTOP_UI=legacy`).
   let studio_url: tauri::Url = format!("{api_base}/ui/studio").parse()?;
   Ok(WebviewUrl::External(studio_url))
 }

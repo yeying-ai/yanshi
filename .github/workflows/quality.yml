@@ -158,6 +158,29 @@ jobs:
           cmp -s dist/assets/styles.css dist/ui/assets/styles.css
           git diff --exit-code -- dist
 
+  ui-dx-check:
+    # Phase 4: `yanshi-ui-dx` (Dioxus 0.7 + dioxus-shadcn 0.8) is excluded from
+    # the root workspace so backend builds stay target-agnostic. Gate its
+    # formatting, host unit tests (21 built-in Studio presets, DAG topology,
+    # mutators, reducer, route parser), and both host + wasm32 Clippy here
+    # against published crates.io dependencies.
+    name: yanshi-ui-dx (Dioxus fmt + test + wasm32 clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Format check Dioxus UI crate
+        run: cargo fmt --manifest-path yanshi-ui-dx/Cargo.toml -- --check
+      - name: Run Dioxus UI host unit tests
+        run: cargo test --manifest-path yanshi-ui-dx/Cargo.toml
+      - name: Clippy Dioxus UI (host)
+        run: cargo clippy --manifest-path yanshi-ui-dx/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy Dioxus UI (wasm32)
+        run: cargo clippy --manifest-path yanshi-ui-dx/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+
   tauri-desktop-check:
     # AF5: `yanshi-ui/src-tauri` is excluded from the root workspace so
     # plain `cargo test` on headless Linux machines doesn't require GTK /
@@ -749,6 +772,7 @@ jobs:
       - println-lint
       - check-changelog
       - ui-tests
+      - ui-dx-check
       - tauri-desktop-check
       - gateway-check
       - cargo-audit
@@ -776,6 +800,7 @@ jobs:
           echo "println-lint: ${{ needs.println-lint.result }}"
           echo "check-changelog: ${{ needs.check-changelog.result }}"
           echo "ui-tests: ${{ needs.ui-tests.result }}"
+          echo "ui-dx-check: ${{ needs.ui-dx-check.result }}"
           echo "tauri-desktop-check: ${{ needs.tauri-desktop-check.result }}"
           echo "gateway-check: ${{ needs.gateway-check.result }}"
           echo "cargo-audit: ${{ needs.cargo-audit.result }}"
@@ -799,6 +824,7 @@ jobs:
           test "${{ needs.println-lint.result }}" = "success"
           test "${{ needs.check-changelog.result }}" = "success"
           test "${{ needs.ui-tests.result }}" = "success"
+          test "${{ needs.ui-dx-check.result }}" = "success"
           test "${{ needs.tauri-desktop-check.result }}" = "success"
           test "${{ needs.gateway-check.result }}" = "success"
           test "${{ needs.cargo-audit.result }}" = "success"

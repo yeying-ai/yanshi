@@ -395,16 +395,30 @@ mod wasm_impl {
       .filter(|s| !s.is_empty())
   }
 
+  fn meta_content(name: &str) -> Option<String> {
+    let win = web_sys::window()?;
+    let doc = win.document()?;
+    let selector = format!("meta[name=\"{name}\"]");
+    let el = doc.query_selector(&selector).ok()??;
+    el.get_attribute("content")
+      .map(|s| s.trim().to_string())
+      .filter(|s| !s.is_empty())
+  }
+
   pub fn resolve_api_base() -> String {
     let stored = read_storage("yanshi.ui.apiBaseUrl", "");
     if !stored.trim().is_empty() {
       return stored.trim().trim_end_matches('/').to_string();
     }
-    window_string_prop("__YANSHI_API_BASE__").unwrap_or_default()
+    window_string_prop("__YANSHI_API_BASE__")
+      .or_else(|| meta_content("yanshi-api-base"))
+      .unwrap_or_default()
   }
 
   pub fn resolve_embedded_token() -> String {
-    window_string_prop("__YANSHI_API_TOKEN__").unwrap_or_default()
+    window_string_prop("__YANSHI_API_TOKEN__")
+      .or_else(|| meta_content("yanshi-api-token"))
+      .unwrap_or_default()
   }
 
   pub fn is_local_desktop_engine() -> bool {
@@ -441,7 +455,7 @@ mod wasm_impl {
 
   pub fn current_location_path_and_search() -> (String, String) {
     let Some(win) = web_sys::window() else {
-      return ("/ui-dx/diagnostics".to_string(), String::new());
+      return ("/ui/studio".to_string(), String::new());
     };
     let loc = win.location();
     let hash = loc.hash().unwrap_or_default();
@@ -452,7 +466,7 @@ mod wasm_impl {
       }
       return (full, String::new());
     }
-    let path = loc.pathname().unwrap_or_else(|_| "/ui-dx".to_string());
+    let path = loc.pathname().unwrap_or_else(|_| "/ui".to_string());
     let search = loc.search().unwrap_or_default();
     (path, search)
   }
@@ -1193,7 +1207,7 @@ mod wasm_impl {
   pub fn write_storage(_key: &str, _value: &str) {}
 
   pub fn current_location_path_and_search() -> (String, String) {
-    ("/ui-dx/diagnostics".to_string(), String::new())
+    ("/ui/studio".to_string(), String::new())
   }
 
   pub fn push_browser_route(_path_with_search: &str) {}

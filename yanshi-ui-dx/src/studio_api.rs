@@ -828,15 +828,21 @@ pub fn matches_event_filter(event: &StreamedEvent, expr: &str) -> bool {
     } else if let Some((lhs, rhs)) = clause.split_once('=') {
       let actual = extract_string_field(event, lhs.trim()).unwrap_or_default();
       let want = rhs.trim().trim_matches('"');
-      if !actual.to_ascii_lowercase().contains(&want.to_ascii_lowercase()) {
+      if !actual
+        .to_ascii_lowercase()
+        .contains(&want.to_ascii_lowercase())
+      {
         return false;
       }
     } else {
       let needle = clause.to_ascii_lowercase();
       let in_kind = event.kind.to_ascii_lowercase().contains(&needle);
-      let in_node = event_node_id(event)
-        .is_some_and(|n| n.to_ascii_lowercase().contains(&needle));
-      let in_payload = event.payload.to_string().to_ascii_lowercase().contains(&needle);
+      let in_node = event_node_id(event).is_some_and(|n| n.to_ascii_lowercase().contains(&needle));
+      let in_payload = event
+        .payload
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(&needle);
       if !in_kind && !in_node && !in_payload {
         return false;
       }
@@ -869,7 +875,11 @@ fn extract_string_field(event: &StreamedEvent, field: &str) -> Option<String> {
       .payload
       .as_object()
       .and_then(|o| o.get(other))
-      .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())),
+      .map(|v| {
+        v.as_str()
+          .map(str::to_string)
+          .unwrap_or_else(|| v.to_string())
+      }),
   }
 }
 
@@ -1014,7 +1024,10 @@ pub async fn list_runs(tenant: &str, limit: usize, token: &str) -> Result<Vec<Ru
   } else {
     tenant.trim()
   };
-  let path = format!("/v1/runs?tenant_id={}&limit={limit}", encode_uri_component(t));
+  let path = format!(
+    "/v1/runs?tenant_id={}&limit={limit}",
+    encode_uri_component(t)
+  );
   let env: ListRunsEnvelope = request_json("GET", &path, token, t, None).await?;
   Ok(env.runs)
 }
@@ -1037,7 +1050,10 @@ pub struct LaunchStudioRunRequest {
   pub breakpoints: Vec<String>,
 }
 
-pub async fn launch_studio_run(req: &LaunchStudioRunRequest, token: &str) -> Result<String, String> {
+pub async fn launch_studio_run(
+  req: &LaunchStudioRunRequest,
+  token: &str,
+) -> Result<String, String> {
   let tenant = if req.tenant_id.trim().is_empty() {
     "default"
   } else {
@@ -1050,7 +1066,12 @@ pub async fn launch_studio_run(req: &LaunchStudioRunRequest, token: &str) -> Res
     "inputs".to_string(),
     serde_json::Value::Object(req.inputs.clone()),
   );
-  if let Some(m) = req.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+  if let Some(m) = req
+    .model
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+  {
     body.insert("model".to_string(), serde_json::json!(m));
   }
   if let Some(limit) = req.cost_limit_usd {
@@ -1224,7 +1245,8 @@ pub async fn fetch_preferences(
   tenant: &str,
   token: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-  let env: PreferencesEnvelope = request_json("GET", "/v1/preferences", token, tenant, None).await?;
+  let env: PreferencesEnvelope =
+    request_json("GET", "/v1/preferences", token, tenant, None).await?;
   Ok(env.preferences)
 }
 
@@ -1234,7 +1256,8 @@ pub async fn put_preferences(
   token: &str,
 ) -> Result<(), String> {
   let body = serde_json::json!({ "preferences": patch });
-  let _: serde_json::Value = request_json("PUT", "/v1/preferences", token, tenant, Some(&body)).await?;
+  let _: serde_json::Value =
+    request_json("PUT", "/v1/preferences", token, tenant, Some(&body)).await?;
   Ok(())
 }
 
