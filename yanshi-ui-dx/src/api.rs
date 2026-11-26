@@ -365,13 +365,14 @@ pub fn extract_token_delta(payload: &serde_json::Value) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
   use super::*;
-  use js_sys::{Array, Reflect, Uint8Array};
+  use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
   use wasm_bindgen::JsCast;
   use wasm_bindgen::JsValue;
+  use wasm_bindgen::closure::Closure;
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{
-    AbortController, Blob, BlobPropertyBag, Headers, ReadableStreamDefaultReader, Request,
-    RequestInit, RequestMode, Response, TextDecoder, Url,
+    AbortController, Blob, BlobPropertyBag, Headers, HtmlAnchorElement, HtmlInputElement,
+    ReadableStreamDefaultReader, Request, RequestInit, RequestMode, Response, TextDecoder, Url,
   };
 
   fn js_err(err: JsValue) -> String {
@@ -549,7 +550,7 @@ mod wasm_impl {
     )
   }
 
-  async fn request_json<T: for<'de> Deserialize<'de>>(
+  pub(crate) async fn request_json<T: for<'de> Deserialize<'de>>(
     method: &str,
     path: &str,
     token: &str,
@@ -991,6 +992,181 @@ code{background:#e2e8f0;padding:2px 6px;border-radius:4px}
       let _ = Url::revoke_object_url(url);
     }
   }
+
+  pub(crate) async fn request_no_content(
+    method: &str,
+    path: &str,
+    token: &str,
+    tenant: &str,
+    body: Option<&serde_json::Value>,
+  ) -> Result<(), String> {
+    let body_str = match body {
+      Some(v) => Some(serde_json::to_string(v).map_err(|e| e.to_string())?),
+      None => None,
+    };
+    let resp = send_request(method, path, token, tenant, body_str.as_deref(), None, None).await?;
+    if !resp.ok() {
+      let text = read_response_text(&resp).await.unwrap_or_default();
+      return Err(format!("HTTP {}: {}", resp.status(), text.trim()));
+    }
+    Ok(())
+  }
+
+  pub(crate) async fn fetch_text_resource(
+    path: &str,
+    token: &str,
+    tenant: &str,
+    max_chars: usize,
+  ) -> Result<String, String> {
+    let resp = send_request("GET", path, token, tenant, None, None, None).await?;
+    if !resp.ok() {
+      return Err(format!("HTTP {}", resp.status()));
+    }
+    let text = read_response_text(&resp).await?;
+    Ok(text.chars().take(max_chars).collect())
+  }
+
+  pub(crate) async fn fetch_blob_url(
+    path: &str,
+    token: &str,
+    tenant: &str,
+    mime_override: Option<&str>,
+  ) -> Result<String, String> {
+    let resp = send_request("GET", path, token, tenant, None, None, None).await?;
+    if !resp.ok() {
+      return Err(format!("HTTP {}", resp.status()));
+    }
+    let blob_val = JsFuture::from(resp.blob().map_err(js_err)?)
+      .await
+      .map_err(js_err)?;
+    let raw_blob: Blob = blob_val
+      .dyn_into()
+      .map_err(|_| "unexpected non-Blob response".to_string())?;
+    let effective_blob = if let Some(mime) = mime_override
+      && !mime.is_empty()
+      && raw_blob.type_() != mime
+    {
+      let parts = Array::new();
+      parts.push(&raw_blob);
+      let opts = BlobPropertyBag::new();
+      opts.set_type(mime);
+      Blob::new_with_blob_sequence_and_options(&parts, &opts).map_err(js_err)?
+    } else {
+      raw_blob
+    };
+    Url::create_object_url_with_blob(&effective_blob).map_err(js_err)
+  }
+
+  fn click_download_url(url: &str, filename: &str) -> Result<(), String> {
+    let win = web_sys::window().ok_or_else(|| "window is unavailable".to_string())?;
+    let doc = win
+      .document()
+      .ok_or_else(|| "document is unavailable".to_string())?;
+    let anchor: HtmlAnchorElement = doc
+      .create_element("a")
+      .map_err(js_err)?
+      .dyn_into()
+      .map_err(|_| "failed to create <a> element".to_string())?;
+    anchor.set_href(url);
+    anchor.set_download(filename);
+    if let Some(body) = doc.body() {
+      let _ = body.append_child(&anchor);
+      anchor.click();
+      let _ = body.remove_child(&anchor);
+    } else {
+      anchor.click();
+    }
+    Ok(())
+  }
+
+  pub fn trigger_text_download(content: &str, mime: &str, filename: &str) -> Result<(), String> {
+    let url = make_blob_url(content, mime)?;
+    let res = click_download_url(&url, filename);
+    revoke_blob_url(&url);
+    res
+  }
+
+  pub async fn download_authenticated_resource(
+    path: &str,
+    token: &str,
+    tenant: &str,
+    filename: &str,
+  ) -> Result<(), String> {
+    let url = fetch_blob_url(path, token, tenant, None).await?;
+    let res = click_download_url(&url, filename);
+    sleep_ms(1200).await;
+    revoke_blob_url(&url);
+    res
+  }
+
+  pub async fn open_desktop_artifact(
+    api_path: &str,
+    mode: &str,
+    token: &str,
+    tenant: &str,
+  ) -> Result<(), String> {
+    let body = serde_json::json!({
+      "api_path": api_path,
+      "mode": mode,
+    });
+    request_no_content(
+      "POST",
+      "/v1/desktop/open-artifact",
+      token,
+      tenant,
+      Some(&body),
+    )
+    .await
+  }
+
+  pub async fn read_input_file_bytes(input_id: &str) -> Result<Option<(String, Vec<u8>)>, String> {
+    let Some(win) = web_sys::window() else {
+      return Ok(None);
+    };
+    let Some(doc) = win.document() else {
+      return Ok(None);
+    };
+    let Some(el) = doc.get_element_by_id(input_id) else {
+      return Ok(None);
+    };
+    let input: HtmlInputElement = el
+      .dyn_into()
+      .map_err(|_| format!("element #{input_id} is not an <input>"))?;
+    let Some(files) = input.files() else {
+      return Ok(None);
+    };
+    let Some(file) = files.get(0) else {
+      return Ok(None);
+    };
+    let name = file.name();
+    let buf = JsFuture::from(file.array_buffer()).await.map_err(js_err)?;
+    let bytes = Uint8Array::new(&buf).to_vec();
+    Ok(Some((name, bytes)))
+  }
+
+  pub fn clear_file_input(input_id: &str) {
+    if let Some(win) = web_sys::window()
+      && let Some(doc) = win.document()
+      && let Some(el) = doc.get_element_by_id(input_id)
+      && let Ok(input) = el.dyn_into::<HtmlInputElement>()
+    {
+      input.set_value("");
+    }
+  }
+
+  pub async fn sleep_ms(ms: i32) {
+    let promise = Promise::new(&mut |resolve, _reject| {
+      if let Some(win) = web_sys::window() {
+        let cb = Closure::once_into_js(move || {
+          let _ = resolve.call0(&JsValue::NULL);
+        });
+        if let Some(func) = cb.dyn_ref::<Function>() {
+          let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(func, ms);
+        }
+      }
+    });
+    let _ = JsFuture::from(promise).await;
+  }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1205,16 +1381,88 @@ mod wasm_impl {
   }
 
   pub fn revoke_blob_url(_url: &str) {}
+
+  pub(crate) async fn request_json<T: for<'de> Deserialize<'de>>(
+    _method: &str,
+    _path: &str,
+    _token: &str,
+    _tenant: &str,
+    _body: Option<&serde_json::Value>,
+  ) -> Result<T, String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub(crate) async fn request_no_content(
+    _method: &str,
+    _path: &str,
+    _token: &str,
+    _tenant: &str,
+    _body: Option<&serde_json::Value>,
+  ) -> Result<(), String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub(crate) async fn fetch_text_resource(
+    _path: &str,
+    _token: &str,
+    _tenant: &str,
+    _max_chars: usize,
+  ) -> Result<String, String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub(crate) async fn fetch_blob_url(
+    _path: &str,
+    _token: &str,
+    _tenant: &str,
+    _mime_override: Option<&str>,
+  ) -> Result<String, String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub fn trigger_text_download(_content: &str, _mime: &str, _filename: &str) -> Result<(), String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub async fn download_authenticated_resource(
+    _path: &str,
+    _token: &str,
+    _tenant: &str,
+    _filename: &str,
+  ) -> Result<(), String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub async fn open_desktop_artifact(
+    _api_path: &str,
+    _mode: &str,
+    _token: &str,
+    _tenant: &str,
+  ) -> Result<(), String> {
+    Err("wasm32 only".to_string())
+  }
+
+  pub async fn read_input_file_bytes(_input_id: &str) -> Result<Option<(String, Vec<u8>)>, String> {
+    Ok(None)
+  }
+
+  pub fn clear_file_input(_input_id: &str) {}
+
+  pub async fn sleep_ms(_ms: i32) {}
 }
 
+pub(crate) use wasm_impl::{fetch_blob_url, fetch_text_resource, request_json, request_no_content};
+
 pub use wasm_impl::{
-  SseAbortHandle, answer_harness_interrupt, cancel_harness_session, create_blob_previews,
-  create_harness_session, current_location_path_and_search, decide_harness_approval,
-  delete_model_item, delete_provider, fetch_diagnostics, fetch_models_config,
-  get_harness_events_history, get_harness_interrupt, get_harness_session, is_local_desktop_engine,
-  list_harness_approvals, list_harness_sessions, pick_desktop_directory, push_browser_route,
-  put_model_item, put_provider, read_storage, resolve_api_base, resolve_embedded_token,
-  resume_harness_session, revoke_blob_url, stream_sse, submit_run, test_provider, write_storage,
+  SseAbortHandle, answer_harness_interrupt, cancel_harness_session, clear_file_input,
+  create_blob_previews, create_harness_session, current_location_path_and_search,
+  decide_harness_approval, delete_model_item, delete_provider, download_authenticated_resource,
+  fetch_diagnostics, fetch_models_config, get_harness_events_history, get_harness_interrupt,
+  get_harness_session, is_local_desktop_engine, list_harness_approvals, list_harness_sessions,
+  open_desktop_artifact, pick_desktop_directory, push_browser_route, put_model_item, put_provider,
+  read_input_file_bytes, read_storage, resolve_api_base, resolve_embedded_token,
+  resume_harness_session, revoke_blob_url, sleep_ms, stream_sse, submit_run, test_provider,
+  trigger_text_download, write_storage,
 };
 
 #[cfg(test)]

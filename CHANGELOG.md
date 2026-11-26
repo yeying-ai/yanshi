@@ -538,6 +538,21 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Dioxus 0.7 Notebook Workspace (`/ui-dx/notebooks` & `/ui-dx/notebooks/:id`, Phase 2).**
+  Migrated the full three-pane Notebook Studio into `yanshi-ui-dx/`
+  (`notebook_api.rs`, `deliverable_viewer.rs`, `notebook_page.rs`) using
+  `dioxus-shadcn` (`Resizable`, `Tabs`, `Combobox`, `Dialog`, `Sheet`,
+  `Checkbox`, `NativeSelect`, `Table`, `Card`): full 24-route Notebook API
+  client, portable JSON/Markdown export & import, `artifacts.zip`, 4-mode source
+  ingestion (text/URL/Base64 file/recording) with 1.2s ingestion polling,
+  lossless `raw_text` source editing, chunk provenance reader, `source_ids`
+  scoping, BM25 search, multi-turn grounded `/ask` with clickable citations and
+  save-to-note, AI Studio `/plan`, 12 built-in generators with `/generate` +
+  `/generate-batch` (cost limit & live SSE progress/cost tracking), all 5
+  interactive `NotebookDeliverableViewer` modes (flashcards, quiz, sortable
+  filterable table, audio transcript, video storyboard), and authenticated
+  `AuthorizedMedia` preview cards with full-screen `SheetSize::Full` zoom drawer.
+
 - **Parallel Dioxus 0.7 + `dioxus-shadcn` frontend (`yanshi-ui-dx/`) at `/ui-dx/*` and opt-in Tauri `WKWebView` support.**
   Added a standalone Edition 2024 WebAssembly frontend (`yanshi-ui-dx/`, excluded
   from root workspace members) with a zero-Node.js Tailwind CSS v4 + `dx build`
