@@ -1147,13 +1147,18 @@ async fn stepfun_live_streaming_reasoning() {
     model: model.clone(),
     messages: vec![json!({
       "role": "user",
-      "content": "What is 17 * 23? Reply with just the number."
+      // step-5-preview at `low` effort occasionally omits reasoning on
+      // trivial arithmetic like 17 * 23 (runs 45271469390 and 45685859272),
+      // so ask a multi-step counting question at `medium` effort: 142
+      // multiples of 7 below 1000, minus the 12 that are multiples of 77.
+      "content": "How many positive integers below 1000 are divisible by 7 but not by 11? \
+                  Reply with just the number."
     })],
     stream: true,
     parameters: HashMap::new(),
     tools: None,
     tool_choice: None,
-    thinking: Some(ThinkingConfig::Low),
+    thinking: Some(ThinkingConfig::Medium),
     response_format: None,
   };
 
@@ -1171,8 +1176,8 @@ async fn stepfun_live_streaming_reasoning() {
     response.thinking.as_deref().map_or(0, str::len)
   );
   assert!(
-    response.content.contains("391"),
-    "stepfun {model}: expected 391, got {:?}",
+    response.content.contains("130"),
+    "stepfun {model}: expected 130, got {:?}",
     response.content
   );
   assert!(
