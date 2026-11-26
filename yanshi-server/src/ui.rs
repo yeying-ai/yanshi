@@ -1,11 +1,9 @@
 //! Web UI mount for Yanshi Studio.
 //!
 //! Serves the Dioxus 0.7 WASM frontend (`yanshi-ui-dx/dist/public`, or the
-//! directory specified by `YANSHI_UI_DIR` / `YANSHI_DX_UI_DIR`) by default at
-//! `/ui/*` under a strict zero-eval Content Security Policy. When no Dioxus
-//! bundle is present on disk (or `YANSHI_LEGACY_UI=1` is set), transparently
-//! falls back to the embedded legacy Vite bundle in `yanshi-ui/dist/` so plain
-//! `cargo test` and transition rollbacks continue to work without Node.js.
+//! directory specified by `YANSHI_UI_DIR` / `YANSHI_DX_UI_DIR`, or
+//! `/usr/share/yanshi/ui`) at `/ui/*` under a strict zero-eval Content Security
+//! Policy, and redirects legacy `/ui-dx/*` bookmarks to `/ui/*`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -17,15 +15,11 @@ use axum::{
     HeaderName, HeaderValue, StatusCode, Uri,
     header::{CACHE_CONTROL, CONTENT_TYPE},
   },
-  response::{Html, IntoResponse, Redirect, Response},
+  response::{IntoResponse, Redirect, Response},
   routing::get,
 };
 
 use crate::AppState;
-
-const INDEX_HTML: &str = include_str!("../../yanshi-ui/dist/index.html");
-const APP_JS: &str = include_str!("../../yanshi-ui/dist/assets/app.js");
-const STYLES_CSS: &str = include_str!("../../yanshi-ui/dist/assets/styles.css");
 
 /// Preferred runtime override pointing at a built `yanshi-ui-dx/dist/public` bundle.
 pub const UI_DIR_ENV: &str = "YANSHI_UI_DIR";
@@ -33,23 +27,29 @@ pub const UI_DIR_ENV: &str = "YANSHI_UI_DIR";
 /// Backwards-compatible alias for [`UI_DIR_ENV`].
 pub const DX_UI_DIR_ENV: &str = "YANSHI_DX_UI_DIR";
 
-/// Escape hatch (`1` / `true` / `legacy`) that forces the embedded legacy React UI.
-pub const LEGACY_UI_ENV: &str = "YANSHI_LEGACY_UI";
-
 /// Strict CSP applied to Dioxus UI responses (`dioxus-shadcn` RFC 0080:
 /// zero JS `eval` / zero inline script execution; only `'wasm-unsafe-eval'`).
 pub const DX_UI_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-src 'self' blob:; object-src 'none'; base-uri 'self'";
 
+const UI_BUNDLE_MISSING_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Yanshi Studio UI Not Built</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1.25rem;line-height:1.6">
+  <h1>Yanshi Studio UI bundle not found</h1>
+  <p>The Dioxus 0.7 WASM Web UI has not been built on this host yet.</p>
+  <p>Build it once with <code>./yanshi-ui-dx/scripts/build.sh</code> or set <code>YANSHI_UI_DIR</code> to a built <code>yanshi-ui-dx/dist/public</code> directory.</p>
+</body>
+</html>"#;
+
 /// Static UI routes mounted by [`crate::create_router`].
 ///
-/// Serves every `/ui/*` SPA path and static asset (preferring the built Dioxus
-/// WASM bundle when present, with automatic fallback to the embedded legacy
-/// SPA) and redirects legacy `/ui-dx/*` bookmarks to `/ui/*`.
+/// Serves every `/ui/*` SPA path and static asset from the built Dioxus WASM
+/// bundle and redirects legacy `/ui-dx/*` bookmarks to `/ui/*`.
 pub fn ui_router() -> Router<AppState> {
   Router::new()
     .route("/", get(root_redirect))
-    .route("/ui", get(ui_index))
-    .route("/ui/", get(ui_index))
+    .route("/ui", get(index_html))
+    .route("/ui/", get(index_html))
     .route("/ui/*asset_path", get(ui_asset))
     .route("/ui-dx", get(ui_dx_redirect_root))
     .route("/ui-dx/", get(ui_dx_redirect_root))
@@ -61,18 +61,13 @@ pub async fn root_redirect() -> Redirect {
   Redirect::temporary("/ui/studio")
 }
 
-/// Serve the embedded legacy SPA shell directly (retained for API compatibility
-/// and fallback when no Dioxus bundle is built on disk).
-pub async fn index_html() -> Html<&'static str> {
-  Html(INDEX_HTML)
-}
-
-async fn app_js() -> Response {
-  asset_response(APP_JS, "application/javascript; charset=utf-8")
-}
-
-async fn styles_css() -> Response {
-  asset_response(STYLES_CSS, "text/css; charset=utf-8")
+/// Serve the Dioxus SPA shell (`index.html`), or `503 Service Unavailable` with
+/// build instructions when no UI bundle is present on disk.
+pub async fn index_html() -> Response {
+  match resolve_dx_ui_dir() {
+    Some(root) => serve_dx_ui_file(&root, Some("index.html")).await,
+    None => ui_bundle_missing_response(),
+  }
 }
 
 /// Build a cacheable static asset response.
@@ -88,13 +83,16 @@ pub fn asset_response(body: &'static str, content_type: &'static str) -> Respons
     .into_response()
 }
 
-fn legacy_ui_forced() -> bool {
-  std::env::var(LEGACY_UI_ENV).ok().is_some_and(|raw| {
-    matches!(
-      raw.trim().to_ascii_lowercase().as_str(),
-      "1" | "true" | "yes" | "legacy"
-    )
-  })
+fn ui_bundle_missing_response() -> Response {
+  (
+    StatusCode::SERVICE_UNAVAILABLE,
+    [
+      (CONTENT_TYPE, "text/html; charset=utf-8"),
+      (CACHE_CONTROL, "no-store"),
+    ],
+    Body::from(UI_BUNDLE_MISSING_HTML),
+  )
+    .into_response()
 }
 
 fn has_dx_index(dir: &Path) -> bool {
@@ -189,35 +187,11 @@ async fn serve_dx_ui_file(root: &Path, rel_path: Option<&str>) -> Response {
   resp
 }
 
-async fn serve_legacy_ui_asset(raw_path: &str) -> Response {
-  let Some(clean_rel) = sanitize_rel_asset_path(raw_path) else {
-    return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
-  };
-  let normalized = clean_rel.to_string_lossy().replace('\\', "/");
-  match normalized.as_str() {
-    "assets/app.js" => app_js().await,
-    "assets/styles.css" => styles_css().await,
-    _ if clean_rel.extension().is_none() => index_html().await.into_response(),
-    _ => (StatusCode::NOT_FOUND, "UI asset not found").into_response(),
-  }
-}
-
-async fn ui_index() -> Response {
-  if !legacy_ui_forced()
-    && let Some(root) = resolve_dx_ui_dir()
-  {
-    return serve_dx_ui_file(&root, Some("index.html")).await;
-  }
-  index_html().await.into_response()
-}
-
 async fn ui_asset(RoutePath(asset_path): RoutePath<String>) -> Response {
-  if !legacy_ui_forced()
-    && let Some(root) = resolve_dx_ui_dir()
-  {
-    return serve_dx_ui_file(&root, Some(&asset_path)).await;
+  match resolve_dx_ui_dir() {
+    Some(root) => serve_dx_ui_file(&root, Some(&asset_path)).await,
+    None => ui_bundle_missing_response(),
   }
-  serve_legacy_ui_asset(&asset_path).await
 }
 
 fn redirect_with_query(path: &str, query: Option<&str>) -> Redirect {
@@ -259,13 +233,6 @@ mod tests {
     );
   }
 
-  #[tokio::test]
-  async fn index_contains_app_mount() {
-    let Html(html) = index_html().await;
-    assert!(html.contains("yanshi-debugger"));
-    assert!(html.contains("/ui/assets/app.js"));
-  }
-
   #[test]
   fn ui_router_registers_canonical_and_redirect_routes() {
     let _router: Router<AppState> = ui_router();
@@ -286,11 +253,23 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn missing_ui_bundle_returns_503_with_build_instructions() {
+    let resp = ui_bundle_missing_response();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 16)
+      .await
+      .expect("read body");
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("./yanshi-ui-dx/scripts/build.sh"));
+    assert!(html.contains("YANSHI_UI_DIR"));
+  }
+
+  #[tokio::test]
   async fn dx_ui_serves_assets_with_strict_csp_and_rejects_traversal() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
       tmp.path().join("index.html"),
-      "<!doctype html><html></html>",
+      "<!doctype html><html><head><title>Yanshi Studio</title></head></html>",
     )
     .expect("write index");
     std::fs::create_dir_all(tmp.path().join("assets")).expect("mkdir assets");
@@ -312,6 +291,9 @@ mod tests {
 
     let spa_resp = serve_dx_ui_file(tmp.path(), Some("studio/probe")).await;
     assert_eq!(spa_resp.status(), StatusCode::OK);
+
+    let missing_resp = serve_dx_ui_file(tmp.path(), Some("assets/does-not-exist.js")).await;
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
 
     let traversal_resp = serve_dx_ui_file(tmp.path(), Some("../Cargo.toml")).await;
     assert_eq!(traversal_resp.status(), StatusCode::BAD_REQUEST);
@@ -340,23 +322,5 @@ mod tests {
           .expect("valid location")
       )
     );
-  }
-
-  #[tokio::test]
-  async fn legacy_ui_asset_fallback_serves_spa_and_assets() {
-    let js_resp = serve_legacy_ui_asset("assets/app.js").await;
-    assert_eq!(js_resp.status(), StatusCode::OK);
-    assert_eq!(
-      js_resp.headers().get(header::CONTENT_TYPE),
-      Some(&HeaderValue::from_static(
-        "application/javascript; charset=utf-8"
-      ))
-    );
-
-    let spa_resp = serve_legacy_ui_asset("harness/sessions/sess-1").await;
-    assert_eq!(spa_resp.status(), StatusCode::OK);
-
-    let missing_resp = serve_legacy_ui_asset("assets/does-not-exist.js").await;
-    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
   }
 }

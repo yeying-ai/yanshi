@@ -125,39 +125,6 @@ jobs:
       - name: Run check-changelog
         run: cargo xtask check-changelog
 
-  ui-tests:
-    # W5.5: yanshi-ui's 6 hand-written *.test.ts(x) suites were
-    # previously only tsc-checked (never actually executed) — this job
-    # runs them for real via vitest, plus the typecheck they always had.
-    # Mirrors ui-e2e.yml's actions/setup-node@v4 pattern.
-    name: yanshi-ui typecheck + unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: yanshi-ui/package-lock.json
-      - name: Install dependencies
-        working-directory: yanshi-ui
-        run: npm ci
-      - name: Typecheck
-        working-directory: yanshi-ui
-        run: npm run typecheck
-      - name: Unit tests
-        working-directory: yanshi-ui
-        run: npm test
-      - name: Build production UI bundle & verify Tauri mirror
-        working-directory: yanshi-ui
-        run: |
-          npm run build
-          test -s dist/assets/app.js
-          test -s dist/assets/styles.css
-          cmp -s dist/assets/app.js dist/ui/assets/app.js
-          cmp -s dist/assets/styles.css dist/ui/assets/styles.css
-          git diff --exit-code -- dist
-
   ui-dx-check:
     # Phase 4: `yanshi-ui-dx` (Dioxus 0.7 + dioxus-shadcn 0.8) is excluded from
     # the root workspace so backend builds stay target-agnostic. Gate its
@@ -182,12 +149,12 @@ jobs:
         run: cargo clippy --manifest-path yanshi-ui-dx/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
 
   tauri-desktop-check:
-    # AF5: `yanshi-ui/src-tauri` is excluded from the root workspace so
+    # AF5 / Phase 4B: `yanshi-desktop` is excluded from the root workspace so
     # plain `cargo test` on headless Linux machines doesn't require GTK /
     # WebKit2GTK headers. Gate its clippy + unit/loopback-engine tests
     # explicitly here so workspace API changes never silently break the
     # desktop shell.
-    name: yanshi-studio-desktop (src-tauri clippy + test)
+    name: yanshi-studio-desktop (yanshi-desktop clippy + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -204,11 +171,11 @@ jobs:
             libxdo-dev \
             patchelf
       - name: Format check desktop crate
-        run: cargo fmt --manifest-path yanshi-ui/src-tauri/Cargo.toml -- --check
+        run: cargo fmt --manifest-path yanshi-desktop/Cargo.toml -- --check
       - name: Clippy desktop crate
-        run: cargo clippy --manifest-path yanshi-ui/src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+        run: cargo clippy --manifest-path yanshi-desktop/Cargo.toml --locked --all-targets -- -D warnings
       - name: Run desktop local-engine & notebook tests
-        run: cargo test --manifest-path yanshi-ui/src-tauri/Cargo.toml --locked -- --test-threads=1
+        run: cargo test --manifest-path yanshi-desktop/Cargo.toml --locked -- --test-threads=1
 
   gateway-check:
     # AG5: `crates/gateway` is an isolated Cargo workspace so Pingora's
@@ -316,7 +283,7 @@ jobs:
       - name: Run cargo audit
         run: |
           cargo audit
-          cargo audit --file yanshi-ui/src-tauri/Cargo.lock
+          cargo audit --file yanshi-desktop/Cargo.lock
 
   linux-sandbox-check:
     # P7.4-FU1: the Linux seccomp backend in yanshi-tools/src/sandbox/linux.rs
@@ -771,7 +738,6 @@ jobs:
       - redaction-lint
       - println-lint
       - check-changelog
-      - ui-tests
       - ui-dx-check
       - tauri-desktop-check
       - gateway-check
@@ -799,7 +765,6 @@ jobs:
           echo "redaction-lint: ${{ needs.redaction-lint.result }}"
           echo "println-lint: ${{ needs.println-lint.result }}"
           echo "check-changelog: ${{ needs.check-changelog.result }}"
-          echo "ui-tests: ${{ needs.ui-tests.result }}"
           echo "ui-dx-check: ${{ needs.ui-dx-check.result }}"
           echo "tauri-desktop-check: ${{ needs.tauri-desktop-check.result }}"
           echo "gateway-check: ${{ needs.gateway-check.result }}"
@@ -823,7 +788,6 @@ jobs:
           test "${{ needs.redaction-lint.result }}" = "success"
           test "${{ needs.println-lint.result }}" = "success"
           test "${{ needs.check-changelog.result }}" = "success"
-          test "${{ needs.ui-tests.result }}" = "success"
           test "${{ needs.ui-dx-check.result }}" = "success"
           test "${{ needs.tauri-desktop-check.result }}" = "success"
           test "${{ needs.gateway-check.result }}" = "success"

@@ -21,7 +21,7 @@ struct PrintlnLintHit {
 }
 
 /// Crate `src/` trees this gate scans: all 24 non-CLI workspace crates
-/// plus the Tauri desktop engine (`yanshi-ui/src-tauri`), ensuring library
+/// plus the Tauri desktop engine (`yanshi-desktop`), ensuring library
 /// and server/runtime crates never regress to ad-hoc stdout/stderr logging.
 /// (`yanshi-cli`, `crates/gateway`, and `xtask` are standalone CLI/daemon
 /// binaries and are intentionally excluded at the crate level.)
@@ -50,13 +50,13 @@ const PRINTLN_LINT_CRATES: &[&str] = &[
   "yanshi-worker",
   "yanshi-worker-proto",
   "yanshi-harness",
-  "yanshi-ui/src-tauri",
+  "yanshi-desktop",
 ];
 
 /// Deliberate, documented exceptions:
 ///  - `yanshi-core/src/bin/echo_plugin.rs`: standalone reference-plugin binary.
 ///  - `yanshi-server/src/main.rs`, `yanshi-worker/src/main.rs`,
-///    `yanshi-ui/src-tauri/src/main.rs`: binary CLI entrypoints (`--doctor`,
+///    `yanshi-desktop/src/main.rs`: binary CLI entrypoints (`--doctor`,
 ///    `--help`, `--web` startup banner, fatal CLI arg errors).
 ///  - `yanshi-graph/src/events.rs`: `ConsoleListener` whose sole documented
 ///    contract is printing `[event_type] event` lines to stdout.
@@ -66,7 +66,7 @@ const PRINTLN_LINT_EXEMPT_FILES: &[&str] = &[
   "yanshi-core/src/bin/echo_plugin.rs",
   "yanshi-server/src/main.rs",
   "yanshi-worker/src/main.rs",
-  "yanshi-ui/src-tauri/src/main.rs",
+  "yanshi-desktop/src/main.rs",
   "yanshi-graph/src/events.rs",
   "yanshi-config/src/diagnostics.rs",
 ];

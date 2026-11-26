@@ -12,8 +12,8 @@ summary.
 Yanshi is a Rust workspace that supports both deterministic DAG
 workflows and agent-native autonomous loops, with full LLM, MCP, RAG,
 Skill, and tracing support. The workspace has 25 Rust crates plus the
-`xtask` build helper, a Web UI (`yanshi-ui`, a Vite-built React SPA
-embedded by the server), a Tauri v2 desktop shell (`yanshi-ui/src-tauri`),
+`xtask` build helper, a Dioxus 0.7 + `dioxus-shadcn 0.8` WebAssembly Web UI
+(`yanshi-ui-dx`), a Tauri v2 desktop shell (`yanshi-desktop`),
 and a standalone Pingora TLS/HTTP2 proxy (`crates/gateway`).
 
 A narrow-waist **contract kernel** (L0) was extracted so the runtimes
@@ -44,7 +44,7 @@ Config-first YAML supports `agent` / `skill_agent` node types.
 | **L1 Execution Core** | the executor that runs the L0 `Flow` IR | `yanshi-core` (scheduler, checkpoint, retry-executor, resource manager, health, events, exposed via `FlowExt::run()`) |
 | **L2 Capability Adapters** | tool-tier + capability-backed node implementations | `yanshi-nodes` (tool-tier), `yanshi-nodes-ai` (capability-backed), `yanshi-llm`, `yanshi-tools` (builtin tools + concrete OS-sandbox backends), `yanshi-mcp`, `yanshi-rag`, `yanshi-memory` |
 | **L3 Agent / Orchestration** | agent runtimes, skills, harness, config assembly | `yanshi-agents` (incl. `dynamic` — LLM-authored plan → compiled `Flow`), `yanshi-skills`, `yanshi-harness` (approval/hooks/HITL/background tasks), `yanshi-config` (YAML schema + executor + diagnostics, shared by CLI and server), `yanshi-cli` |
-| **L4 Operations / Productization** | observability and platform surfaces | `yanshi-tracing`, `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui` |
+| **L4 Operations / Productization** | observability and platform surfaces | `yanshi-tracing`, `yanshi-server`, `yanshi-db`, `yanshi-worker`, `yanshi-ui-dx`, `yanshi-desktop` |
 
 Runtimes (`yanshi-agents`, `yanshi-harness`) depend on
 `yanshi-tool` directly, never on `yanshi-tools` — that split (T3.3,
@@ -99,11 +99,10 @@ so the tool tier carries no capability dependencies.
   Postgres-backed `yanshi-db` (18 tables / 14 repos, migrations `0001`–`0018`), per-tenant run admission
   control, first-class `yanshi notebook` CLI, distributed `yanshi-worker`
   (gRPC `WorkerProtocol`, 7 node payload types), a Dioxus 0.7 + `dioxus-shadcn 0.8`
-  WebAssembly UI (`yanshi-ui-dx/`) served by default at `/ui` (`/ui/studio`,
+  WebAssembly UI (`yanshi-ui-dx/`) served at `/ui` (`/ui/studio`,
   `/ui/app`, `/ui/notebooks`, `/ui/console`, `/ui/runs/new`, `/ui/harness/sessions`,
-  `/ui/diagnostics`) under strict zero-eval CSP (with automatic embedded legacy
-  React fallback when `yanshi-ui-dx/dist/public` is absent or `YANSHI_LEGACY_UI=1`),
-  plus a 1:1 Tauri v2 desktop app (`yanshi-ui/src-tauri/`).
+  `/ui/diagnostics`) under strict zero-eval CSP,
+  plus a 1:1 Tauri v2 desktop app (`yanshi-desktop/`).
 - **Plugins & marketplace** — subprocess JSON-RPC plugin runtime,
   signed manifests (Ed25519), remote registry client.
 

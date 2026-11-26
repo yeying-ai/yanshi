@@ -1,25 +1,12 @@
-name: UI E2E (Playwright)
+name: UI E2E (Playwright · Dioxus)
 
-# Browser-based smoke against a real yanshi-server + Postgres.
-# Exercises the yanshi-ui SPA flows that don't have unit-test
-# coverage (form submission, redirect routing, localStorage
-# persistence, notebook chunk reader, batch deliverables, and zip export).
-# All three specs in `yanshi-ui/e2e/` (`runs-new`, `harness-sessions`,
-# `notebooks`) are the canonical surface.
+# Browser-based smoke & lifecycle suite against a real yanshi-server + Postgres
+# serving the Dioxus 0.7 WASM frontend (`yanshi-ui-dx/dist/public`) at `/ui/*`
+# under strict zero-eval CSP.
 #
-# Pattern mirrors `llm-live.yml`: `workflow_dispatch` + nightly
-# `schedule`, and **not** wired into `quality.yml::release-gate`.
-# Reasoning:
-#
-#   1. Playwright + browser install + server boot adds significant
-#      wall-clock to every PR. The two specs as-is have limited
-#      coverage so the cost/benefit doesn't justify gating PRs.
-#   2. E2E flakiness (timing, animation, network) would block
-#      legitimate PRs on infra issues. Manual + nightly gives us
-#      regression detection without the false-positive tax.
-#   3. Local devs run `npm run e2e` against their dev server —
-#      that's the fast feedback loop. CI catches regressions
-#      between releases via the nightly schedule.
+# Pattern mirrors `llm-live.yml`: `workflow_dispatch` + nightly `schedule`,
+# and **not** wired into `quality.yml::release-gate` so browser/infra flakiness
+# does not block PRs.
 
 on:
   workflow_dispatch:
@@ -29,20 +16,17 @@ on:
         required: false
         default: ""
   schedule:
-    # 10:30 UTC daily ≈ 03:30 PT / 18:30 CST. Offset from llm-live's
-    # 09:30 cron so a Postgres image pull / pages-spike-induced flap
-    # doesn't take both jobs down together.
+    # 10:30 UTC daily ≈ 03:30 PT / 18:30 CST.
     - cron: "30 10 * * *"
 
 jobs:
   e2e:
-    name: ui e2e (chromium against live server)
+    name: ui-dx e2e (chromium against live server)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
-        # Same major as quality.yml's service.
         image: postgres:18-alpine
         env:
           POSTGRES_USER: yanshi
@@ -59,68 +43,71 @@ jobs:
     env:
       DATABASE_URL: postgres://yanshi:yanshi@localhost:5432/yanshi
       YANSHI_DATABASE_TEST_URL: postgres://yanshi:yanshi@localhost:5432/yanshi
-      # `local` profile lets requests through without
-      # YANSHI_API_TOKEN — the e2e specs only fill the token
-      # field when BASE_URL's deployment requires it.
       YANSHI_SECURITY_PROFILE: local
-      # The gateway rejects every host path unless the operator allows
-      # a root; the harness specs submit `workspace_root: /tmp`.
       YANSHI_GATEWAY_PATH_ROOTS: /tmp
       YANSHI_MODELS_CONFIG: /tmp/yanshi-ui-e2e-models.yml
       YANSHI_MOCK_RESPONSE: '{"title":"E2E Tidal Study","items":[{"front":"What drives Severn Bore?","back":"Equinoctial spring tides.","question":"What drives Severn Bore?","options":["Wind","Equinoctial spring tides","Glaciers"],"answer":1,"explanation":"Equinoctial spring tides."}]}'
       E2E_MOCK_MODEL: e2e-mock
       BASE_URL: http://127.0.0.1:8080
+      DX_CLI_VERSION: "0.7.10"
+      TAILWIND_VERSION: "v4.1.18"
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry + build artifacts
         uses: actions/cache@v4
         with:
-          # The release build dominates wall clock; cache it
-          # aggressively so nightly runs stay under 5 min when
-          # nothing changed.
           path: |
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-ui-e2e-${{ hashFiles('**/Cargo.lock') }}
+            yanshi-ui-dx/target
+          key: ${{ runner.os }}-cargo-ui-dx-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-ui-e2e-
+            ${{ runner.os }}-cargo-ui-dx-e2e-
 
-      - name: Setup node (for Playwright)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: yanshi-ui/package-lock.json
-
-      # Q3.3.3: yanshi-worker-proto's build.rs needs protoc to compile
-      # worker.proto. The release binary build that follows would
-      # fail with "Could not find `PROTOC`" without this step.
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: "27.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install UI deps & build embedded SPA bundle
-        working-directory: yanshi-ui
+      - name: Install dx CLI (v0.7.10) & build Dioxus WASM UI bundle
         run: |
-          npm ci
-          npm run build
+          curl -fsSL --retry 3 \
+            "https://github.com/DioxusLabs/dioxus/releases/download/v${DX_CLI_VERSION}/dx-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/dx.tar.gz
+          mkdir -p /tmp/dx-extract
+          tar -xzf /tmp/dx.tar.gz -C /tmp/dx-extract
+          dx_bin="$(find /tmp/dx-extract -type f -name dx | head -n 1)"
+          sudo install -m 0755 "${dx_bin}" /usr/local/bin/dx
+          rm -rf /tmp/dx.tar.gz /tmp/dx-extract
+          DX_BASE_PATH="ui" ./yanshi-ui-dx/scripts/build.sh
+          test -s yanshi-ui-dx/dist/public/index.html
 
       - name: Build yanshi-server (release)
         run: cargo build --release -p yanshi-server --bin yanshi-server
 
+      - name: Setup node (Playwright runner only)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install Playwright + Chromium
-        working-directory: yanshi-ui
-        run: npx playwright install --with-deps chromium
+        working-directory: yanshi-ui-dx/e2e
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
 
       - name: Boot yanshi-server in background
+        env:
+          YANSHI_UI_DIR: ${{ github.workspace }}/yanshi-ui-dx/dist/public
         run: |
           cat > /tmp/yanshi-ui-e2e-models.yml <<'EOF'
           models:
@@ -132,33 +119,20 @@ jobs:
             mock:
               api_key_env: MOCK_API_KEY
           EOF
-          # Run migrations (the server does this on first start
-          # via sqlx::migrate!() so this step is just for the
-          # benefit of explicit-fail-on-bad-migration diagnostics
-          # in CI logs — skip if it's noisy).
           ./target/release/yanshi-server &
           echo "YANSHI_SERVER_PID=$!" >> $GITHUB_ENV
-          # Wait for the gateway to come up. /healthz isn't a
-          # stable surface yet so we probe /ui (which the server
-          # serves the embedded SPA from) up to 30s.
           for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8080/ui > /dev/null; then
+            if curl -sf http://127.0.0.1:8080/ui/studio > /dev/null; then
               echo "server up after ${i}s"
               exit 0
             fi
             sleep 1
           done
           echo "server failed to come up within 30s"
-          # Surface the tail of stderr if it crashed.
-          [ -n "${YANSHI_SERVER_PID:-}" ] && {
-            kill -0 "${YANSHI_SERVER_PID}" 2>/dev/null && \
-              echo "(server process still alive but /ui not responding)" || \
-              echo "(server process exited)"
-          }
           exit 1
 
       - name: Run Playwright e2e
-        working-directory: yanshi-ui
+        working-directory: yanshi-ui-dx/e2e
         env:
           CI: "1"
           SPEC_FILTER: ${{ github.event.inputs.spec_filter }}
@@ -180,10 +154,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ github.run_id }}
+          name: playwright-dx-report-${{ github.run_id }}
           path: |
-            yanshi-ui/playwright-report
-            yanshi-ui/playwright-results.xml
-            yanshi-ui/test-results
+            yanshi-ui-dx/e2e/playwright-report
+            yanshi-ui-dx/e2e/playwright-results.xml
+            yanshi-ui-dx/e2e/test-results
           retention-days: 14
           if-no-files-found: ignore

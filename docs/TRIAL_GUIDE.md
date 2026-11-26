@@ -187,10 +187,10 @@ yanshi workflow run-batch \
 
 除了命令行，推荐打开可视化工作台体验**单步断点调试**与**一键应用运行**：
 
-1. **桌面端（零依赖推荐）**：直接启动 `/Applications/Yanshi Studio.app`（或 `cd yanshi-ui && cargo tauri dev`）。
-2. **Web 端（网关模式）**：运行 `cargo run -p yanshi-server`，浏览器打开：
+1. **桌面端（零依赖推荐）**：直接启动 `/Applications/Yanshi Studio.app`（或先运行 `./yanshi-ui-dx/scripts/build.sh`，再执行 `cd yanshi-desktop && cargo tauri dev`）。
+2. **Web 端（网关模式）**：构建 `./yanshi-ui-dx/scripts/build.sh` 后运行 `cargo run -p yanshi-server`，浏览器打开：
    - `http://127.0.0.1:8080/ui/app` —— **App Runner**：表单化输入，一键并发生成并在线预览幻灯片、1080p 视频与 PDF。
-   - `http://127.0.0.1:8080/ui/studio` —— **Studio 调试台**：在 `@xyflow/react` 拓扑画布上拖拽添加节点（含 `illustration`、`figure`、`render_slides` 等）、勾选「每步暂停观测」或点击节点断点，在右侧实时检视求值后的 Input / Output 与内联媒体产物。
+   - `http://127.0.0.1:8080/ui/studio` —— **Studio 调试台**：在纯 Rust SVG+HTML 拓扑画布上拖拽添加节点（含 `illustration`、`figure`、`render_slides` 等）、勾选「每步暂停观测」或点击节点断点，在右侧实时检视求值后的 Input / Output 与内联媒体产物。
 
 ---
 

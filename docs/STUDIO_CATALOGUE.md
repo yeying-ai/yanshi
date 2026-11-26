@@ -180,7 +180,7 @@ Start `yanshi-server` and open:
 
 ### Desktop App (`Yanshi Studio` via Tauri v2)
 
-`yanshi-ui/src-tauri` packages the full Studio and App Runner as a standalone
+`yanshi-desktop/` packages the full Studio and App Runner as a standalone
 desktop app with an in-process local execution engine (`local_engine.rs`) —
 **no PostgreSQL or external server process required**. It automatically loads
 `~/.yanshi/.env`, seeds the bundled 76-model pricing table

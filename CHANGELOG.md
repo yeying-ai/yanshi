@@ -548,6 +548,24 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Phase 4B legacy React/Vite UI retirement, standalone `yanshi-desktop/` crate relocation & Dioxus Playwright E2E suite.**
+  Permanently retired the legacy React/Vite/Node frontend (`yanshi-ui/`),
+  relocated the Tauri v2 desktop shell from `yanshi-ui/src-tauri/` to top-level
+  `yanshi-desktop/` (pointing `tauri.conf.json` directly at
+  `../yanshi-ui-dx/dist/public` with a fresh-checkout `build.rs` directory
+  guard), and removed the embedded legacy React `include_str!` fallback and
+  `YANSHI_LEGACY_UI` / `YANSHI_DESKTOP_UI=legacy` escape hatches from
+  `yanshi-server/src/ui.rs` and `yanshi-desktop/src/{lib,local_engine}.rs`
+  (returning HTTP `503 Service Unavailable` with build instructions when no
+  Dioxus UI bundle is present on disk). Removed the legacy Node `ui-tests` job
+  from `.github/workflows/quality.yml`, rewired `tauri-desktop-check`,
+  `cargo-audit`, `xtask` (`println-lint`, `redaction-lint`, `check-changelog`),
+  `scripts/install_desktop.sh`, and `publish.sh` to `yanshi-desktop/` and
+  `yanshi-ui-dx/`, and replaced `.github/workflows/ui-e2e.yml` with a
+  Dioxus-native Playwright E2E suite (`yanshi-ui-dx/e2e/`) covering
+  `/ui/studio`, `/ui/app`, `/ui/diagnostics`, `/ui/notebooks`, `/ui/runs/new`,
+  and `/ui/harness/sessions`.
+
 - **Phase 4 default `/ui/*` cutover to Dioxus 0.7 + `dioxus-shadcn 0.8` (`yanshi-ui-dx`), Tauri default switch, CI gate & Docker UI build.**
   Switched `yanshi-ui-dx` to canonical `--base-path ui` routes (`/ui/studio`,
   `/ui/app`, `/ui/notebooks`, `/ui/console`, `/ui/runs/new`,

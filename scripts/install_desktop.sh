@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-MANIFEST_PATH="${REPO_DIR}/yanshi-ui/src-tauri/Cargo.toml"
+MANIFEST_PATH="${REPO_DIR}/yanshi-desktop/Cargo.toml"
 APP_NAME="Yanshi Studio.app"
 DEST_DIR="${DEST_DIR:-/Applications}"
 DO_BUILD=1
@@ -65,8 +65,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ "$DO_BUILD" -eq 1 ]]; then
+  log "Building Dioxus 0.7 Studio Web UI bundle (yanshi-ui-dx/dist/public)"
+  "${REPO_DIR}/yanshi-ui-dx/scripts/build.sh"
+  ok "Built Dioxus UI bundle"
   log "Building release macOS bundle (${APP_NAME})"
-  npm --prefix "${REPO_DIR}/yanshi-ui" run tauri:build -- --bundles app
+  (cd "${REPO_DIR}/yanshi-desktop" && cargo tauri build --bundles app)
   ok "Built ${APP_NAME}"
 fi
 
