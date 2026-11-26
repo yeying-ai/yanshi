@@ -44,3 +44,10 @@ commit-docs
 yanshi-ui/test-results/
 yanshi-ui/playwright-report/
 yanshi-ui/playwright-results.xml
+
+# Dioxus UI Phase 0 spike build outputs & local patch overrides
+yanshi-ui-dx/dist/
+yanshi-ui-dx/target/
+yanshi-ui-dx/.cargo/config.toml
+yanshi-ui-dx/assets/app.generated.css
+yanshi-ui-dx/assets/.tailwind.resolved.css

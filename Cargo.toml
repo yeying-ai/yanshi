@@ -30,6 +30,7 @@ members = [
 ]
 exclude = [
   "yanshi-ui/src-tauri",
+  "yanshi-ui-dx",
   "crates/gateway",
 ]
 resolver = "2"
