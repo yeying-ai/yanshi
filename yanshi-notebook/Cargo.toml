@@ -1,0 +1,27 @@
+[package]
+name = "yanshi-notebook"
+version = "0.1.0"
+description = "Pure stateless Notebook domain helpers shared by yanshi-server and yanshi-studio-desktop"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+yanshi-config = { path = "../yanshi-config", version = "0.1" }
+yanshi-llm = { path = "../yanshi-llm", version = "0.2" }
+yanshi-rag = { path = "../yanshi-rag", version = "0.3.0-alpha", default-features = false, features = ["html", "pdf"] }
+yanshi-tools = { path = "../yanshi-tools", version = "0.1" }
+
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { workspace = true, features = ["fs", "process", "time"] }
+url = "2.5"
+uuid = { workspace = true, features = ["serde"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

@@ -21,6 +21,7 @@ members = [
   "yanshi-memory",
   "yanshi-skills",
   "yanshi-db",
+  "yanshi-notebook",
   "yanshi-server",
   "yanshi-worker",
   "yanshi-worker-proto",

@@ -7432,6 +7432,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "yanshi-notebook"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "csv",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+ "yanshi-config",
+ "yanshi-llm",
+ "yanshi-rag",
+ "yanshi-tools",
+ "zip",
+]
+
+[[package]]
 name = "yanshi-rag"
 version = "0.3.0-alpha"
 dependencies = [
@@ -7512,6 +7533,7 @@ dependencies = [
  "yanshi-harness",
  "yanshi-llm",
  "yanshi-memory",
+ "yanshi-notebook",
  "yanshi-rag",
  "yanshi-skills",
  "yanshi-tools",

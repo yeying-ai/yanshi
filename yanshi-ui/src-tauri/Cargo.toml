@@ -54,6 +54,7 @@ yanshi-core = { path = "../../yanshi-core" }
 yanshi-harness = { path = "../../yanshi-harness" }
 yanshi-llm = { path = "../../yanshi-llm" }
 yanshi-memory = { path = "../../yanshi-memory" }
+yanshi-notebook = { path = "../../yanshi-notebook" }
 yanshi-rag = { path = "../../yanshi-rag", default-features = false, features = ["html", "pdf"] }
 yanshi-skills = { path = "../../yanshi-skills" }
 yanshi-tools = { path = "../../yanshi-tools" }
