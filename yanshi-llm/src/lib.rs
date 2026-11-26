@@ -229,6 +229,18 @@ impl Yanshi {
     Ok(())
   }
 
+  /// Reload `~/.yanshi/.env` (via thread-safe runtime overrides) and re-parse
+  /// the resolved model configuration into `ModelRegistry::global()` without
+  /// restarting the process.
+  pub async fn reload() -> Result<()> {
+    if let Ok(config_dir) = config::user_store::default_yanshi_config_dir() {
+      config::user_store::sync_dotenv_into_runtime_overrides(&config_dir);
+    }
+    let source = LLMConfig::resolve_default_source()?;
+    ModelRegistry::global().load_from_source(&source).await?;
+    Ok(())
+  }
+
   /// Initialize with built-in default configuration
   pub async fn init_with_builtin_config() -> Result<()> {
     let registry = ModelRegistry::global();

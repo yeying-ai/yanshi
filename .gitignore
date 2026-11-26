@@ -19,6 +19,7 @@ target/
 # mdBook output (`mdbook build site`)
 /site/book/
 Cargo.lock
+!yanshi-ui/src-tauri/Cargo.lock
 
 # Frontend dependencies
 node_modules/

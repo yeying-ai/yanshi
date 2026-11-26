@@ -76,6 +76,12 @@ export interface NodeIoInspectorProps {
   debugActionBusy: boolean;
   onApplyNodePatch?: (nodeId: string, patch: NodeUpdatePatch) => string | null;
   onDeleteNode?: (nodeId: string) => void;
+  /** Optional drawer expansion trigger rendered in the inspector header. */
+  onExpandDrawer?: () => void;
+  /** Optional sidebar collapse trigger rendered in the inspector header. */
+  onCollapsePane?: () => void;
+  /** True when rendered inside the expanded drawer (hides redundant expand button). */
+  inDrawer?: boolean;
 }
 
 export function NodeIoInspector({
@@ -96,6 +102,9 @@ export function NodeIoInspector({
   debugActionBusy,
   onApplyNodePatch,
   onDeleteNode,
+  onExpandDrawer,
+  onCollapsePane,
+  inDrawer = false,
 }: NodeIoInspectorProps): React.ReactElement {
   const [activeTab, setActiveTab] = useState<InspectorTab>(() =>
     !runId && onApplyNodePatch ? 'config' : 'io',
@@ -146,6 +155,18 @@ export function NodeIoInspector({
   if (!node) {
     return (
       <section className="studio-inspector studio-inspector--empty" aria-label="节点配置与观测台">
+        {onCollapsePane ? (
+          <div className="studio-pane__head">
+            <strong>节点配置与观测台</strong>
+            <button
+              type="button"
+              className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+              onClick={onCollapsePane}
+            >
+              收起
+            </button>
+          </div>
+        ) : null}
         <div className="studio-empty-box">
           <h3>节点配置与 I/O 观测台</h3>
           <p>
@@ -214,15 +235,39 @@ export function NodeIoInspector({
           <h2 className="studio-inspector__title">{node.id}</h2>
         </div>
 
-        <button
-          type="button"
-          className={`studio-btn-ghost studio-btn-sm ${hasBreakpoint ? 'studio-btn-bp-on' : ''}`}
-          aria-pressed={hasBreakpoint}
-          onClick={() => onToggleBreakpoint(node.id)}
-        >
-          <span className="studio-bp-dot" />
-          {hasBreakpoint ? '已设断点' : '设执行前断点'}
-        </button>
+        <div className="studio-inspector__header-actions">
+          {!inDrawer && onExpandDrawer ? (
+            <button
+              type="button"
+              data-testid="inspector-expand-drawer-btn"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={onExpandDrawer}
+              title="在宽抽屉中放大编辑节点配置与查看 I/O"
+            >
+              ⤢ 放大
+            </button>
+          ) : null}
+          {!inDrawer && onCollapsePane ? (
+            <button
+              type="button"
+              data-testid="inspector-collapse-pane-btn"
+              className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+              onClick={onCollapsePane}
+              title="收起右侧观测栏"
+            >
+              收起
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className={`studio-btn-ghost studio-btn-sm ${hasBreakpoint ? 'studio-btn-bp-on' : ''}`}
+            aria-pressed={hasBreakpoint}
+            onClick={() => onToggleBreakpoint(node.id)}
+          >
+            <span className="studio-bp-dot" />
+            {hasBreakpoint ? '已设断点' : '设执行前断点'}
+          </button>
+        </div>
       </header>
 
       {isPausedHere && pausedAt && (

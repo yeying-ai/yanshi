@@ -26,6 +26,9 @@ const FALLBACK_REQUESTS_PER_MINUTE: u32 = 60;
 pub struct ModelRegistry {
   config: Arc<RwLock<Option<LLMConfig>>>,
   providers: Arc<RwLock<HashMap<String, Arc<dyn LLMProvider>>>>,
+  /// Optional per-model provider instances for models declaring an explicit
+  /// `ModelConfig.base_url` that differs from their vendor default.
+  model_providers: Arc<RwLock<HashMap<String, Arc<dyn LLMProvider>>>>,
   /// Vendors referenced by `config.models` whose API key env var
   /// was unset at `load_config*` time. Populated by
   /// [`Self::initialize_providers`] and consulted by
@@ -54,6 +57,7 @@ impl ModelRegistry {
     Self {
       config: Arc::new(RwLock::new(None)),
       providers: Arc::new(RwLock::new(HashMap::new())),
+      model_providers: Arc::new(RwLock::new(HashMap::new())),
       missing_key_providers: Arc::new(RwLock::new(HashSet::new())),
       rate_limiters: Arc::new(RwLock::new(HashMap::new())),
     }
@@ -164,6 +168,26 @@ impl ModelRegistry {
       .read()
       .ok()
       .and_then(|guard| guard.get(provider_name).cloned())
+  }
+
+  /// Get a provider instance for a specific model, honoring any per-model
+  /// `ModelConfig.base_url` override before falling back to the vendor-level provider.
+  pub fn get_provider_for_model(
+    &self,
+    model_name: &str,
+    vendor: &str,
+  ) -> Result<Arc<dyn LLMProvider>> {
+    let model_guard = self
+      .model_providers
+      .read()
+      .map_err(|e| LLMError::InternalError {
+        message: format!("Model providers lock poisoned: {}", e),
+      })?;
+    if let Some(provider) = model_guard.get(model_name).cloned() {
+      return Ok(provider);
+    }
+    drop(model_guard);
+    self.get_provider(vendor)
   }
 
   /// Get a provider instance by name
@@ -337,13 +361,17 @@ impl ModelRegistry {
 
   async fn initialize_providers(&self, config: &LLMConfig) -> Result<()> {
     let mut providers = HashMap::new();
+    let mut model_providers = HashMap::new();
     let mut rate_limiters: HashMap<String, Arc<VendorRateLimiter>> = HashMap::new();
     let mut unique_providers = HashSet::new();
     let mut missing_keys: HashSet<String> = HashSet::new();
 
-    // Collect all unique providers from model configurations
+    // Collect all unique providers from model configurations and explicit providers map
     for model_config in config.models.values() {
       unique_providers.insert(model_config.vendor.clone());
+    }
+    for provider_name in config.providers.keys() {
+      unique_providers.insert(provider_name.clone());
     }
 
     // P10.3.1: skip providers whose API key env var is unset rather
@@ -353,6 +381,7 @@ impl ModelRegistry {
     // [`LLMError::UnsupportedProvider`]. `LLMConfig::validate()`
     // already printed a warning naming the affected models, so we
     // stay silent here to avoid double-warning the operator.
+    let mut resolved_keys: HashMap<String, String> = HashMap::new();
     for provider_name in unique_providers {
       let api_key = match config.get_api_key(&provider_name) {
         Ok(key) => key,
@@ -365,12 +394,13 @@ impl ModelRegistry {
 
       let provider_config = config.get_provider(&provider_name);
       let base_url = config.get_provider_base_url(&provider_name);
+      let protocol = config.effective_provider_protocol(&provider_name);
 
       // Modality-only vendors (such as `kling`, which serves `text_to_video`
       // via `modality_dispatch` and has no chat `LLMProvider`) return
       // `UnsupportedProvider` here when their API key is set; skip chat-client
       // registration for them rather than failing `Yanshi::init()`.
-      let provider = match create_provider(&provider_name, &api_key, base_url) {
+      let provider = match create_provider(protocol, &api_key, base_url) {
         Ok(provider) => provider,
         Err(LLMError::UnsupportedProvider { .. })
           if config.models.values().all(|m| {
@@ -382,6 +412,7 @@ impl ModelRegistry {
         }
         Err(other) => return Err(other),
       };
+      resolved_keys.insert(provider_name.clone(), api_key);
       providers.insert(provider_name.clone(), Arc::from(provider));
 
       // P-LLM2.7: build a token bucket from this vendor's configured RPM
@@ -398,6 +429,31 @@ impl ModelRegistry {
       }
     }
 
+    // Build per-model provider instances for chat models with an explicit `base_url`.
+    for (model_name, model_config) in &config.models {
+      let Some(custom_base) = model_config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+      else {
+        continue;
+      };
+      if !matches!(
+        model_config.granular_type(),
+        crate::model_types::ModelType::Chat
+      ) {
+        continue;
+      }
+      let Some(api_key) = resolved_keys.get(&model_config.vendor) else {
+        continue;
+      };
+      let protocol = config.effective_provider_protocol(&model_config.vendor);
+      if let Ok(provider) = create_provider(protocol, api_key, Some(custom_base.to_string())) {
+        model_providers.insert(model_name.clone(), Arc::from(provider));
+      }
+    }
+
     // Store providers
     {
       let mut providers_guard = self
@@ -407,6 +463,18 @@ impl ModelRegistry {
           message: format!("Providers lock poisoned: {}", e),
         })?;
       *providers_guard = providers;
+    }
+
+    // Store per-model provider overrides
+    {
+      let mut model_providers_guard =
+        self
+          .model_providers
+          .write()
+          .map_err(|e| LLMError::InternalError {
+            message: format!("Model providers lock poisoned: {}", e),
+          })?;
+      *model_providers_guard = model_providers;
     }
 
     // Store rate limiters (P-LLM2.7).

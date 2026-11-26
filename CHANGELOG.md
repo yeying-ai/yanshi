@@ -538,6 +538,25 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Desktop hardening, lazy storage, native UX, expandable drawer UI, and hot-reloadable visual model/provider configuration.**
+  Hardened `yanshi-ui/src-tauri` with rotating file logging (`~/.yanshi/logs/desktop.log`),
+  strict WebView CSP, cross-platform single-instance OS file lock (`_instance.lock`),
+  graceful exit/Ctrl+C cancellation for active DAG runs and Harness sessions,
+  tracked `yanshi-ui/src-tauri/Cargo.lock` (`--locked` + `cargo audit` in CI), and
+  cross-platform `.icns`/`.ico` bundle icons; improved cold-start and memory by
+  splitting notebook `raw_texts` to per-source sidecar files (with automatic
+  legacy migration), lazy-loading historical `events.jsonl`, and moving all
+  notebook/run disk writes off global mutexes; added window geometry persistence
+  (`_window_state.json`) and confined loopback endpoints for native folder picking
+  and opening/revealing artifacts (`/v1/desktop/{pick-directory,open-artifact}`).
+  Added top-layer native `<dialog>` `<ExpandableDrawer>` and drag-resizable/0px-collapsible
+  split panes (`usePaneLayout`) across Studio, Notebook, `AuthorizedMedia`, and
+  Harness; added `yanshi-llm` custom provider `protocol` (`openai`/`anthropic`/`google`),
+  per-model `base_url` routing, zero-`unsafe` runtime env overrides, `user_store`
+  (`~/.yanshi/models.yml` + `0600` `~/.yanshi/.env`), 1:1 `/v1/models/{config,providers,items,test}`
+  APIs on Desktop and `yanshi-server`, and the global `ModelConfigDrawer` UI with
+  live model autocomplete.
+
 - **Single-machine multi-core parallel agent workflows, unified `concurrent` (`8`) DAG scheduling, shared `CostMeter` budget pools, and `yanshi workflow run-batch` (Track AJ).**
   Added `Tool::concurrency_safe` + `ToolRegistry::tool_concurrency_safe` (forwarded
   through `HookedTool`) so per-call-isolated `WorkflowTool` and `AgentTool` calls

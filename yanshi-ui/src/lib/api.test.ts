@@ -3,6 +3,9 @@ import {
   apiFetch,
   formatApiError,
   getEmbeddedApiToken,
+  isLocalDesktopEngine,
+  openDesktopArtifact,
+  pickDesktopDirectory,
   resolveApiUrl,
   resolveEffectiveApiToken,
 } from './api';
@@ -81,6 +84,43 @@ describe('api helpers & preference fetcher', () => {
     try {
       await apiFetch('/v1/notebooks', '');
       expect(seenAuth).toBe('Bearer desktop-loopback-token');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('detects local desktop engine and invokes native directory picker / artifact opener helpers', async () => {
+    expect(isLocalDesktopEngine()).toBe(false);
+    (globalThis as unknown as { window?: unknown }).window = {
+      __YANSHI_API_BASE__: 'http://127.0.0.1:19421',
+      __YANSHI_API_TOKEN__: 'desktop-tok',
+    };
+    expect(isLocalDesktopEngine()).toBe(true);
+
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; body: string }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, body: String(init?.body ?? '') });
+      if (url.endsWith('/v1/desktop/pick-directory')) {
+        return new Response(JSON.stringify({ path: '/Users/demo/project', cancelled: false }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const picked = await pickDesktopDirectory('', '/Users/demo');
+      expect(picked).toEqual({ path: '/Users/demo/project', cancelled: false });
+      await openDesktopArtifact('', '/v1/runs/123/preview?path=a.pdf', 'reveal', 'team-a');
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toBe('http://127.0.0.1:19421/v1/desktop/pick-directory');
+      expect(calls[1].url).toBe('http://127.0.0.1:19421/v1/desktop/open-artifact');
+      expect(JSON.parse(calls[1].body)).toEqual({
+        api_path: '/v1/runs/123/preview?path=a.pdf',
+        mode: 'reveal',
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

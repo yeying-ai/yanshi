@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { getEmbeddedApiToken } from '../lib/api';
 import {
   navigateTo,
   normalizeUiTarget,
   shouldInterceptLinkClick,
 } from '../lib/router';
+import { readSessionStorage, tokenKey } from '../lib/storage';
+import { ModelConfigDrawer } from './ModelConfigDrawer';
 
 export interface SpaLinkProps
   extends Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> {
@@ -81,6 +84,9 @@ export function StudioSubpageHeader({
   activeSection,
   actions,
 }: StudioSubpageHeaderProps) {
+  const [modelDrawerOpen, setModelDrawerOpen] = useState(false);
+  const effectiveToken = readSessionStorage(tokenKey, '') || getEmbeddedApiToken();
+
   return (
     <header className="studio-subpage-header">
       <div className="studio-subpage-header__lead">
@@ -117,8 +123,23 @@ export function StudioSubpageHeader({
             );
           })}
         </nav>
+        <button
+          type="button"
+          data-testid="open-model-config-btn"
+          className="studio-btn-ghost studio-btn-sm"
+          onClick={() => setModelDrawerOpen(true)}
+          title="配置厂商 Base URL、API Key 与自定义模型"
+        >
+          ⚙ 模型配置
+        </button>
         {actions ? <div className="studio-subpage-header__actions">{actions}</div> : null}
       </div>
+
+      <ModelConfigDrawer
+        open={modelDrawerOpen}
+        onClose={() => setModelDrawerOpen(false)}
+        apiToken={effectiveToken}
+      />
     </header>
   );
 }

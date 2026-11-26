@@ -193,7 +193,9 @@ struct PersistedNotebookBundle {
   notebook: LocalNotebook,
   #[serde(default)]
   sources: Vec<LocalSource>,
-  #[serde(default)]
+  /// Legacy inline `raw_texts` kept solely for reading older `notebook.json`
+  /// files on startup and migrating them out to `<nb_dir>/raw/<source_id>.txt`.
+  #[serde(default, skip_serializing_if = "HashMap::is_empty")]
   raw_texts: HashMap<Uuid, String>,
   #[serde(default)]
   artifacts: Vec<LocalNotebookArtifact>,
@@ -201,10 +203,21 @@ struct PersistedNotebookBundle {
   messages: Vec<LocalNotebookMessage>,
 }
 
+impl PersistedNotebookBundle {
+  fn from_entry(entry: &NotebookEntry) -> Self {
+    Self {
+      notebook: entry.notebook.clone(),
+      sources: entry.sources.clone(),
+      raw_texts: HashMap::new(),
+      artifacts: entry.artifacts.clone(),
+      messages: entry.messages.clone(),
+    }
+  }
+}
+
 struct NotebookEntry {
   notebook: LocalNotebook,
   sources: Vec<LocalSource>,
-  raw_texts_by_source: HashMap<Uuid, String>,
   chunks_by_source: HashMap<Uuid, Vec<LocalSourceChunk>>,
   artifacts: Vec<LocalNotebookArtifact>,
   messages: Vec<LocalNotebookMessage>,
@@ -312,30 +325,46 @@ impl LocalNotebooksState {
       .collect();
 
     let nb_dir = self.notebook_dir(notebook_id);
-    let mut guard = self.lock_entries();
-    let Some(entry) = guard.get_mut(&notebook_id) else {
-      return 0;
-    };
-    if entry.notebook.tenant_id != tenant_id {
-      return 0;
-    }
-    let mut changed = false;
-    let mut attached_count = 0usize;
-    for candidate in prepared {
-      if let Some(existing) = entry.artifacts.iter_mut().find(|a| a.id == candidate.id) {
-        if existing.deliverable.is_none() && candidate.deliverable.is_some() {
-          existing.deliverable = candidate.deliverable;
+    let (attached_count, bundle_to_persist) = {
+      let mut guard = self.lock_entries();
+      let Some(entry) = guard.get_mut(&notebook_id) else {
+        return 0;
+      };
+      if entry.notebook.tenant_id != tenant_id {
+        return 0;
+      }
+      let mut changed = false;
+      let mut attached_count = 0usize;
+      for candidate in prepared {
+        if let Some(existing) = entry.artifacts.iter_mut().find(|a| a.id == candidate.id) {
+          if existing.deliverable.is_none() && candidate.deliverable.is_some() {
+            existing.deliverable = candidate.deliverable;
+            changed = true;
+          }
+        } else {
+          entry.artifacts.push(candidate);
+          attached_count += 1;
           changed = true;
         }
-      } else {
-        entry.artifacts.push(candidate);
-        attached_count += 1;
-        changed = true;
       }
-    }
-    if changed {
-      entry.notebook.updated_at = Utc::now();
-      let _ = write_notebook_bundle_sync(&nb_dir, entry);
+      let snapshot = if changed {
+        entry.notebook.updated_at = Utc::now();
+        Some(PersistedNotebookBundle::from_entry(entry))
+      } else {
+        None
+      };
+      (attached_count, snapshot)
+    };
+    if let Some(bundle) = bundle_to_persist {
+      if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+          if let Err(err) = write_notebook_bundle_async(nb_dir, bundle).await {
+            tracing::warn!(error = %err, "failed to persist notebook artifacts asynchronously");
+          }
+        });
+      } else if let Err(err) = write_persisted_notebook_bundle_sync(&nb_dir, &bundle) {
+        tracing::warn!(error = %err, "failed to persist notebook artifacts");
+      }
     }
     attached_count
   }
@@ -380,20 +409,64 @@ fn notebooks_root_dir(base_dir: &Path) -> PathBuf {
   base_dir.join("_notebooks")
 }
 
-fn write_notebook_bundle_sync(nb_dir: &Path, entry: &NotebookEntry) -> std::io::Result<()> {
+fn raw_text_path(nb_dir: &Path, source_id: Uuid) -> PathBuf {
+  nb_dir.join("raw").join(format!("{source_id}.txt"))
+}
+
+fn write_source_raw_text_sync(nb_dir: &Path, source_id: Uuid, text: &str) -> std::io::Result<()> {
+  let raw_dir = nb_dir.join("raw");
+  std::fs::create_dir_all(&raw_dir)?;
+  let tmp = raw_dir.join(format!("{source_id}.txt.tmp.{}", Uuid::new_v4()));
+  let dst = raw_dir.join(format!("{source_id}.txt"));
+  std::fs::write(&tmp, text.as_bytes())?;
+  std::fs::rename(tmp, dst)
+}
+
+async fn write_source_raw_text_async(
+  nb_dir: PathBuf,
+  source_id: Uuid,
+  text: String,
+) -> std::io::Result<()> {
+  tokio::task::spawn_blocking(move || write_source_raw_text_sync(&nb_dir, source_id, &text))
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn read_source_raw_text_async(nb_dir: PathBuf, source_id: Uuid) -> Option<String> {
+  tokio::task::spawn_blocking(move || {
+    std::fs::read_to_string(raw_text_path(&nb_dir, source_id)).ok()
+  })
+  .await
+  .ok()
+  .flatten()
+}
+
+async fn remove_source_raw_text_async(nb_dir: PathBuf, source_id: Uuid) {
+  let _ = tokio::task::spawn_blocking(move || {
+    let _ = std::fs::remove_file(raw_text_path(&nb_dir, source_id));
+  })
+  .await;
+}
+
+fn write_persisted_notebook_bundle_sync(
+  nb_dir: &Path,
+  bundle: &PersistedNotebookBundle,
+) -> std::io::Result<()> {
   std::fs::create_dir_all(nb_dir)?;
-  let bundle = PersistedNotebookBundle {
-    notebook: entry.notebook.clone(),
-    sources: entry.sources.clone(),
-    raw_texts: entry.raw_texts_by_source.clone(),
-    artifacts: entry.artifacts.clone(),
-    messages: entry.messages.clone(),
-  };
-  let bytes = serde_json::to_vec_pretty(&bundle).map_err(std::io::Error::other)?;
+  let bytes = serde_json::to_vec_pretty(bundle).map_err(std::io::Error::other)?;
   let tmp = nb_dir.join(format!("notebook.json.tmp.{}", Uuid::new_v4()));
   let dst = nb_dir.join("notebook.json");
   std::fs::write(&tmp, bytes)?;
   std::fs::rename(tmp, dst)
+}
+
+async fn write_notebook_bundle_async(
+  nb_dir: PathBuf,
+  bundle: PersistedNotebookBundle,
+) -> std::io::Result<()> {
+  tokio::task::spawn_blocking(move || write_persisted_notebook_bundle_sync(&nb_dir, &bundle))
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn write_source_chunks_sync(
@@ -408,6 +481,16 @@ fn write_source_chunks_sync(
   let dst = chunks_dir.join(format!("{source_id}.json"));
   std::fs::write(&tmp, bytes)?;
   std::fs::rename(tmp, dst)
+}
+
+async fn write_source_chunks_async(
+  nb_dir: PathBuf,
+  source_id: Uuid,
+  chunks: Vec<LocalSourceChunk>,
+) -> std::io::Result<()> {
+  tokio::task::spawn_blocking(move || write_source_chunks_sync(&nb_dir, source_id, &chunks))
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn hydrate_notebooks_from_disk(base_dir: &Path) -> HashMap<Uuid, NotebookEntry> {
@@ -444,6 +527,26 @@ fn hydrate_notebooks_from_disk(base_dir: &Path) -> HashMap<Uuid, NotebookEntry> 
       }
     }
 
+    // Backward-compatible migration: split legacy inline `raw_texts` out of
+    // `notebook.json` into per-source `<nb_dir>/raw/<source_id>.txt` files.
+    if !bundle.raw_texts.is_empty() {
+      let mut all_migrated = true;
+      for (source_id, raw_text) in &bundle.raw_texts {
+        if let Err(err) = write_source_raw_text_sync(&nb_dir, *source_id, raw_text) {
+          tracing::warn!(
+            notebook = %notebook_id,
+            source = %source_id,
+            error = %err,
+            "failed to migrate legacy inline raw_text to sidecar file"
+          );
+          all_migrated = false;
+        }
+      }
+      if all_migrated {
+        needs_rewrite = true;
+      }
+    }
+
     let mut chunks_by_source = HashMap::new();
     if let Ok(chunks_dir) = std::fs::read_dir(nb_dir.join("chunks")) {
       for chunk_file in chunks_dir.flatten() {
@@ -470,13 +573,13 @@ fn hydrate_notebooks_from_disk(base_dir: &Path) -> HashMap<Uuid, NotebookEntry> 
     let entry = NotebookEntry {
       notebook: bundle.notebook,
       sources: bundle.sources,
-      raw_texts_by_source: bundle.raw_texts,
       chunks_by_source,
       artifacts: bundle.artifacts,
       messages: bundle.messages,
     };
     if needs_rewrite {
-      let _ = write_notebook_bundle_sync(&nb_dir, &entry);
+      let clean_bundle = PersistedNotebookBundle::from_entry(&entry);
+      let _ = write_persisted_notebook_bundle_sync(&nb_dir, &clean_bundle);
     }
     out.insert(notebook_id, entry);
   }
@@ -578,12 +681,12 @@ async fn create_notebook(
   let entry = NotebookEntry {
     notebook: notebook.clone(),
     sources: Vec::new(),
-    raw_texts_by_source: HashMap::new(),
     chunks_by_source: HashMap::new(),
     artifacts: Vec::new(),
     messages: Vec::new(),
   };
-  if let Err(err) = write_notebook_bundle_sync(&nb_dir, &entry) {
+  let bundle = PersistedNotebookBundle::from_entry(&entry);
+  if let Err(err) = write_notebook_bundle_async(nb_dir, bundle).await {
     return notebook_error_json(
       StatusCode::INTERNAL_SERVER_ERROR,
       &format!("failed to persist notebook: {err}"),
@@ -647,22 +750,28 @@ async fn update_notebook(
   let tenant = extract_tenant(&headers);
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(id);
-  let mut guard = notebooks.lock_entries();
-  let Some(entry) = guard
-    .get_mut(&id)
-    .filter(|e| e.notebook.tenant_id == tenant)
-  else {
-    return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+  let (updated_notebook, bundle) = {
+    let mut guard = notebooks.lock_entries();
+    let Some(entry) = guard
+      .get_mut(&id)
+      .filter(|e| e.notebook.tenant_id == tenant)
+    else {
+      return notebook_error_json(StatusCode::NOT_FOUND, &format!("notebook {id} not found"));
+    };
+    entry.notebook.title = title.to_string();
+    entry.notebook.updated_at = Utc::now();
+    (
+      entry.notebook.clone(),
+      PersistedNotebookBundle::from_entry(entry),
+    )
   };
-  entry.notebook.title = title.to_string();
-  entry.notebook.updated_at = Utc::now();
-  if let Err(err) = write_notebook_bundle_sync(&nb_dir, entry) {
+  if let Err(err) = write_notebook_bundle_async(nb_dir, bundle).await {
     return notebook_error_json(
       StatusCode::INTERNAL_SERVER_ERROR,
       &format!("failed to persist notebook rename: {err}"),
     );
   }
-  (StatusCode::OK, Json(entry.notebook.clone())).into_response()
+  (StatusCode::OK, Json(updated_notebook)).into_response()
 }
 
 async fn delete_notebook(
@@ -804,35 +913,51 @@ async fn update_source(
     }
 
     let now = Utc::now();
-    if let Some((digest, built_chunks)) = prepared_text {
-      if let Err(err) = write_source_chunks_sync(&nb_dir, source_id, &built_chunks) {
-        return notebook_error_json(
-          StatusCode::INTERNAL_SERVER_ERROR,
-          &format!("storing chunks failed: {err}"),
-        );
-      }
-      if let Some(raw_text) = req.text {
-        entry.raw_texts_by_source.insert(source_id, raw_text);
-      }
+    let chunks_to_persist = if let Some((digest, built_chunks)) = prepared_text {
+      let chunks_copy = built_chunks.clone();
       entry.chunks_by_source.insert(source_id, built_chunks);
       entry.sources[src_idx].status = "ready".to_string();
       entry.sources[src_idx].error = None;
       entry.sources[src_idx].sha256 = Some(digest);
       entry.sources[src_idx].updated_at = now;
-    }
+      Some(chunks_copy)
+    } else {
+      None
+    };
     if let Some(new_title) = trimmed_title {
       entry.sources[src_idx].title = new_title;
       entry.sources[src_idx].updated_at = now;
     }
     entry.notebook.updated_at = now;
-    if let Err(err) = write_notebook_bundle_sync(&nb_dir, entry) {
-      return notebook_error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &format!("failed to persist source update: {err}"),
-      );
-    }
-    entry.sources[src_idx].clone()
+    (
+      entry.sources[src_idx].clone(),
+      PersistedNotebookBundle::from_entry(entry),
+      chunks_to_persist,
+    )
   };
+  let (updated_source, bundle, chunks_to_persist) = updated_source;
+  if let Some(built_chunks) = chunks_to_persist
+    && let Err(err) = write_source_chunks_async(nb_dir.clone(), source_id, built_chunks).await
+  {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("storing chunks failed: {err}"),
+    );
+  }
+  if let Some(raw_text) = req.text
+    && let Err(err) = write_source_raw_text_async(nb_dir.clone(), source_id, raw_text).await
+  {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("storing source text failed: {err}"),
+    );
+  }
+  if let Err(err) = write_notebook_bundle_async(nb_dir, bundle).await {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to persist source update: {err}"),
+    );
+  }
 
   notebooks.indexes.invalidate(notebook_id);
   (StatusCode::OK, Json(updated_source)).into_response()
@@ -866,7 +991,7 @@ async fn retry_source(
   let tenant = extract_tenant(&headers);
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(notebook_id);
-  let (reopened, uri) = {
+  let (reopened, uri, bundle) = {
     let mut guard = notebooks.lock_entries();
     let Some(entry) = guard
       .get_mut(&notebook_id)
@@ -917,9 +1042,10 @@ async fn retry_source(
     src.error = None;
     src.updated_at = Utc::now();
     let cloned = src.clone();
-    let _ = write_notebook_bundle_sync(&nb_dir, entry);
-    (cloned, uri)
+    let bundle = PersistedNotebookBundle::from_entry(entry);
+    (cloned, uri, bundle)
   };
+  let _ = write_notebook_bundle_async(nb_dir, bundle).await;
 
   tokio::spawn(ingest_local_source(
     notebooks.clone(),
@@ -937,7 +1063,7 @@ async fn delete_source(
   let tenant = extract_tenant(&headers);
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(notebook_id);
-  let deleted = {
+  let bundle_to_persist = {
     let mut guard = notebooks.lock_entries();
     let Some(entry) = guard
       .get_mut(&notebook_id)
@@ -951,22 +1077,23 @@ async fn delete_source(
     let before = entry.sources.len();
     entry.sources.retain(|s| s.id != source_id);
     if entry.sources.len() == before {
-      false
+      None
     } else {
-      entry.raw_texts_by_source.remove(&source_id);
       entry.chunks_by_source.remove(&source_id);
       entry.notebook.updated_at = Utc::now();
-      let _ = write_notebook_bundle_sync(&nb_dir, entry);
-      true
+      Some(PersistedNotebookBundle::from_entry(entry))
     }
   };
-  if !deleted {
+  let Some(bundle) = bundle_to_persist else {
     return notebook_error_json(
       StatusCode::NOT_FOUND,
       &format!("source {source_id} in notebook {notebook_id} not found"),
     );
-  }
-  let _ = std::fs::remove_file(nb_dir.join("chunks").join(format!("{source_id}.json")));
+  };
+  let _ = write_notebook_bundle_async(nb_dir.clone(), bundle).await;
+  remove_source_raw_text_async(nb_dir.clone(), source_id).await;
+  let chunk_file = nb_dir.join("chunks").join(format!("{source_id}.json"));
+  let _ = tokio::fs::remove_file(chunk_file).await;
   notebooks.indexes.invalidate(notebook_id);
   StatusCode::NO_CONTENT.into_response()
 }
@@ -1009,29 +1136,33 @@ async fn list_source_chunks(
   RoutePath((notebook_id, source_id)): RoutePath<(Uuid, Uuid)>,
 ) -> Response {
   let tenant = extract_tenant(&headers);
-  let guard = engine.notebooks().lock_entries();
-  let Some(entry) = guard
-    .get(&notebook_id)
-    .filter(|e| e.notebook.tenant_id == tenant)
-  else {
-    return notebook_error_json(
-      StatusCode::NOT_FOUND,
-      &format!("notebook {notebook_id} not found"),
-    );
+  let nb_dir = engine.notebooks().notebook_dir(notebook_id);
+  let (source, mut chunks) = {
+    let guard = engine.notebooks().lock_entries();
+    let Some(entry) = guard
+      .get(&notebook_id)
+      .filter(|e| e.notebook.tenant_id == tenant)
+    else {
+      return notebook_error_json(
+        StatusCode::NOT_FOUND,
+        &format!("notebook {notebook_id} not found"),
+      );
+    };
+    let Some(source) = entry.sources.iter().find(|s| s.id == source_id).cloned() else {
+      return notebook_error_json(
+        StatusCode::NOT_FOUND,
+        &format!("source {source_id} in notebook {notebook_id} not found"),
+      );
+    };
+    let chunks = entry
+      .chunks_by_source
+      .get(&source_id)
+      .cloned()
+      .unwrap_or_default();
+    (source, chunks)
   };
-  let Some(source) = entry.sources.iter().find(|s| s.id == source_id).cloned() else {
-    return notebook_error_json(
-      StatusCode::NOT_FOUND,
-      &format!("source {source_id} in notebook {notebook_id} not found"),
-    );
-  };
-  let mut chunks = entry
-    .chunks_by_source
-    .get(&source_id)
-    .cloned()
-    .unwrap_or_default();
   chunks.sort_by_key(|c| c.ordinal);
-  let raw_text = entry.raw_texts_by_source.get(&source_id).cloned();
+  let raw_text = read_source_raw_text_async(nb_dir, source_id).await;
   (
     StatusCode::OK,
     Json(json!({
@@ -1347,7 +1478,7 @@ async fn add_source(
 
   let notebooks = engine.notebooks().clone();
   let nb_dir = notebooks.notebook_dir(notebook_id);
-  {
+  let bundle = {
     let mut guard = notebooks.lock_entries();
     let Some(entry) = guard
       .get_mut(&notebook_id)
@@ -1358,17 +1489,23 @@ async fn add_source(
         &format!("notebook {notebook_id} not found"),
       );
     };
-    if let Some(raw_text) = initial_raw_text {
-      entry.raw_texts_by_source.insert(source.id, raw_text);
-    }
     entry.sources.push(source.clone());
     entry.notebook.updated_at = now;
-    if let Err(err) = write_notebook_bundle_sync(&nb_dir, entry) {
-      return notebook_error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &format!("failed to save source: {err}"),
-      );
-    }
+    PersistedNotebookBundle::from_entry(entry)
+  };
+  if let Some(raw_text) = initial_raw_text
+    && let Err(err) = write_source_raw_text_async(nb_dir.clone(), source.id, raw_text).await
+  {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to save source text: {err}"),
+    );
+  }
+  if let Err(err) = write_notebook_bundle_async(nb_dir, bundle).await {
+    return notebook_error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("failed to save source: {err}"),
+    );
   }
 
   let source_bg = source.clone();
@@ -1385,15 +1522,20 @@ async fn ingest_local_source(
   payload: SourcePayload,
 ) {
   let nb_dir = notebooks.notebook_dir(source.notebook_id);
-  {
+  let start_bundle = {
     let mut guard = notebooks.lock_entries();
     if let Some(entry) = guard.get_mut(&source.notebook_id)
       && let Some(target) = entry.sources.iter_mut().find(|s| s.id == source.id)
     {
       target.status = "ingesting".to_string();
       target.updated_at = Utc::now();
-      let _ = write_notebook_bundle_sync(&nb_dir, entry);
+      Some(PersistedNotebookBundle::from_entry(entry))
+    } else {
+      None
     }
+  };
+  if let Some(bundle) = start_bundle {
+    let _ = write_notebook_bundle_async(nb_dir.clone(), bundle).await;
   }
 
   let outcome: Result<(String, Vec<LocalSourceChunk>), String> = async {
@@ -1432,13 +1574,14 @@ async fn ingest_local_source(
         metadata,
       });
     }
-    write_source_chunks_sync(&nb_dir, source.id, &built)
+    write_source_chunks_async(nb_dir.clone(), source.id, built.clone())
+      .await
       .map_err(|err| format!("storing chunks failed: {err}"))?;
     Ok((digest, built))
   }
   .await;
 
-  {
+  let final_bundle = {
     let mut guard = notebooks.lock_entries();
     if let Some(entry) = guard.get_mut(&source.notebook_id)
       && entry.sources.iter().any(|s| s.id == source.id)
@@ -1464,8 +1607,13 @@ async fn ingest_local_source(
         }
       }
       entry.notebook.updated_at = now;
-      let _ = write_notebook_bundle_sync(&nb_dir, entry);
+      Some(PersistedNotebookBundle::from_entry(entry))
+    } else {
+      None
     }
+  };
+  if let Some(bundle) = final_bundle {
+    let _ = write_notebook_bundle_async(nb_dir, bundle).await;
   }
   notebooks.indexes.invalidate(source.notebook_id);
 }
@@ -3470,8 +3618,8 @@ async fn ask_notebook(
 
   let citations_json = serde_json::to_value(&citations).unwrap_or_else(|_| json!([]));
   let message_id = Uuid::new_v4();
-  {
-    let nb_dir = notebooks.notebook_dir(id);
+  let nb_dir = notebooks.notebook_dir(id);
+  let bundle_to_persist = {
     let mut guard = notebooks.lock_entries();
     if let Some(entry) = guard
       .get_mut(&id)
@@ -3488,8 +3636,13 @@ async fn ask_notebook(
         used_chunk_count: i32::try_from(used_chunk_count).unwrap_or(i32::MAX),
         created_at: Utc::now(),
       });
-      let _ = write_notebook_bundle_sync(&nb_dir, entry);
+      Some(PersistedNotebookBundle::from_entry(entry))
+    } else {
+      None
     }
+  };
+  if let Some(bundle) = bundle_to_persist {
+    let _ = write_notebook_bundle_async(nb_dir, bundle).await;
   }
 
   (
@@ -3549,7 +3702,7 @@ async fn clear_notebook_messages(
   let tenant = extract_tenant(&headers);
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(id);
-  let deleted = {
+  let (deleted, bundle) = {
     let mut guard = notebooks.lock_entries();
     let Some(entry) = guard
       .get_mut(&id)
@@ -3559,9 +3712,9 @@ async fn clear_notebook_messages(
     };
     let count = entry.messages.len();
     entry.messages.clear();
-    let _ = write_notebook_bundle_sync(&nb_dir, entry);
-    count
+    (count, PersistedNotebookBundle::from_entry(entry))
   };
+  let _ = write_notebook_bundle_async(nb_dir, bundle).await;
   (
     StatusCode::OK,
     Json(json!({
@@ -4527,26 +4680,29 @@ async fn delete_notebook_artifact(
   let tenant = extract_tenant(&headers);
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(notebook_id);
-  let mut guard = notebooks.lock_entries();
-  let Some(entry) = guard
-    .get_mut(&notebook_id)
-    .filter(|e| e.notebook.tenant_id == tenant)
-  else {
-    return notebook_error_json(
-      StatusCode::NOT_FOUND,
-      &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
-    );
+  let bundle = {
+    let mut guard = notebooks.lock_entries();
+    let Some(entry) = guard
+      .get_mut(&notebook_id)
+      .filter(|e| e.notebook.tenant_id == tenant)
+    else {
+      return notebook_error_json(
+        StatusCode::NOT_FOUND,
+        &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
+      );
+    };
+    let before = entry.artifacts.len();
+    entry.artifacts.retain(|a| a.id != artifact_id);
+    if entry.artifacts.len() == before {
+      return notebook_error_json(
+        StatusCode::NOT_FOUND,
+        &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
+      );
+    }
+    entry.notebook.updated_at = Utc::now();
+    PersistedNotebookBundle::from_entry(entry)
   };
-  let before = entry.artifacts.len();
-  entry.artifacts.retain(|a| a.id != artifact_id);
-  if entry.artifacts.len() == before {
-    return notebook_error_json(
-      StatusCode::NOT_FOUND,
-      &format!("artifact {artifact_id} in notebook {notebook_id} not found"),
-    );
-  }
-  entry.notebook.updated_at = Utc::now();
-  let _ = write_notebook_bundle_sync(&nb_dir, entry);
+  let _ = write_notebook_bundle_async(nb_dir, bundle).await;
   StatusCode::NO_CONTENT.into_response()
 }
 
@@ -5117,7 +5273,7 @@ async fn export_notebook(
         status: src.status.clone(),
         error: src.error.clone(),
         sha256: src.sha256.clone(),
-        raw_text: entry.raw_texts_by_source.get(&src.id).cloned(),
+        raw_text: None,
         chunks: chunks_by_source.remove(&src.id).unwrap_or_default(),
       })
       .collect();
@@ -5175,6 +5331,13 @@ async fn export_notebook(
       markdown_brief,
     }
   };
+  let mut bundle = bundle;
+  let nb_dir = engine.notebooks().notebook_dir(id);
+  for src in &mut bundle.sources {
+    if let Some(source_id) = src.id {
+      src.raw_text = read_source_raw_text_async(nb_dir.clone(), source_id).await;
+    }
+  }
   (StatusCode::OK, Json(bundle)).into_response()
 }
 
@@ -5528,7 +5691,6 @@ async fn import_notebook(
   let entry = NotebookEntry {
     notebook: notebook.clone(),
     sources,
-    raw_texts_by_source,
     chunks_by_source,
     artifacts,
     messages,
@@ -5536,14 +5698,23 @@ async fn import_notebook(
 
   let notebooks = engine.notebooks();
   let nb_dir = notebooks.notebook_dir(notebook_id);
-  if let Err(err) = write_notebook_bundle_sync(&nb_dir, &entry) {
+  let persisted = PersistedNotebookBundle::from_entry(&entry);
+  if let Err(err) = write_notebook_bundle_async(nb_dir.clone(), persisted).await {
     return notebook_error_json(
       StatusCode::INTERNAL_SERVER_ERROR,
       &format!("failed to persist imported notebook: {err}"),
     );
   }
+  for (sid, raw_text) in raw_texts_by_source {
+    if let Err(err) = write_source_raw_text_async(nb_dir.clone(), sid, raw_text).await {
+      return notebook_error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("failed to persist imported source text: {err}"),
+      );
+    }
+  }
   for (sid, clist) in &entry.chunks_by_source {
-    if let Err(err) = write_source_chunks_sync(&nb_dir, *sid, clist) {
+    if let Err(err) = write_source_chunks_async(nb_dir.clone(), *sid, clist.clone()).await {
       return notebook_error_json(
         StatusCode::INTERNAL_SERVER_ERROR,
         &format!("failed to persist imported source chunks: {err}"),
@@ -7045,5 +7216,72 @@ mod tests {
       .expect("search json");
     assert_eq!(search_res["chunks"].as_array().map(Vec::len), Some(1));
     ocr_server.await.expect("ocr server");
+  }
+
+  #[tokio::test]
+  async fn hydrate_migrates_legacy_inline_raw_texts_to_sidecar_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let nb_id = Uuid::new_v4();
+    let src_id = Uuid::new_v4();
+    let nb_dir = notebooks_root_dir(tmp.path()).join(nb_id.to_string());
+    let now = Utc::now();
+    let mut legacy_raw = HashMap::new();
+    legacy_raw.insert(src_id, "legacy inline note body\nline 2".to_string());
+    let legacy_bundle = PersistedNotebookBundle {
+      notebook: LocalNotebook {
+        id: nb_id,
+        tenant_id: "default".to_string(),
+        title: "Legacy Migration NB".to_string(),
+        created_at: now,
+        updated_at: now,
+      },
+      sources: vec![LocalSource {
+        id: src_id,
+        notebook_id: nb_id,
+        tenant_id: "default".to_string(),
+        kind: "text".to_string(),
+        title: "Old Note".to_string(),
+        uri: None,
+        status: "ready".to_string(),
+        error: None,
+        sha256: None,
+        created_at: now,
+        updated_at: now,
+      }],
+      raw_texts: legacy_raw,
+      artifacts: Vec::new(),
+      messages: Vec::new(),
+    };
+    write_persisted_notebook_bundle_sync(&nb_dir, &legacy_bundle).expect("write legacy bundle");
+
+    let base_url = crate::local_engine::start_loopback_engine(Some(tmp.path().to_path_buf()))
+      .await
+      .expect("start engine");
+
+    // 1. Sidecar raw text file must exist and notebook.json must no longer contain inline raw_texts.
+    let sidecar = std::fs::read_to_string(raw_text_path(&nb_dir, src_id)).expect("sidecar raw");
+    assert_eq!(sidecar, "legacy inline note body\nline 2");
+    let rewritten = std::fs::read_to_string(nb_dir.join("notebook.json")).expect("notebook.json");
+    assert!(
+      !rewritten.contains("legacy inline note body"),
+      "notebook.json should no longer inline raw_texts: {rewritten}"
+    );
+
+    // 2. HTTP /sources/:sid/chunks must transparently return the migrated raw_text.
+    let client = reqwest::Client::builder()
+      .no_proxy()
+      .build()
+      .expect("no-proxy client");
+    let payload: Value = client
+      .get(format!(
+        "{base_url}/v1/notebooks/{nb_id}/sources/{src_id}/chunks"
+      ))
+      .send()
+      .await
+      .expect("chunks")
+      .json()
+      .await
+      .expect("chunks json");
+    assert_eq!(payload["raw_text"], "legacy inline note body\nline 2");
   }
 }

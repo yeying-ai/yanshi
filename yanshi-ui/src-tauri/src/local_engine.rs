@@ -151,6 +151,8 @@ pub(crate) type RunCompletionHook =
 struct RunEntry {
   record: LocalRunRecord,
   events: Vec<LocalStreamedEvent>,
+  /// False for hydrated terminal runs until their `events.jsonl` is lazily read.
+  events_loaded: bool,
   artifacts: Vec<LocalArtifactSummary>,
   tx: broadcast::Sender<LocalStreamedEvent>,
   cancel_token: FlowCancellationToken,
@@ -236,6 +238,133 @@ impl LocalEngineState {
       Err(poisoned) => poisoned.into_inner(),
     }
   }
+
+  /// Lazily hydrate `events.jsonl` from disk into memory for a previously
+  /// persisted run without holding `self.runs` during filesystem I/O.
+  async fn ensure_run_events_loaded_async(&self, run_id: Uuid) {
+    let needs_load = {
+      let guard = self.lock_runs();
+      guard.get(&run_id).is_some_and(|entry| !entry.events_loaded)
+    };
+    if !needs_load {
+      return;
+    }
+    let path = self.base_dir.join(run_id.to_string()).join("events.jsonl");
+    let loaded = tokio::task::spawn_blocking(move || read_run_events_jsonl(&path))
+      .await
+      .unwrap_or_default();
+    let mut guard = self.lock_runs();
+    if let Some(entry) = guard.get_mut(&run_id)
+      && !entry.events_loaded
+    {
+      entry.events = loaded;
+      entry.events_loaded = true;
+    }
+  }
+
+  /// Sync variant used by synchronous helper paths (e.g. attach-run).
+  fn ensure_run_events_loaded_sync(&self, run_id: Uuid) {
+    let needs_load = {
+      let guard = self.lock_runs();
+      guard.get(&run_id).is_some_and(|entry| !entry.events_loaded)
+    };
+    if !needs_load {
+      return;
+    }
+    let path = self.base_dir.join(run_id.to_string()).join("events.jsonl");
+    let loaded = read_run_events_jsonl(&path);
+    let mut guard = self.lock_runs();
+    if let Some(entry) = guard.get_mut(&run_id)
+      && !entry.events_loaded
+    {
+      entry.events = loaded;
+      entry.events_loaded = true;
+    }
+  }
+
+  /// Return true if any DAG run or Harness session is currently non-terminal.
+  pub fn has_active_work(&self) -> bool {
+    let active_run = self
+      .lock_runs()
+      .values()
+      .any(|entry| !is_terminal_status(&entry.record.status));
+    active_run || self.harness.has_active_sessions()
+  }
+
+  /// Gracefully cancel every in-flight DAG run and Harness session and flush
+  /// their cancelled metadata to disk before process exit.
+  pub fn cancel_all_active(&self) -> (usize, usize) {
+    let mut to_flush: Vec<(PathBuf, PersistedRunMeta, Option<LocalStreamedEvent>)> = Vec::new();
+    {
+      let mut guard = self.lock_runs();
+      for (&run_id, entry) in guard.iter_mut() {
+        if is_terminal_status(&entry.record.status) {
+          continue;
+        }
+        entry.cancel_token.cancel();
+        self.questions.clear_run(run_id);
+        if let Some(ctrl) = entry.debug_controller.take() {
+          ctrl.abort();
+        }
+        entry.record.status = "cancelled".to_string();
+        entry.record.finished_at = Some(Utc::now());
+        let synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
+        let run_dir = self.base_dir.join(run_id.to_string());
+        let meta = PersistedRunMeta::from_entry(entry);
+        to_flush.push((run_dir, meta, synthetic));
+      }
+    }
+
+    let cancelled_runs = to_flush.len();
+    for (run_dir, meta, synthetic_ev) in to_flush {
+      if let Err(err) = write_persisted_run_meta_sync(&run_dir, &meta) {
+        tracing::warn!(run_dir = %run_dir.display(), error = %err, "failed to flush cancelled run meta on shutdown");
+      }
+      if let Some(ev) = synthetic_ev
+        && let Err(err) = append_run_event_jsonl_sync(&run_dir, &ev)
+      {
+        tracing::warn!(run_dir = %run_dir.display(), error = %err, "failed to flush cancelled run event on shutdown");
+      }
+    }
+
+    let cancelled_sessions = self.harness.cancel_all_active();
+    (cancelled_runs, cancelled_sessions)
+  }
+}
+
+impl PersistedRunMeta {
+  fn from_entry(entry: &RunEntry) -> Self {
+    Self {
+      record: entry.record.clone(),
+      artifacts: entry
+        .artifacts
+        .iter()
+        .map(PersistedArtifactRecord::from)
+        .collect(),
+      model: entry.model.clone(),
+      cost_limit_usd: entry.cost_limit_usd,
+      notebook_id: entry.notebook_id,
+      notebook_kind: entry.notebook_kind.clone(),
+    }
+  }
+}
+
+fn write_persisted_run_meta_sync(run_dir: &Path, meta: &PersistedRunMeta) -> std::io::Result<()> {
+  std::fs::create_dir_all(run_dir)?;
+  let bytes = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
+  let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
+  let dst = run_dir.join("run_meta.json");
+  std::fs::write(&tmp, bytes)?;
+  std::fs::rename(tmp, dst)
+}
+
+async fn write_persisted_run_meta_async(
+  run_dir: PathBuf,
+  meta: PersistedRunMeta,
+) -> std::io::Result<()> {
+  tokio::task::spawn_blocking(move || write_persisted_run_meta_sync(&run_dir, &meta))
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
@@ -243,24 +372,8 @@ fn checkpoint_dir_for_local_run(base_dir: &Path, run_id: Uuid) -> PathBuf {
 }
 
 fn write_run_meta_sync(run_dir: &Path, entry: &RunEntry) -> std::io::Result<()> {
-  std::fs::create_dir_all(run_dir)?;
-  let meta = PersistedRunMeta {
-    record: entry.record.clone(),
-    artifacts: entry
-      .artifacts
-      .iter()
-      .map(PersistedArtifactRecord::from)
-      .collect(),
-    model: entry.model.clone(),
-    cost_limit_usd: entry.cost_limit_usd,
-    notebook_id: entry.notebook_id,
-    notebook_kind: entry.notebook_kind.clone(),
-  };
-  let bytes = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
-  let tmp = run_dir.join(format!("run_meta.json.tmp.{}", Uuid::new_v4()));
-  let dst = run_dir.join("run_meta.json");
-  std::fs::write(&tmp, bytes)?;
-  std::fs::rename(tmp, dst)
+  let meta = PersistedRunMeta::from_entry(entry);
+  write_persisted_run_meta_sync(run_dir, &meta)
 }
 
 fn append_run_event_jsonl_sync(run_dir: &Path, event: &LocalStreamedEvent) -> std::io::Result<()> {
@@ -316,12 +429,12 @@ fn hydrate_runs_from_disk(base_dir: &Path) -> HashMap<Uuid, RunEntry> {
       meta.record.error = Some("desktop_restarted_while_running".to_string());
       needs_rewrite = true;
     }
-    let events = read_run_events_jsonl(&path.join("events.jsonl"));
     let attempt_start_seq = 0;
     let (tx, _rx) = broadcast::channel(512);
     let entry = RunEntry {
       record: meta.record,
-      events,
+      events: Vec::new(),
+      events_loaded: false,
       artifacts: meta
         .artifacts
         .into_iter()
@@ -367,7 +480,7 @@ pub(crate) fn extract_tenant(headers: &HeaderMap) -> String {
     .to_string()
 }
 
-fn default_studio_runs_dir() -> PathBuf {
+pub fn default_studio_runs_dir() -> PathBuf {
   if let Ok(explicit) = std::env::var("YANSHI_RUN_DIR") {
     let trimmed = explicit.trim();
     if !trimmed.is_empty() {
@@ -464,22 +577,32 @@ pub fn generate_loopback_api_token() -> String {
 }
 
 /// Start the embedded loopback engine on `127.0.0.1:0` with bearer-token
-/// authentication enabled and return `(base_url, api_token)`.
-pub async fn start_authenticated_loopback_engine(
+/// authentication enabled and return `(base_url, api_token, state)`.
+pub async fn start_authenticated_loopback_engine_with_state(
   custom_base_dir: Option<PathBuf>,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, String, LocalEngineState)> {
   let base_dir = custom_base_dir.unwrap_or_else(default_studio_runs_dir);
   tokio::fs::create_dir_all(&base_dir).await?;
   let token = generate_loopback_api_token();
   let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
-  let app = build_local_router(state);
+  let app = build_local_router(state.clone());
 
   let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
   let addr: SocketAddr = listener.local_addr()?;
   tokio::spawn(async move {
     let _ = axum::serve(listener, app).await;
   });
-  Ok((format!("http://127.0.0.1:{}", addr.port()), token))
+  Ok((format!("http://127.0.0.1:{}", addr.port()), token, state))
+}
+
+/// Start the embedded loopback engine on `127.0.0.1:0` with bearer-token
+/// authentication enabled and return `(base_url, api_token)`.
+pub async fn start_authenticated_loopback_engine(
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(String, String)> {
+  let (url, token, _state) =
+    start_authenticated_loopback_engine_with_state(custom_base_dir).await?;
+  Ok((url, token))
 }
 
 /// Start the embedded loopback engine on `127.0.0.1:0` and return its base URL
@@ -499,11 +622,12 @@ pub async fn start_loopback_engine(custom_base_dir: Option<PathBuf>) -> anyhow::
 }
 
 /// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
-/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication.
-pub async fn bind_authenticated_local_web_listener(
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication,
+/// returning the `LocalEngineState` handle for graceful shutdown cancellation.
+pub async fn bind_authenticated_local_web_listener_with_state(
   bind: SocketAddr,
   custom_base_dir: Option<PathBuf>,
-) -> anyhow::Result<(tokio::net::TcpListener, Router, String)> {
+) -> anyhow::Result<(tokio::net::TcpListener, Router, String, LocalEngineState)> {
   if !bind.ip().is_loopback() {
     anyhow::bail!(
       "refusing to bind local web engine on non-loopback address {bind}; \
@@ -514,8 +638,19 @@ pub async fn bind_authenticated_local_web_listener(
   tokio::fs::create_dir_all(&base_dir).await?;
   let token = generate_loopback_api_token();
   let state = LocalEngineState::new(base_dir).with_api_token(token.clone());
-  let app = build_local_router(state);
+  let app = build_local_router(state.clone());
   let listener = tokio::net::TcpListener::bind(bind).await?;
+  Ok((listener, app, token, state))
+}
+
+/// Bind the zero-Postgres local engine + embedded SPA on an explicit loopback
+/// socket (`127.0.0.1:<port>` or `[::1]:<port>`) with bearer authentication.
+pub async fn bind_authenticated_local_web_listener(
+  bind: SocketAddr,
+  custom_base_dir: Option<PathBuf>,
+) -> anyhow::Result<(tokio::net::TcpListener, Router, String)> {
+  let (listener, app, token, _state) =
+    bind_authenticated_local_web_listener_with_state(bind, custom_base_dir).await?;
   Ok((listener, app, token))
 }
 
@@ -645,6 +780,18 @@ pub fn build_local_router(state: LocalEngineState) -> Router {
   let ui_router = build_embedded_ui_router(state.clone());
   let v1_router = Router::new()
     .route("/v1/diagnostics", get(get_diagnostics))
+    .route("/v1/models/config", get(get_models_config))
+    .route(
+      "/v1/models/providers/:name",
+      axum::routing::put(put_model_provider).delete(delete_model_provider),
+    )
+    .route("/v1/models/providers/:name/test", post(test_model_provider))
+    .route(
+      "/v1/models/items/:name",
+      axum::routing::put(put_model_item).delete(delete_model_item),
+    )
+    .route("/v1/desktop/pick-directory", post(desktop_pick_directory))
+    .route("/v1/desktop/open-artifact", post(desktop_open_artifact))
     .route(
       "/v1/preferences",
       get(list_preferences).put(put_preferences),
@@ -1043,6 +1190,7 @@ impl LocalEngineState {
     let entry = RunEntry {
       record,
       events: Vec::new(),
+      events_loaded: true,
       artifacts: reg.artifacts,
       tx,
       cancel_token: FlowCancellationToken::new(),
@@ -1063,6 +1211,7 @@ impl LocalEngineState {
     tenant_id: &str,
     run_id: Uuid,
   ) -> Result<CompletedRunForAttach, (StatusCode, String)> {
+    self.ensure_run_events_loaded_sync(run_id);
     let (record, artifacts, events, nb_kind) = {
       let guard = self.lock_runs();
       let Some(entry) = guard
@@ -1209,6 +1358,7 @@ impl LocalEngineState {
     let entry = RunEntry {
       record,
       events: Vec::new(),
+      events_loaded: true,
       artifacts: Vec::new(),
       tx,
       cancel_token: cancel_token.clone(),
@@ -1526,7 +1676,7 @@ async fn execute_local_flow(
     .and_then(yanshi_config::content::extract_deliverable_from_state);
 
   let mut synthetic_to_persist: Option<LocalStreamedEvent> = None;
-  let (completion_hook, persisted_nb, tenant_id, final_artifacts) = {
+  let (completion_hook, persisted_nb, tenant_id, final_artifacts, meta_to_persist) = {
     let mut guard = state.lock_runs();
     if let Some(entry) = guard.get_mut(&run_id) {
       entry.debug_controller = None;
@@ -1570,17 +1720,22 @@ async fn execute_local_flow(
           }
         }
       }
-      let _ = write_run_meta_sync(&run_dir, entry);
+      let meta_snapshot = PersistedRunMeta::from_entry(entry);
       (
         entry.on_complete.clone(),
         entry.notebook_id.zip(entry.notebook_kind.clone()),
         entry.record.tenant_id.clone(),
         entry.artifacts.clone(),
+        Some(meta_snapshot),
       )
     } else {
-      (None, None, String::new(), Vec::new())
+      (None, None, String::new(), Vec::new(), None)
     }
   };
+
+  if let Some(meta) = meta_to_persist {
+    let _ = write_persisted_run_meta_async(run_dir.clone(), meta).await;
+  }
 
   if let Some(hook) = completion_hook {
     hook(
@@ -1931,7 +2086,7 @@ async fn post_run_action(
     };
     let tenant = extract_tenant(&headers);
     let run_dir = state.base_dir.join(run_id.to_string());
-    let (record, was_active, synthetic_ev) = {
+    let (record, was_active, synthetic_ev, meta_snapshot) = {
       let mut guard = state.lock_runs();
       let Some(entry) = guard
         .get_mut(&run_id)
@@ -1951,9 +2106,10 @@ async fn post_run_action(
         entry.record.finished_at = Some(Utc::now());
         synthetic = push_synthetic_terminal_event(entry, "workflow.cancelled", None);
       }
-      let _ = write_run_meta_sync(&run_dir, entry);
-      (entry.record.clone(), was_active, synthetic)
+      let meta = PersistedRunMeta::from_entry(entry);
+      (entry.record.clone(), was_active, synthetic, meta)
     };
+    let _ = write_persisted_run_meta_async(run_dir.clone(), meta_snapshot).await;
     if let Some(ev) = synthetic_ev {
       let _ = append_run_event_jsonl_sync(&run_dir, &ev);
     }
@@ -2022,7 +2178,15 @@ async fn post_run_action(
     }
 
     let run_dir = state.base_dir.join(run_id.to_string());
-    let (reopened_record, workflow_yaml, model_override, cost_limit_usd, cancel_token) = {
+    state.ensure_run_events_loaded_async(run_id).await;
+    let (
+      reopened_record,
+      workflow_yaml,
+      model_override,
+      cost_limit_usd,
+      cancel_token,
+      meta_snapshot,
+    ) = {
       let mut guard = state.lock_runs();
       let Some(entry) = guard
         .get_mut(&run_id)
@@ -2044,15 +2208,17 @@ async fn post_run_action(
       entry.record.status = "running".to_string();
       entry.record.finished_at = None;
       entry.record.error = None;
-      let _ = write_run_meta_sync(&run_dir, entry);
+      let meta = PersistedRunMeta::from_entry(entry);
       (
         entry.record.clone(),
         entry.record.workflow.clone(),
         entry.model.clone(),
         entry.cost_limit_usd,
         new_cancel,
+        meta,
       )
     };
+    let _ = write_persisted_run_meta_async(run_dir, meta_snapshot).await;
 
     let state_bg = state.clone();
     let base_dir_bg = state.base_dir.clone();
@@ -2328,6 +2494,7 @@ async fn events_history(
   };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
+  state.ensure_run_events_loaded_async(run_id).await;
   let guard = state.lock_runs();
   let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
     return error_json(StatusCode::NOT_FOUND, "run not found");
@@ -2353,6 +2520,7 @@ async fn stream_events(
   };
   let tenant = extract_tenant(&headers);
   let after = query.after_seq.unwrap_or(-1);
+  state.ensure_run_events_loaded_async(run_id).await;
   let (backfill, last_backfill_seq, rx, already_done) = {
     let guard = state.lock_runs();
     let Some(entry) = guard.get(&run_id).filter(|e| e.record.tenant_id == tenant) else {
@@ -2714,6 +2882,274 @@ async fn download_artifacts_zip(
     res.headers_mut().insert(header::CONTENT_DISPOSITION, val);
   }
   res
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeleteProviderQuery {
+  #[serde(default)]
+  clear_api_key: Option<bool>,
+}
+
+fn desktop_models_config_dir() -> Result<PathBuf, String> {
+  yanshi_llm::config::user_store::default_yanshi_config_dir().map_err(|err| err.to_string())
+}
+
+async fn get_models_config() -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match tokio::task::spawn_blocking(move || {
+    yanshi_llm::config::user_store::get_model_config_snapshot(&dir)
+  })
+  .await
+  {
+    Ok(Ok(snapshot)) => Json(snapshot).into_response(),
+    Ok(Err(err)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("models config task failed: {err}"),
+    ),
+  }
+}
+
+async fn put_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Json(patch): Json<yanshi_llm::config::user_store::UpsertProviderPatch>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::upsert_provider_config(&dir, &name, patch, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn delete_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Query(query): Query<DeleteProviderQuery>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  let clear_key = query.clear_api_key.unwrap_or(false);
+  match yanshi_llm::config::user_store::delete_provider_config(&dir, &name, clear_key, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn put_model_item(
+  RoutePath(name): RoutePath<String>,
+  Json(patch): Json<yanshi_llm::config::user_store::UpsertModelPatch>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::upsert_model_config(&dir, &name, patch, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn delete_model_item(RoutePath(name): RoutePath<String>) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::delete_model_config(&dir, &name, true).await {
+    Ok(snapshot) => Json(snapshot).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+async fn test_model_provider(
+  RoutePath(name): RoutePath<String>,
+  Json(req): Json<yanshi_llm::config::user_store::TestProviderRequest>,
+) -> Response {
+  let dir = match desktop_models_config_dir() {
+    Ok(d) => d,
+    Err(msg) => return error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+  };
+  match yanshi_llm::config::user_store::test_provider_connection(&dir, &name, req).await {
+    Ok(result) => Json(result).into_response(),
+    Err(err) => error_json(StatusCode::BAD_REQUEST, &err.to_string()),
+  }
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopPickDirectoryRequest {
+  #[serde(default)]
+  initial_dir: Option<String>,
+}
+
+async fn desktop_pick_directory(Json(req): Json<DesktopPickDirectoryRequest>) -> Response {
+  let initial = req
+    .initial_dir
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .map(PathBuf::from);
+  match tokio::task::spawn_blocking(move || {
+    crate::runtime_guard::pick_directory_native(initial.as_deref())
+  })
+  .await
+  {
+    Ok(Ok(Some(chosen))) => Json(serde_json::json!({
+      "path": chosen.display().to_string(),
+      "cancelled": false,
+    }))
+    .into_response(),
+    Ok(Ok(None)) => Json(serde_json::json!({
+      "path": null,
+      "cancelled": true,
+    }))
+    .into_response(),
+    Ok(Err(msg)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("folder picker task failed: {err}"),
+    ),
+  }
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopOpenArtifactRequest {
+  api_path: String,
+  #[serde(default)]
+  mode: Option<String>,
+}
+
+fn resolve_run_artifact_api_path(
+  state: &LocalEngineState,
+  tenant: &str,
+  api_path: &str,
+) -> Result<PathBuf, (StatusCode, String)> {
+  let trimmed = api_path.trim();
+  let parsed = url::Url::parse(&format!("http://127.0.0.1{trimmed}"))
+    .or_else(|_| url::Url::parse(trimmed))
+    .map_err(|_| {
+      (
+        StatusCode::BAD_REQUEST,
+        "invalid artifact api_path".to_string(),
+      )
+    })?;
+  let segments: Vec<&str> = parsed.path().trim_matches('/').split('/').collect();
+  if segments.len() < 4 || segments[0] != "v1" || segments[1] != "runs" {
+    return Err((
+      StatusCode::BAD_REQUEST,
+      "api_path must point to a run preview or artifact endpoint".to_string(),
+    ));
+  }
+  let run_id = Uuid::parse_str(segments[2]).map_err(|_| {
+    (
+      StatusCode::BAD_REQUEST,
+      "invalid run UUID in api_path".to_string(),
+    )
+  })?;
+
+  if segments.len() == 4 && segments[3] == "preview" {
+    {
+      let guard = state.lock_runs();
+      if !guard
+        .get(&run_id)
+        .is_some_and(|e| e.record.tenant_id == tenant)
+      {
+        return Err((StatusCode::NOT_FOUND, "run not found".to_string()));
+      }
+    }
+    let rel_path = parsed
+      .query_pairs()
+      .find(|(k, _)| k == "path")
+      .map(|(_, v)| v.into_owned())
+      .ok_or_else(|| {
+        (
+          StatusCode::BAD_REQUEST,
+          "preview api_path is missing `path` query parameter".to_string(),
+        )
+      })?;
+    let run_dir = state.base_dir.join(run_id.to_string());
+    return resolve_confined_path(&run_dir, &rel_path)
+      .map_err(|msg| (StatusCode::BAD_REQUEST, msg));
+  }
+
+  if segments.len() == 5 && segments[3] == "artifacts" {
+    let artifact_id = Uuid::parse_str(segments[4]).map_err(|_| {
+      (
+        StatusCode::BAD_REQUEST,
+        "invalid artifact UUID in api_path".to_string(),
+      )
+    })?;
+    let found = {
+      let guard = state.lock_runs();
+      guard
+        .get(&run_id)
+        .filter(|e| e.record.tenant_id == tenant)
+        .and_then(|e| e.artifacts.iter().find(|a| a.id == artifact_id).cloned())
+    };
+    let Some(artifact) = found else {
+      return Err((StatusCode::NOT_FOUND, "artifact not found".to_string()));
+    };
+    let run_dir = state.base_dir.join(run_id.to_string());
+    let canonical_root = std::fs::canonicalize(&run_dir)
+      .map_err(|err| (StatusCode::NOT_FOUND, format!("run dir not found: {err}")))?;
+    let canonical_file = std::fs::canonicalize(&artifact.file_path).map_err(|err| {
+      (
+        StatusCode::NOT_FOUND,
+        format!("artifact file not found: {err}"),
+      )
+    })?;
+    if !canonical_file.starts_with(&canonical_root) {
+      return Err((
+        StatusCode::BAD_REQUEST,
+        "artifact path escapes run directory".to_string(),
+      ));
+    }
+    return Ok(canonical_file);
+  }
+
+  Err((
+    StatusCode::BAD_REQUEST,
+    "unsupported artifact api_path".to_string(),
+  ))
+}
+
+async fn desktop_open_artifact(
+  State(state): State<LocalEngineState>,
+  headers: HeaderMap,
+  Json(req): Json<DesktopOpenArtifactRequest>,
+) -> Response {
+  let tenant = extract_tenant(&headers);
+  let reveal = matches!(
+    req.mode.as_deref().map(str::trim),
+    Some("reveal" | "folder" | "finder")
+  );
+  let resolved = match resolve_run_artifact_api_path(&state, &tenant, &req.api_path) {
+    Ok(p) => p,
+    Err((code, msg)) => return error_json(code, &msg),
+  };
+  let display = resolved.display().to_string();
+  match tokio::task::spawn_blocking(move || {
+    crate::runtime_guard::open_or_reveal_path_native(&resolved, reveal)
+  })
+  .await
+  {
+    Ok(Ok(())) => Json(serde_json::json!({
+      "ok": true,
+      "path": display,
+      "mode": if reveal { "reveal" } else { "open" },
+    }))
+    .into_response(),
+    Ok(Err(msg)) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    Err(err) => error_json(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      &format!("native opener task failed: {err}"),
+    ),
+  }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4298,5 +4734,190 @@ nodes:
     let unwrapped = unwrap_local_captured_deliverable(&wrapped).expect("unwrap");
     assert_eq!(unwrapped["kind"], "report");
     assert_eq!(unwrapped["title"], "Studio Report");
+  }
+
+  #[test]
+  fn cancel_all_active_marks_running_entries_cancelled_and_persists_meta() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    let run_id = Uuid::new_v4();
+    let cancel_token = FlowCancellationToken::new();
+    let (tx, _rx) = broadcast::channel(8);
+    let record = LocalRunRecord {
+      id: run_id,
+      workflow: "name: shutdown-test".to_string(),
+      status: "running".to_string(),
+      tenant_id: "default".to_string(),
+      started_at: Utc::now(),
+      finished_at: None,
+      run_dir: Some(tmp.path().join(run_id.to_string()).display().to_string()),
+      error: None,
+    };
+    state.lock_runs().insert(
+      run_id,
+      RunEntry {
+        record,
+        events: Vec::new(),
+        events_loaded: true,
+        artifacts: Vec::new(),
+        tx,
+        cancel_token: cancel_token.clone(),
+        debug_controller: None,
+        attempt_start_seq: 0,
+        model: None,
+        cost_limit_usd: None,
+        notebook_id: None,
+        notebook_kind: None,
+        on_complete: None,
+      },
+    );
+    assert!(state.has_active_work());
+
+    let (runs, sessions) = state.cancel_all_active();
+    assert_eq!(runs, 1);
+    assert_eq!(sessions, 0);
+    assert!(cancel_token.is_cancelled());
+    assert!(!state.has_active_work());
+
+    let persisted_bytes =
+      std::fs::read(tmp.path().join(run_id.to_string()).join("run_meta.json")).expect("meta file");
+    let persisted: PersistedRunMeta = serde_json::from_slice(&persisted_bytes).expect("parse meta");
+    assert_eq!(persisted.record.status, "cancelled");
+    assert!(persisted.record.finished_at.is_some());
+  }
+
+  #[tokio::test]
+  async fn hydrated_runs_lazy_load_events_on_demand() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let run_id = Uuid::new_v4();
+    let run_dir = tmp.path().join(run_id.to_string());
+    let meta = PersistedRunMeta {
+      record: LocalRunRecord {
+        id: run_id,
+        workflow: "name: lazy-events".to_string(),
+        status: "succeeded".to_string(),
+        tenant_id: "default".to_string(),
+        started_at: Utc::now(),
+        finished_at: Some(Utc::now()),
+        run_dir: Some(run_dir.display().to_string()),
+        error: None,
+      },
+      artifacts: Vec::new(),
+      model: None,
+      cost_limit_usd: None,
+      notebook_id: None,
+      notebook_kind: None,
+    };
+    write_persisted_run_meta_sync(&run_dir, &meta).expect("write meta");
+    let ev = LocalStreamedEvent {
+      run_id,
+      seq: 0,
+      kind: "workflow.completed".to_string(),
+      payload: serde_json::json!({ "ok": true }),
+      ts: Utc::now(),
+    };
+    append_run_event_jsonl_sync(&run_dir, &ev).expect("append event");
+
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    {
+      let guard = state.lock_runs();
+      let entry = guard.get(&run_id).expect("hydrated run");
+      assert!(!entry.events_loaded, "startup hydration must stay lazy");
+      assert!(entry.events.is_empty());
+    }
+
+    state.ensure_run_events_loaded_async(run_id).await;
+    {
+      let guard = state.lock_runs();
+      let entry = guard.get(&run_id).expect("hydrated run");
+      assert!(entry.events_loaded);
+      assert_eq!(entry.events.len(), 1);
+      assert_eq!(entry.events[0].kind, "workflow.completed");
+    }
+  }
+
+  #[test]
+  fn desktop_open_artifact_resolver_enforces_tenant_and_run_dir_confinement() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let run_id = Uuid::new_v4();
+    let run_dir = tmp.path().join(run_id.to_string());
+    let sample = run_dir.join("outputs").join("deck.pptx");
+    std::fs::create_dir_all(sample.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&sample, b"pptx-bytes").expect("write");
+
+    let state = LocalEngineState::new(tmp.path().to_path_buf());
+    let (tx, _rx) = broadcast::channel(8);
+    let art_id = Uuid::new_v4();
+    state.lock_runs().insert(
+      run_id,
+      RunEntry {
+        record: LocalRunRecord {
+          id: run_id,
+          workflow: "name: opener-test".to_string(),
+          status: "succeeded".to_string(),
+          tenant_id: "default".to_string(),
+          started_at: Utc::now(),
+          finished_at: Some(Utc::now()),
+          run_dir: Some(run_dir.display().to_string()),
+          error: None,
+        },
+        events: Vec::new(),
+        events_loaded: true,
+        artifacts: vec![LocalArtifactSummary {
+          id: art_id,
+          node_id: "slides".to_string(),
+          name: "deck.pptx".to_string(),
+          mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            .to_string(),
+          size_bytes: 10,
+          sha256: None,
+          created_at: Utc::now(),
+          file_path: sample.clone(),
+        }],
+        tx,
+        cancel_token: FlowCancellationToken::new(),
+        debug_controller: None,
+        attempt_start_seq: 0,
+        model: None,
+        cost_limit_usd: None,
+        notebook_id: None,
+        notebook_kind: None,
+        on_complete: None,
+      },
+    );
+
+    // Valid preview path resolves inside run_dir.
+    let preview_ok = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/preview?path=outputs/deck.pptx"),
+    )
+    .expect("preview resolves");
+    assert_eq!(preview_ok, std::fs::canonicalize(&sample).expect("canon"));
+
+    // Valid artifact ID resolves inside run_dir.
+    let art_ok = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/artifacts/{art_id}"),
+    )
+    .expect("artifact resolves");
+    assert_eq!(art_ok, std::fs::canonicalize(&sample).expect("canon"));
+
+    // Path traversal is rejected.
+    let traversal = resolve_run_artifact_api_path(
+      &state,
+      "default",
+      &format!("/v1/runs/{run_id}/preview?path=../../etc/passwd"),
+    );
+    assert!(traversal.is_err());
+
+    // Wrong tenant is rejected with 404.
+    let wrong_tenant = resolve_run_artifact_api_path(
+      &state,
+      "other-tenant",
+      &format!("/v1/runs/{run_id}/artifacts/{art_id}"),
+    );
+    assert_eq!(wrong_tenant.unwrap_err().0, StatusCode::NOT_FOUND);
   }
 }

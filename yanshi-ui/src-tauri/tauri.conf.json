@@ -12,7 +12,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' tauri: http://tauri.localhost https://tauri.localhost; script-src 'self' tauri: http://tauri.localhost https://tauri.localhost; style-src 'self' 'unsafe-inline' tauri: http://tauri.localhost https://tauri.localhost; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* http://[::1]:*; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:* http://[::1]:*; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost tauri: http://tauri.localhost https://tauri.localhost http://127.0.0.1:* http://localhost:* http://[::1]:* ws://127.0.0.1:* ws://localhost:*; frame-src 'self' blob: http://127.0.0.1:* http://localhost:* http://[::1]:*; object-src 'none'; base-uri 'self'"
     }
   },
   "bundle": {
@@ -22,6 +22,8 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
       "icons/icon.png"
     ]
   }

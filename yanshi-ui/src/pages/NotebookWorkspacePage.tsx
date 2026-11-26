@@ -1,10 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
+import { ExpandableDrawer } from '../components/ExpandableDrawer';
+import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
 import {
   NotebookDeliverableViewer,
   hasExclusiveDeliverableView,
 } from '../components/NotebookDeliverableViewer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
+import { usePaneLayout } from '../lib/usePaneLayout';
 import { apiFetch, formatApiError, parseSseChunk, resolveApiUrl } from '../lib/api';
 import { formatTime, isTerminalRun, runFromEnvelope } from '../lib/helpers';
 import { navigateTo } from '../lib/router';
@@ -818,6 +824,16 @@ export function NotebookWorkspacePage({
   const [readerChunks, setReaderChunks] = useState<NotebookChunk[]>([]);
   const [readerSourceId, setReaderSourceId] = useState<string>('');
   const [browseSourceBusyId, setBrowseSourceBusyId] = useState<string | null>(null);
+  const nbLayout = usePaneLayout({
+    storageKey: 'yanshi.ui.notebookPaneLayout',
+    defaultLeft: 320,
+    defaultRight: 360,
+    minLeft: 250,
+    maxLeft: 520,
+    minRight: 290,
+    maxRight: 640,
+  });
+  const [expandedDeliverable, setExpandedDeliverable] = useState<NotebookArtifact | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [retryingSourceId, setRetryingSourceId] = useState<string | null>(null);
   const [editingSource, setEditingSource] = useState<NotebookSource | null>(null);
@@ -2357,13 +2373,62 @@ export function NotebookWorkspacePage({
         </div>
       )}
 
-      <main className="nb-workbench">
+      {(nbLayout.leftCollapsed || nbLayout.rightCollapsed) && (
+        <div className="nb-pane-restore-bar studio-desktop-only">
+          {nbLayout.leftCollapsed && (
+            <button
+              type="button"
+              data-testid="nb-reopen-sources-btn"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={() => nbLayout.setLeftCollapsed(false)}
+            >
+              📚 展开资料来源 ({sources.length})
+            </button>
+          )}
+          {nbLayout.rightCollapsed && (
+            <button
+              type="button"
+              data-testid="nb-reopen-gallery-btn"
+              className="studio-btn-ghost studio-btn-sm"
+              onClick={() => nbLayout.setRightCollapsed(false)}
+            >
+              🖼 展开成品画廊 ({filteredArtifacts.length})
+            </button>
+          )}
+        </div>
+      )}
+
+      <main
+        className={[
+          'nb-workbench',
+          nbLayout.leftCollapsed ? 'nb-workbench--left-collapsed' : '',
+          nbLayout.rightCollapsed ? 'nb-workbench--right-collapsed' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={
+          {
+            '--nb-left-w': `${nbLayout.leftWidth}px`,
+            '--nb-right-w': `${nbLayout.rightWidth}px`,
+          } as React.CSSProperties
+        }
+      >
         {/* Column 1: Notebook Shelf, Source Ingestion & BM25 Search */}
         <aside className="nb-column nb-column--sources" aria-label="笔记本与资料来源库">
           <section className="nb-card">
             <div className="nb-card__head">
               <h2 id="nb-picker-heading">当前笔记本</h2>
-              <span>{notebooks.length} 本</span>
+              <div className="nb-picker-actions">
+                <span>{notebooks.length} 本</span>
+                <button
+                  type="button"
+                  data-testid="nb-collapse-sources-btn"
+                  className="studio-link-btn studio-desktop-only"
+                  onClick={() => nbLayout.setLeftCollapsed(true)}
+                >
+                  收起
+                </button>
+              </div>
             </div>
 
             {notebooks.length > 0 && (
@@ -2967,6 +3032,18 @@ export function NotebookWorkspacePage({
           </section>
         </aside>
 
+        {!nbLayout.leftCollapsed && (
+          <div
+            className="ys-resize-handle studio-desktop-only"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整资料来源栏宽度（双击恢复默认）"
+            title="拖拽调整资料来源栏宽度，双击恢复默认"
+            onPointerDown={nbLayout.startDragLeft}
+            onDoubleClick={nbLayout.resetLeft}
+          />
+        )}
+
         {/* Column 2: Grounded Q&A, 12 Content Studio Generators & Live Run Tracker */}
         <section className="nb-column nb-column--studio" aria-label="Content Studio 生成器矩阵">
           <div className="nb-studio-bar">
@@ -2985,6 +3062,7 @@ export function NotebookWorkspacePage({
                   id="nb-model-input"
                   name="model"
                   type="text"
+                  list={MODEL_SUGGESTIONS_DATALIST_ID}
                   data-testid="notebook-model-input"
                   autoCorrect="off"
                   autoCapitalize="none"
@@ -3348,6 +3426,18 @@ export function NotebookWorkspacePage({
           </div>
         </section>
 
+        {!nbLayout.rightCollapsed && (
+          <div
+            className="ys-resize-handle studio-desktop-only"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整成品画廊宽度（双击恢复默认）"
+            title="拖拽调整成品画廊宽度，双击恢复默认"
+            onPointerDown={nbLayout.startDragRight}
+            onDoubleClick={nbLayout.resetRight}
+          />
+        )}
+
         {/* Column 3: Aggregated Multimodal Deliverable Gallery */}
         <aside className="nb-column nb-column--gallery" aria-label="笔记本多模态成品画廊">
           <div className="nb-card nb-card--gallery">
@@ -3372,6 +3462,14 @@ export function NotebookWorkspacePage({
                   onClick={() => void loadNotebookDetailAndArtifacts(selectedNotebookId)}
                 >
                   刷新
+                </button>
+                <button
+                  type="button"
+                  data-testid="nb-collapse-gallery-btn"
+                  className="studio-link-btn studio-desktop-only"
+                  onClick={() => nbLayout.setRightCollapsed(true)}
+                >
+                  收起
                 </button>
               </div>
             </div>
@@ -3424,6 +3522,16 @@ export function NotebookWorkspacePage({
                           <span className="nb-gen-badge">{art.kind}</span>
                           <small>{formatTime(art.created_at)}</small>
                           <div className="nb-picker-actions">
+                            {showDeliverableBar && art.deliverable && (
+                              <button
+                                type="button"
+                                className="studio-link-btn"
+                                data-testid={`expand-deliverable-${art.id}`}
+                                onClick={() => setExpandedDeliverable(art)}
+                              >
+                                ⤢ 沉浸展开
+                              </button>
+                            )}
                             <SpaLink
                               className="studio-link-btn"
                               to={`/ui/studio?run_id=${encodeURIComponent(
@@ -3474,6 +3582,32 @@ export function NotebookWorkspacePage({
           </div>
         </aside>
       </main>
+
+      <ExpandableDrawer
+        open={expandedDeliverable !== null}
+        onClose={() => setExpandedDeliverable(null)}
+        title={expandedDeliverable?.name ?? '交付物沉浸视图'}
+        badge={expandedDeliverable?.kind}
+        side="right"
+        defaultSize="full"
+        testId="nb-deliverable-drawer"
+      >
+        {expandedDeliverable?.deliverable ? (
+          <div className="ys-drawer__stack">
+            <NotebookDeliverableCitationBar
+              deliverable={expandedDeliverable.deliverable}
+              sourceTitleById={sourceTitleById}
+              onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+            />
+            <NotebookDeliverableViewer
+              deliverable={expandedDeliverable.deliverable}
+              onInspectChunk={(chunkId) => void handleInspectChunk(chunkId)}
+            />
+          </div>
+        ) : null}
+      </ExpandableDrawer>
+
+      <ModelSuggestionsDatalist apiToken={apiToken} />
 
       <dialog
         ref={deleteDialogRef}

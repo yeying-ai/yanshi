@@ -4,8 +4,12 @@
 
 import React, { useEffect, useState } from 'react';
 
+import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
 import { SpaLink, StudioSubpageHeader } from '../components/StudioSubpageHeader';
-import { apiFetch } from '../lib/api';
+import { apiFetch, isLocalDesktopEngine, pickDesktopDirectory } from '../lib/api';
 import { navigateTo } from '../lib/router';
 import {
   HARNESS_PROFILES,
@@ -59,7 +63,24 @@ export function HarnessSubmitForm({
   );
   const [skillName, setSkillName] = useState(() => readStorage(harnessNewFormSkillKey, ''));
   const [busy, setBusy] = useState(false);
+  const [pickingDir, setPickingDir] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const canPickDirectory = isLocalDesktopEngine();
+
+  const handlePickWorkspace = async () => {
+    setError(null);
+    setPickingDir(true);
+    try {
+      const result = await pickDesktopDirectory(apiToken, workspaceRoot);
+      if (result.path) {
+        setWorkspaceRoot(result.path);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPickingDir(false);
+    }
+  };
 
   useEffect(() => {
     writeStorage(harnessNewFormTenantKey, tenantId);
@@ -232,6 +253,7 @@ export function HarnessSubmitForm({
             <span>Model (optional)</span>
             <input
               data-testid="harness-new-model"
+              list={MODEL_SUGGESTIONS_DATALIST_ID}
               value={model}
               onChange={(event) => setModel(event.target.value)}
               placeholder="留空使用服务端默认模型（如 deepseek-chat）"
@@ -248,12 +270,26 @@ export function HarnessSubmitForm({
           </label>
           <label className="harness-grow">
             <span>Workspace root</span>
-            <input
-              data-testid="harness-new-workspace"
-              value={workspaceRoot}
-              onChange={(event) => setWorkspaceRoot(event.target.value)}
-              placeholder="/data/workspace (server) or /tmp (local)"
-            />
+            <div className="harness-workspace-row">
+              <input
+                data-testid="harness-new-workspace"
+                value={workspaceRoot}
+                onChange={(event) => setWorkspaceRoot(event.target.value)}
+                placeholder="/data/workspace (server) or /tmp (local)"
+              />
+              {canPickDirectory ? (
+                <button
+                  type="button"
+                  data-testid="harness-pick-workspace"
+                  className="studio-btn-ghost studio-btn-sm"
+                  disabled={pickingDir}
+                  onClick={() => void handlePickWorkspace()}
+                  title="通过系统对话框选择本地目录"
+                >
+                  {pickingDir ? '选择中…' : '选择目录'}
+                </button>
+              ) : null}
+            </div>
           </label>
         </section>
 
@@ -281,6 +317,7 @@ export function HarnessSubmitForm({
           </small>
         </footer>
       </form>
+      <ModelSuggestionsDatalist apiToken={apiToken} />
     </main>
   );
 }

@@ -5,8 +5,15 @@ import {
   unwrapCapturedFlowJson,
 } from '../components/NodeIoInspector';
 import { AuthorizedMedia } from '../components/AuthorizedMedia';
+import { ExpandableDrawer } from '../components/ExpandableDrawer';
+import {
+  MODEL_SUGGESTIONS_DATALIST_ID,
+  ModelConfigDrawer,
+  ModelSuggestionsDatalist,
+} from '../components/ModelConfigDrawer';
 import { SpaLink } from '../components/StudioSubpageHeader';
 import { YamlCodeEditor } from '../components/YamlCodeEditor';
+import { usePaneLayout } from '../lib/usePaneLayout';
 import { navigateTo, useCurrentRoute } from '../lib/router';
 import {
   WorkflowGraphCanvas,
@@ -422,7 +429,23 @@ export function WorkflowStudioPage({
   );
   const [showConnPopover, setShowConnPopover] = useState<boolean>(false);
   const [authRequired, setAuthRequired] = useState<boolean>(false);
-  const [leftCollapsed, setLeftCollapsed] = useState<boolean>(false);
+  const studioLayout = usePaneLayout({
+    storageKey: 'yanshi.ui.studioPaneLayout',
+    defaultLeft: 320,
+    defaultRight: 410,
+    minLeft: 250,
+    maxLeft: 560,
+    minRight: 300,
+    maxRight: 680,
+  });
+  const leftCollapsed = studioLayout.leftCollapsed;
+  const setLeftCollapsed = studioLayout.setLeftCollapsed;
+  const rightCollapsed = studioLayout.rightCollapsed;
+  const setRightCollapsed = studioLayout.setRightCollapsed;
+  const [releaseFormCollapsed, setReleaseFormCollapsed] = useState<boolean>(false);
+  const [configDrawerOpen, setConfigDrawerOpen] = useState<boolean>(false);
+  const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState<boolean>(false);
+  const [modelConfigOpen, setModelConfigOpen] = useState<boolean>(false);
   const [showYamlEditor, setShowYamlEditor] = useState<boolean>(true);
   const [yamlModalOpen, setYamlModalOpen] = useState<boolean>(false);
   const [mobilePane, setMobilePane] = useState<MobilePane>('canvas');
@@ -1920,6 +1943,16 @@ export function WorkflowStudioPage({
             )}
           </div>
 
+          <button
+            type="button"
+            data-testid="open-model-config-btn"
+            className="studio-btn-ghost studio-btn-sm"
+            onClick={() => setModelConfigOpen(true)}
+            title="配置各厂商 Base URL、API Key、自定义中转与模型参数"
+          >
+            ⚙ 模型配置
+          </button>
+
           <nav className="studio-aux-links" aria-label="辅助控制台导航">
             <SpaLink to="/ui/notebooks" data-testid="studio-nav-notebooks">
               📚 内容笔记本
@@ -2203,17 +2236,43 @@ export function WorkflowStudioPage({
 
       {/* ── Posture 1: DEBUG MODE (Studio) ──────────────────────── */}
       {mode === 'debug' ? (
-        <main className={`studio-debug-grid ${leftCollapsed ? 'studio-debug-grid--collapsed' : ''}`}>
+        <main
+          className={[
+            'studio-debug-grid',
+            leftCollapsed ? 'studio-debug-grid--left-collapsed' : '',
+            rightCollapsed ? 'studio-debug-grid--right-collapsed' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={
+            {
+              '--studio-left-w': `${studioLayout.leftWidth}px`,
+              '--studio-right-w': `${studioLayout.rightWidth}px`,
+            } as React.CSSProperties
+          }
+        >
           <aside className="studio-pane studio-pane--config" aria-label="工作流预设与输入配置">
             <div className="studio-pane__head">
               <strong>工作流与输入配置</strong>
-              <button
-                type="button"
-                className="studio-btn-ghost studio-btn-sm studio-desktop-only"
-                onClick={() => setLeftCollapsed((v) => !v)}
-              >
-                {leftCollapsed ? '展开' : '收起'}
-              </button>
+              <div className="studio-pane__head-actions">
+                <button
+                  type="button"
+                  data-testid="studio-expand-config-drawer"
+                  className="studio-btn-ghost studio-btn-sm"
+                  onClick={() => setConfigDrawerOpen(true)}
+                  title="在宽抽屉中放大浏览模板库与编辑输入参数"
+                >
+                  ⤢ 放大
+                </button>
+                <button
+                  type="button"
+                  data-testid="studio-collapse-left-btn"
+                  className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+                  onClick={() => setLeftCollapsed((v) => !v)}
+                >
+                  {leftCollapsed ? '展开' : '收起'}
+                </button>
+              </div>
             </div>
 
             {!leftCollapsed && (
@@ -2360,6 +2419,7 @@ export function WorkflowStudioPage({
                     </small>
                     <input
                       type="text"
+                      list={MODEL_SUGGESTIONS_DATALIST_ID}
                       placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
                       value={modelOverride}
                       onChange={(ev) => setModelOverride(ev.target.value)}
@@ -2462,16 +2522,49 @@ export function WorkflowStudioPage({
             )}
           </aside>
 
+          {!leftCollapsed && (
+            <div
+              className="ys-resize-handle studio-desktop-only"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="拖拽调整左侧配置栏宽度（双击恢复默认）"
+              title="拖拽调整左栏宽度，双击恢复默认"
+              onPointerDown={studioLayout.startDragLeft}
+              onDoubleClick={studioLayout.resetLeft}
+            />
+          )}
+
           <section className="studio-pane studio-pane--canvas" aria-label="可视化 DAG 调试画布">
             <div className="studio-debug-deck" role="toolbar" aria-label="单步调试传输控台">
               <div className="studio-debug-deck__primary">
                 {leftCollapsed && (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="studio-reopen-left-btn"
+                      className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+                      onClick={() => setLeftCollapsed(false)}
+                    >
+                      ☰ 展开左栏
+                    </button>
+                    <button
+                      type="button"
+                      className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+                      onClick={() => setConfigDrawerOpen(true)}
+                      title="以抽屉方式临时查看和修改工作流配置"
+                    >
+                      ⤢ 配置抽屉
+                    </button>
+                  </>
+                )}
+                {rightCollapsed && (
                   <button
                     type="button"
+                    data-testid="studio-reopen-right-btn"
                     className="studio-btn-ghost studio-btn-sm studio-desktop-only"
-                    onClick={() => setLeftCollapsed(false)}
+                    onClick={() => setRightCollapsed(false)}
                   >
-                    展开左栏
+                    ◧ 展开节点观测
                   </button>
                 )}
 
@@ -2622,6 +2715,18 @@ export function WorkflowStudioPage({
             />
           </section>
 
+          {!rightCollapsed && (
+            <div
+              className="ys-resize-handle studio-desktop-only"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="拖拽调整右侧节点观测栏宽度（双击恢复默认）"
+              title="拖拽调整右栏宽度，双击恢复默认"
+              onPointerDown={studioLayout.startDragRight}
+              onDoubleClick={studioLayout.resetRight}
+            />
+          )}
+
           <aside className="studio-pane studio-pane--inspector">
             <NodeIoInspector
               runId={runId}
@@ -2643,6 +2748,8 @@ export function WorkflowStudioPage({
               onDeleteNode={
                 inspected.nodes.length > 1 ? handleDeleteCanvasNode : undefined
               }
+              onExpandDrawer={() => setInspectorDrawerOpen(true)}
+              onCollapsePane={() => setRightCollapsed(true)}
             />
           </aside>
 
@@ -2689,26 +2796,41 @@ export function WorkflowStudioPage({
         </main>
       ) : (
         /* ── Posture 2: RELEASE MODE (One-Click App Runner) ──────── */
-        <main className="studio-release-grid">
+        <main
+          className={`studio-release-grid ${
+            releaseFormCollapsed ? 'studio-release-grid--form-collapsed' : ''
+          }`}
+        >
           <section className="studio-release-form-card" aria-label="应用运行参数配置">
             <div className="studio-release-card__head">
               <div>
                 <span className="studio-kicker">RELEASE APP · 一键全速运行</span>
                 <h2>{inspected.name || '工作流应用'}</h2>
               </div>
-              <select
-                aria-label="选择应用工作流"
-                className="studio-preset-select"
-                value={selectedPresetId}
-                onChange={(ev) => selectPreset(ev.target.value)}
-              >
-                {allPresets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.category ? `[${p.category}] ${p.title}` : p.title}
-                  </option>
-                ))}
-                {selectedPresetId === 'custom' && <option value="custom">自定义导入 YAML</option>}
-              </select>
+              <div className="studio-pane__head-actions">
+                <select
+                  aria-label="选择应用工作流"
+                  className="studio-preset-select"
+                  value={selectedPresetId}
+                  onChange={(ev) => selectPreset(ev.target.value)}
+                >
+                  {allPresets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.category ? `[${p.category}] ${p.title}` : p.title}
+                    </option>
+                  ))}
+                  {selectedPresetId === 'custom' && <option value="custom">自定义导入 YAML</option>}
+                </select>
+                <button
+                  type="button"
+                  data-testid="release-collapse-form-btn"
+                  className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+                  onClick={() => setReleaseFormCollapsed(true)}
+                  title="收起左侧参数面板，全宽浏览成果展台"
+                >
+                  收起
+                </button>
+              </div>
             </div>
 
             <div className="studio-release-form-body">
@@ -2722,6 +2844,7 @@ export function WorkflowStudioPage({
                 </small>
                 <input
                   type="text"
+                  list={MODEL_SUGGESTIONS_DATALIST_ID}
                   placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
                   value={modelOverride}
                   onChange={(ev) => setModelOverride(ev.target.value)}
@@ -2811,6 +2934,16 @@ export function WorkflowStudioPage({
                   </small>
                 </div>
                 <div className="studio-progress-panel__right">
+                  {releaseFormCollapsed && (
+                    <button
+                      type="button"
+                      data-testid="release-reopen-form-btn"
+                      className="studio-btn-ghost studio-btn-sm studio-desktop-only"
+                      onClick={() => setReleaseFormCollapsed(false)}
+                    >
+                      ☰ 展开参数表单
+                    </button>
+                  )}
                   {(reduced.totalCostUsd > 0 || effectiveCostLimitUsd !== null) && (
                     <span
                       className={`studio-spend-pill ${
@@ -2983,203 +3116,323 @@ export function WorkflowStudioPage({
         )}
       </nav>
 
-      {yamlModalOpen && (
-        <div
-          className="studio-yaml-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="放大编辑工作流 YAML"
-          onKeyDown={(ev) => {
-            if (ev.key === 'Escape') {
-              setYamlModalOpen(false);
-            }
-          }}
-        >
-          <div className="studio-yaml-modal">
-            <header className="studio-yaml-modal__head">
-              <div>
-                <strong>YAML 编排源码编辑器</strong>
-                <span
-                  className={
-                    inspected.diagnostics.valid
-                      ? 'studio-yaml-modal__badge ok'
-                      : 'studio-yaml-modal__badge warn'
-                  }
-                >
-                  {inspected.diagnostics.valid
-                    ? `✓ 拓扑有效 · ${inspected.nodes.length} 节点 / ${inspected.edges.length} 边`
-                    : `⚠ ${inspected.diagnostics.issues[0] ?? '语法或依赖有误'}`}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="studio-btn-primary studio-btn-sm"
-                onClick={() => setYamlModalOpen(false)}
-              >
-                完成并关闭 (Esc)
-              </button>
-            </header>
-
-            <YamlCodeEditor
-              ariaLabel="放大编辑工作流 YAML"
-              value={yamlDraft}
-              isExpanded
-              onExpandToggle={() => setYamlModalOpen(false)}
-              onChange={(nextValue) => {
-                setSelectedPresetId('custom');
-                setYamlDraft(nextValue);
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {resumeModalOpen && (
-        <div
-          className="studio-yaml-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="断点续跑计划预览"
-          onKeyDown={(ev) => {
-            if (ev.key === 'Escape') {
-              setResumeModalOpen(false);
-            }
-          }}
-        >
-          <div className="studio-resume-modal">
-            <header className="studio-yaml-modal__head">
-              <div>
-                <strong>↻ 断点续跑计划预览 (Checkpoint Resume Plan)</strong>
-                <span className="studio-yaml-modal__badge ok">
-                  Run {runId.slice(0, 12)}…
-                </span>
-              </div>
-              <button
-                type="button"
-                className="studio-btn-ghost studio-btn-sm"
-                onClick={() => setResumeModalOpen(false)}
-              >
-                关闭 (Esc)
-              </button>
-            </header>
-
-            <div className="studio-resume-modal__body">
-              {resumePlanLoading ? (
-                <p className="studio-muted-note">正在加载已落盘的 Checkpoint 状态与幂等性分析…</p>
-              ) : resumePlanError ? (
-                <div className="studio-node-error" role="alert">
-                  {resumePlanError}
-                </div>
-              ) : resumePlanData ? (
-                <>
-                  <div className="studio-resume-summary-grid">
-                    <div className="studio-resume-stat">
-                      <span>最近已完成断点节点</span>
-                      <strong>#{resumePlanData.last_completed_node}</strong>
-                    </div>
-                    <div className="studio-resume-stat">
-                      <span>断点保存时间</span>
-                      <strong>{formatTime(resumePlanData.created_at)}</strong>
-                    </div>
-                    <div className="studio-resume-stat">
-                      <span>未完成工具调用</span>
-                      <strong>
-                        {resumePlanData.summary.total} 项（跳过 {resumePlanData.summary.to_skip} · 重放{' '}
-                        {resumePlanData.summary.to_replay} · 需人工{' '}
-                        {resumePlanData.summary.requires_manual}）
-                      </strong>
-                    </div>
-                  </div>
-
-                  <div className="studio-resume-nodes-split">
-                    <div className="studio-resume-nodes-col">
-                      <h4>✓ 将跳过并直接复用缓存结果</h4>
-                      <div className="studio-resume-tags">
-                        {inspected.execution_order
-                          .filter((nid) => {
-                            const st = reduced.telemetryByNode[nid]?.status;
-                            return st === 'succeeded' || st === 'skipped';
-                          })
-                          .map((nid) => (
-                            <span key={nid} className="studio-resume-tag studio-resume-tag--cached">
-                              #{nid}
-                            </span>
-                          ))}
-                      </div>
-                    </div>
-
-                    <div className="studio-resume-nodes-col">
-                      <h4>▶ 将从断点继续执行</h4>
-                      <div className="studio-resume-tags">
-                        {inspected.execution_order
-                          .filter((nid) => {
-                            const st = reduced.telemetryByNode[nid]?.status;
-                            return st !== 'succeeded' && st !== 'skipped';
-                          })
-                          .map((nid) => (
-                            <span key={nid} className="studio-resume-tag studio-resume-tag--rerun">
-                              #{nid}
-                            </span>
-                          ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {resumePlanData.tool_calls.length > 0 && (
-                    <div className="studio-resume-tools">
-                      <h4>内嵌 Agent 未决工具调用恢复决策</h4>
-                      <ul>
-                        {resumePlanData.tool_calls.map((tc) => (
-                          <li key={`${tc.node_id}-${tc.tool_call_id}`}>
-                            <strong>
-                              #{tc.node_id} · {tc.tool}
-                            </strong>
-                            <span data-decision={tc.decision}>{tc.decision}</span>
-                            <small>{tc.reason}</small>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {resumePlanData.summary.requires_manual > 0 && (
-                    <div className="studio-alert studio-alert--warn" role="alert">
-                      <span>
-                        存在 {resumePlanData.summary.requires_manual}{' '}
-                        项非幂等外部副作用工具调用需要人工确认，自动续跑将被引擎安全拦截。
-                      </span>
-                    </div>
-                  )}
-                </>
-              ) : null}
+      <ExpandableDrawer
+        open={configDrawerOpen}
+        onClose={() => setConfigDrawerOpen(false)}
+        title="工作流模板与输入参数配置"
+        badge={`${allPresets.length} 套模板 · ${inspected.inputs.length} 参数`}
+        side="left"
+        defaultSize="drawer"
+        testId="studio-config-drawer"
+        headerActions={
+          <button
+            type="button"
+            className="studio-btn-ghost studio-btn-sm"
+            onClick={() => {
+              setConfigDrawerOpen(false);
+              setYamlModalOpen(true);
+            }}
+          >
+            打开 YAML 编辑器
+          </button>
+        }
+      >
+        <div className="ys-drawer__stack">
+          <div className="studio-section">
+            <div className="studio-section__head">
+              <span>工作流模板库 ({allPresets.length})</span>
             </div>
+            <div className="studio-category-pills" role="tablist" aria-label="抽屉模板分类筛选">
+              {(
+                [
+                  '全部',
+                  '课件与视频',
+                  '创意制片与设定',
+                  '研究报告与信息图',
+                  '导图与工程图',
+                  '播客音频',
+                  '互动学习',
+                  '免 Key 演练',
+                  '个人收藏',
+                ] as const
+              ).map((cat) => (
+                <button
+                  key={cat}
+                  type="button"
+                  role="tab"
+                  aria-selected={presetCategoryFilter === cat}
+                  className={`studio-cat-pill ${
+                    presetCategoryFilter === cat ? 'studio-cat-pill--active' : ''
+                  }`}
+                  onClick={() => setPresetCategoryFilter(cat)}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+            <div className="studio-preset-list studio-preset-list--drawer-grid">
+              {visiblePresets.map((preset) => (
+                <div
+                  key={preset.id}
+                  className={`studio-preset-card ${
+                    selectedPresetId === preset.id ? 'studio-preset-card--active' : ''
+                  }`}
+                >
+                  <button
+                    type="button"
+                    className="studio-preset-card__main"
+                    onClick={() => selectPreset(preset.id)}
+                  >
+                    <div className="studio-preset-card__top">
+                      <strong>{preset.title}</strong>
+                      <span>{preset.badge}</span>
+                    </div>
+                    <small>{preset.subtitle}</small>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
 
-            <footer className="studio-resume-modal__foot">
-              <button
-                type="button"
-                className="studio-btn-ghost"
-                onClick={() => setResumeModalOpen(false)}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                data-testid="confirm-resume-run-btn"
-                className="studio-btn-primary"
-                disabled={
-                  resumePlanLoading ||
-                  !resumePlanData ||
-                  resumeActionBusy ||
-                  resumePlanData.summary.requires_manual > 0
-                }
-                onClick={() => void confirmResumeRun()}
-              >
-                {resumeActionBusy ? '正在恢复运行…' : '▶ 确认从断点续跑'}
-              </button>
-            </footer>
+          <div className="studio-section">
+            <div className="studio-section__head">
+              <span>运行参数与模型覆盖</span>
+            </div>
+            <label className="studio-input-field studio-model-override-field">
+              <div className="studio-input-field__label">
+                <strong>全局推理模型覆盖 (model)</strong>
+                <span>optional</span>
+              </div>
+              <input
+                type="text"
+                placeholder="例如 gemini-2.5-flash / gpt-4o-mini（留空按节点配置）"
+                value={modelOverride}
+                onChange={(ev) => setModelOverride(ev.target.value)}
+              />
+            </label>
+            <label className="studio-input-field studio-cost-limit-field">
+              <div className="studio-input-field__label">
+                <strong>单次运行预算上限 USD (cost_limit_usd)</strong>
+                <span>optional</span>
+              </div>
+              <input
+                type="number"
+                min="0.0001"
+                step="0.01"
+                placeholder="例如 1.50（留空不设额外上限）"
+                value={costLimitDraft}
+                onChange={(ev) => setCostLimitDraft(ev.target.value)}
+              />
+            </label>
+            {renderTypedInputsForm(false)}
           </div>
         </div>
-      )}
+      </ExpandableDrawer>
+
+      <ExpandableDrawer
+        open={inspectorDrawerOpen}
+        onClose={() => setInspectorDrawerOpen(false)}
+        title={selectedNode ? `节点配置与观测 · ${selectedNode.id}` : '节点配置与观测台'}
+        badge={selectedNode?.type}
+        side="right"
+        defaultSize="drawer"
+        testId="studio-inspector-drawer"
+        bodyClassName="ys-drawer__body--flush"
+      >
+        <NodeIoInspector
+          runId={runId}
+          apiToken={apiToken}
+          tenantId={tenantId}
+          node={selectedNode}
+          allNodes={inspected.nodes}
+          editable={!isRunActive}
+          telemetry={selectedNode ? reduced.telemetryByNode[selectedNode.id] : undefined}
+          capturedInput={selectedNode ? reduced.nodeInputs[selectedNode.id] : undefined}
+          capturedOutput={selectedNode ? reduced.nodeOutputs[selectedNode.id] : undefined}
+          pausedAt={effectivePausedAt}
+          hasBreakpoint={selectedNode ? breakpoints.includes(selectedNode.id) : false}
+          onToggleBreakpoint={(nid) => void toggleBreakpoint(nid)}
+          onStepDebug={(overrides) => void sendDebugAction('step', overrides)}
+          onContinueDebug={(overrides) => void sendDebugAction('continue', overrides)}
+          debugActionBusy={debugActionBusy}
+          onApplyNodePatch={handleApplyNodePatch}
+          onDeleteNode={inspected.nodes.length > 1 ? handleDeleteCanvasNode : undefined}
+          inDrawer
+        />
+      </ExpandableDrawer>
+
+      <ExpandableDrawer
+        open={yamlModalOpen}
+        onClose={() => setYamlModalOpen(false)}
+        title="YAML 编排源码编辑器"
+        ariaLabel="放大编辑工作流 YAML"
+        badge={
+          <span
+            className={
+              inspected.diagnostics.valid
+                ? 'studio-yaml-modal__badge ok'
+                : 'studio-yaml-modal__badge warn'
+            }
+          >
+            {inspected.diagnostics.valid
+              ? `✓ 拓扑有效 · ${inspected.nodes.length} 节点 / ${inspected.edges.length} 边`
+              : `⚠ ${inspected.diagnostics.issues[0] ?? '语法或依赖有误'}`}
+          </span>
+        }
+        side="right"
+        defaultSize="full"
+        testId="studio-yaml-drawer"
+        bodyClassName="ys-drawer__body--yaml"
+      >
+        <YamlCodeEditor
+          ariaLabel="放大编辑工作流 YAML"
+          value={yamlDraft}
+          isExpanded
+          onExpandToggle={() => setYamlModalOpen(false)}
+          onChange={(nextValue) => {
+            setSelectedPresetId('custom');
+            setYamlDraft(nextValue);
+          }}
+        />
+      </ExpandableDrawer>
+
+      <ExpandableDrawer
+        open={resumeModalOpen}
+        onClose={() => setResumeModalOpen(false)}
+        title="↻ 断点续跑计划预览 (Checkpoint Resume Plan)"
+        ariaLabel="断点续跑计划预览"
+        badge={
+          <span className="studio-yaml-modal__badge ok">
+            Run {runId.slice(0, 12)}…
+          </span>
+        }
+        side="center"
+        defaultSize="drawer"
+        testId="studio-resume-drawer"
+        footer={
+          <>
+            <button
+              type="button"
+              className="studio-btn-ghost"
+              onClick={() => setResumeModalOpen(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              data-testid="confirm-resume-run-btn"
+              className="studio-btn-primary"
+              disabled={
+                resumePlanLoading ||
+                !resumePlanData ||
+                resumeActionBusy ||
+                resumePlanData.summary.requires_manual > 0
+              }
+              onClick={() => void confirmResumeRun()}
+            >
+              {resumeActionBusy ? '正在恢复运行…' : '▶ 确认从断点续跑'}
+            </button>
+          </>
+        }
+      >
+        <div className="studio-resume-modal__body">
+          {resumePlanLoading ? (
+            <p className="studio-muted-note">正在加载已落盘的 Checkpoint 状态与幂等性分析…</p>
+          ) : resumePlanError ? (
+            <div className="studio-node-error" role="alert">
+              {resumePlanError}
+            </div>
+          ) : resumePlanData ? (
+            <>
+              <div className="studio-resume-summary-grid">
+                <div className="studio-resume-stat">
+                  <span>最近已完成断点节点</span>
+                  <strong>#{resumePlanData.last_completed_node}</strong>
+                </div>
+                <div className="studio-resume-stat">
+                  <span>断点保存时间</span>
+                  <strong>{formatTime(resumePlanData.created_at)}</strong>
+                </div>
+                <div className="studio-resume-stat">
+                  <span>未完成工具调用</span>
+                  <strong>
+                    {resumePlanData.summary.total} 项（跳过 {resumePlanData.summary.to_skip} · 重放{' '}
+                    {resumePlanData.summary.to_replay} · 需人工{' '}
+                    {resumePlanData.summary.requires_manual}）
+                  </strong>
+                </div>
+              </div>
+
+              <div className="studio-resume-nodes-split">
+                <div className="studio-resume-nodes-col">
+                  <h4>✓ 将跳过并直接复用缓存结果</h4>
+                  <div className="studio-resume-tags">
+                    {inspected.execution_order
+                      .filter((nid) => {
+                        const st = reduced.telemetryByNode[nid]?.status;
+                        return st === 'succeeded' || st === 'skipped';
+                      })
+                      .map((nid) => (
+                        <span key={nid} className="studio-resume-tag studio-resume-tag--cached">
+                          #{nid}
+                        </span>
+                      ))}
+                  </div>
+                </div>
+
+                <div className="studio-resume-nodes-col">
+                  <h4>▶ 将从断点继续执行</h4>
+                  <div className="studio-resume-tags">
+                    {inspected.execution_order
+                      .filter((nid) => {
+                        const st = reduced.telemetryByNode[nid]?.status;
+                        return st !== 'succeeded' && st !== 'skipped';
+                      })
+                      .map((nid) => (
+                        <span key={nid} className="studio-resume-tag studio-resume-tag--rerun">
+                          #{nid}
+                        </span>
+                      ))}
+                  </div>
+                </div>
+              </div>
+
+              {resumePlanData.tool_calls.length > 0 && (
+                <div className="studio-resume-tools">
+                  <h4>内嵌 Agent 未决工具调用恢复决策</h4>
+                  <ul>
+                    {resumePlanData.tool_calls.map((tc) => (
+                      <li key={`${tc.node_id}-${tc.tool_call_id}`}>
+                        <strong>
+                          #{tc.node_id} · {tc.tool}
+                        </strong>
+                        <span data-decision={tc.decision}>{tc.decision}</span>
+                        <small>{tc.reason}</small>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {resumePlanData.summary.requires_manual > 0 && (
+                <div className="studio-alert studio-alert--warn" role="alert">
+                  <span>
+                    存在 {resumePlanData.summary.requires_manual}{' '}
+                    项非幂等外部副作用工具调用需要人工确认，自动续跑将被引擎安全拦截。
+                  </span>
+                </div>
+              )}
+            </>
+          ) : null}
+        </div>
+      </ExpandableDrawer>
+
+      <ModelSuggestionsDatalist apiToken={apiToken} />
+      <ModelConfigDrawer
+        open={modelConfigOpen}
+        onClose={() => setModelConfigOpen(false)}
+        apiToken={apiToken}
+      />
     </div>
   );
 }

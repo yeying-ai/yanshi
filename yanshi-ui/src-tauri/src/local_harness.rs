@@ -98,6 +98,8 @@ pub struct LocalStreamedHarnessEvent {
 struct SessionEntry {
   session: LocalHarnessSession,
   events: Vec<LocalStreamedHarnessEvent>,
+  /// False for hydrated historical sessions until their `events.jsonl` is lazily read.
+  events_loaded: bool,
   tx: broadcast::Sender<LocalStreamedHarnessEvent>,
 }
 
@@ -145,6 +147,60 @@ impl LocalHarnessState {
   pub(crate) fn approvals(&self) -> &LocalApprovalRegistry {
     &self.approvals
   }
+
+  /// Cancel every currently executing harness session and drop parked approvals
+  /// so the desktop or `--web` process can exit cleanly.
+  pub fn cancel_all_active(&self) -> usize {
+    let cancelled = self.cancellations.cancel_all();
+    self.approvals.clear_all();
+    if cancelled > 0 {
+      let mut to_flush: Vec<(PathBuf, LocalHarnessSession)> = Vec::new();
+      {
+        let mut sessions = self.lock_sessions();
+        for entry in sessions.values_mut() {
+          if !is_terminal_harness_status(&entry.session.status) {
+            entry.session.status = "cancelled".to_string();
+            entry.session.finished_at = Some(Utc::now());
+            to_flush.push((self.session_dir(entry.session.id), entry.session.clone()));
+          }
+        }
+      }
+      for (dir, session) in to_flush {
+        let _ = write_session_sync(&dir, &session);
+      }
+    }
+    cancelled
+  }
+
+  /// Lazily load persisted `events.jsonl` for a hydrated historical session
+  /// without holding `self.sessions` during disk I/O.
+  async fn ensure_events_loaded_async(&self, session_id: Uuid) {
+    let needs_load = {
+      let guard = self.lock_sessions();
+      guard
+        .get(&session_id)
+        .is_some_and(|entry| !entry.events_loaded)
+    };
+    if !needs_load {
+      return;
+    }
+    let path = self.session_dir(session_id).join("events.jsonl");
+    let loaded = tokio::task::spawn_blocking(move || read_events_jsonl(&path))
+      .await
+      .unwrap_or_default();
+    let mut guard = self.lock_sessions();
+    if let Some(entry) = guard.get_mut(&session_id)
+      && !entry.events_loaded
+    {
+      entry.events = loaded;
+      entry.events_loaded = true;
+    }
+  }
+
+  /// Return true while at least one harness session is still running.
+  pub fn has_active_sessions(&self) -> bool {
+    !self.cancellations.is_empty()
+  }
 }
 
 fn is_terminal_harness_status(status: &str) -> bool {
@@ -180,13 +236,13 @@ fn hydrate_sessions_from_disk(harness_dir: &Path) -> HashMap<Uuid, SessionEntry>
       session.error = Some("desktop_restarted_while_running".to_string());
       let _ = write_session_sync(&path, &session);
     }
-    let events = read_events_jsonl(&path.join("events.jsonl"));
     let (tx, _rx) = broadcast::channel(256);
     out.insert(
       session_id,
       SessionEntry {
         session,
-        events,
+        events: Vec::new(),
+        events_loaded: false,
         tx,
       },
     );
@@ -275,6 +331,20 @@ impl LocalCancellationRegistry {
       None => false,
     }
   }
+
+  fn cancel_all(&self) -> usize {
+    let tokens: Vec<AgentCancellationToken> =
+      self.lock().values().map(|(_, t)| t.clone()).collect();
+    let count = tokens.len();
+    for token in tokens {
+      token.cancel();
+    }
+    count
+  }
+
+  fn is_empty(&self) -> bool {
+    self.lock().is_empty()
+  }
 }
 
 struct CancellationGuard {
@@ -345,6 +415,10 @@ impl LocalApprovalRegistry {
     self
       .lock()
       .remove(&(session_id.to_string(), request_id.to_string()));
+  }
+
+  fn clear_all(&self) {
+    self.lock().clear();
   }
 
   pub(crate) fn list(&self, session_id: &str) -> Vec<ApprovalRequest> {
@@ -684,6 +758,7 @@ async fn submit_harness_session(
     SessionEntry {
       session,
       events: Vec::new(),
+      events_loaded: true,
       tx,
     },
   );
@@ -915,6 +990,7 @@ async fn resume_harness_session(
     );
   };
   let tenant = extract_tenant(&headers);
+  state.ensure_events_loaded_async(id).await;
 
   let (updated_session, initial_seq) = {
     let mut guard = state.lock_sessions();
@@ -951,6 +1027,7 @@ async fn resume_harness_session(
     let seq_offset = match body.mode {
       ResumeMode::Rerun => {
         entry.events.clear();
+        entry.events_loaded = true;
         0
       }
       ResumeMode::Append => entry
@@ -1026,6 +1103,7 @@ async fn list_harness_events(
 ) -> Response {
   let tenant = extract_tenant(&headers);
   let after_seq = query.after_seq.unwrap_or(-1);
+  state.ensure_events_loaded_async(session_id).await;
   let guard = state.lock_sessions();
   let Some(entry) = guard.get(&session_id) else {
     return error_json(
@@ -1057,6 +1135,7 @@ async fn stream_harness_events(
 ) -> Response {
   let tenant = extract_tenant(&headers);
   let after_seq = query.after_seq.unwrap_or(-1);
+  state.ensure_events_loaded_async(session_id).await;
   let (backfill, rx, already_terminal) = {
     let guard = state.lock_sessions();
     let Some(entry) = guard.get(&session_id) else {
@@ -1278,6 +1357,7 @@ async fn answer_interrupt(
     );
   }
   let tenant = extract_tenant(&headers);
+  state.ensure_events_loaded_async(session_id).await;
 
   let (updated_session, initial_seq) = {
     let mut guard = state.lock_sessions();
