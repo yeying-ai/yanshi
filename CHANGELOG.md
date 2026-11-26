@@ -538,6 +538,17 @@ _New entries go here. Will roll into the next tag (likely
 
 ### Added
 
+- **Parallel Dioxus 0.7 + `dioxus-shadcn` frontend (`yanshi-ui-dx/`) at `/ui-dx/*` and opt-in Tauri `WKWebView` support.**
+  Added a standalone Edition 2024 WebAssembly frontend (`yanshi-ui-dx/`, excluded
+  from root workspace members) with a zero-Node.js Tailwind CSS v4 + `dx build`
+  pipeline (`yanshi-ui-dx/scripts/build.sh`), migrated Phase 1 views
+  (`ModelConfigDrawer`, `DiagnosticsPage`, `RunCreatePage` with pure-Rust
+  YAML+Tera `YamlCodeEditor` & live SSE, and `Harness` list/submit/detail with
+  free-solo model `Combobox`, approvals, and HITL interrupt answers), mounted
+  strict zero-eval CSP `/ui-dx/*` static routes on both `yanshi-server` and
+  `yanshi-ui/src-tauri/src/local_engine.rs`, added `'wasm-unsafe-eval'` to
+  `tauri.conf.json`, and exposed an opt-in `YANSHI_DESKTOP_UI=dx` desktop flag.
+
 - **Shared `yanshi-notebook` domain crate deduplicating server and desktop notebook engines.**
   Extracted stateless Notebook source ingestion/format sniffing (`ingest`: HTML,
   PDF + `pdftotext`/OCR fallback, pure-Rust `.docx`/`.pptx`/`.xlsx`, CSV/TSV,
