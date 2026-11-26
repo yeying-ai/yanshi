@@ -226,7 +226,9 @@ mod check_changelog_tests {
     assert!(is_trivial_changelog_path("README.md"));
     assert!(is_trivial_changelog_path("CHANGELOG.md"));
     assert!(is_trivial_changelog_path("Cargo.lock"));
-    assert!(is_trivial_changelog_path("yanshi-ui/package-lock.json"));
+    assert!(is_trivial_changelog_path(
+      "yanshi-ui-dx/e2e/package-lock.json"
+    ));
     assert!(is_trivial_changelog_path(".gitignore"));
     assert!(is_trivial_changelog_path(".github/workflows/quality.yml"));
     assert!(is_trivial_changelog_path("tests/foo.rs"));
@@ -234,12 +236,12 @@ mod check_changelog_tests {
     assert!(is_trivial_changelog_path(
       "yanshi-cli/tests/fixtures/x.json"
     ));
-    assert!(is_trivial_changelog_path("yanshi-ui/src/foo.test.ts"));
+    assert!(is_trivial_changelog_path("yanshi-ui-dx/e2e/studio.spec.ts"));
 
     // Real source files must NOT be classified as trivial.
     assert!(!is_trivial_changelog_path("yanshi-core/src/flow.rs"));
     assert!(!is_trivial_changelog_path("yanshi-cli/Cargo.toml"));
-    assert!(!is_trivial_changelog_path("yanshi-ui/src/main.tsx"));
+    assert!(!is_trivial_changelog_path("yanshi-ui-dx/src/main.rs"));
   }
 
   #[test]
@@ -337,13 +339,13 @@ mod check_changelog_tests {
   }
 
   #[test]
-  fn trivial_path_classifier_covers_ui_tsx_and_e2e_specs() {
+  fn trivial_path_classifier_covers_ui_e2e_specs() {
     assert!(is_trivial_changelog_path(
-      "yanshi-ui/src/pages/NotebookWorkspacePage.test.tsx"
+      "yanshi-ui-dx/e2e/notebooks.spec.ts"
     ));
-    assert!(is_trivial_changelog_path("yanshi-ui/e2e/notebooks.spec.ts"));
+    assert!(is_trivial_changelog_path("yanshi-ui-dx/e2e/studio.spec.ts"));
     assert!(!is_trivial_changelog_path(
-      "yanshi-ui/src/pages/NotebookWorkspacePage.tsx"
+      "yanshi-ui-dx/src/notebook_page.rs"
     ));
   }
 }

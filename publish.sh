@@ -4,8 +4,8 @@
 # Modeled after `rustineverything.app/publish.sh`.
 #
 # Usage:
-#   ./publish.sh                  # Full deploy: build UI + sync certs & source + build/restart containers + verify
-#   ./publish.sh --skip-ui-build  # Reuse existing yanshi-ui/dist bundle
+#   ./publish.sh                  # Full deploy: preflight Dioxus UI + sync certs & source + build/restart containers + verify
+#   ./publish.sh --skip-ui-build  # Skip local Dioxus UI preflight (Docker builds yanshi-ui-dx inside ui-builder)
 #   ./publish.sh --certs-only     # Only sync renewed local certs and restart Pingora gateway
 # ==============================================================================
 set -euo pipefail
@@ -105,11 +105,11 @@ if [[ "$CERTS_ONLY" -eq 1 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 2. Build embedded Web UI bundle & sync repository source
+# 2. Preflight Dioxus Web UI bundle & sync repository source
 # ------------------------------------------------------------------------------
 if [[ "$DO_UI_BUILD" -eq 1 ]]; then
-  log "Building embedded Yanshi Studio Web bundle (yanshi-ui/dist)"
-  npm --prefix "${LOCAL_REPO_DIR}/yanshi-ui" run build
+  log "Building Dioxus 0.7 Studio Web UI bundle (yanshi-ui-dx/dist/public)"
+  "${LOCAL_REPO_DIR}/yanshi-ui-dx/scripts/build.sh"
   ok "Frontend bundle built"
 fi
 
@@ -118,8 +118,10 @@ rsync -az --delete \
   -e "ssh ${SSH_OPTS[*]}" \
   --exclude 'target/' \
   --exclude 'crates/gateway/target/' \
-  --exclude 'yanshi-ui/node_modules/' \
-  --exclude 'yanshi-ui/src-tauri/target/' \
+  --exclude 'yanshi-desktop/target/' \
+  --exclude 'yanshi-ui-dx/target/' \
+  --exclude 'yanshi-ui-dx/dist/' \
+  --exclude 'yanshi-ui-dx/e2e/node_modules/' \
   --exclude '.git/' \
   --exclude '.claude/' \
   --exclude '.playwright-mcp/' \
@@ -277,7 +279,7 @@ https_health="$(curl -fsS --resolve "${SITE_HOST}:443:127.0.0.1" "${SITE_URL}/he
 echo "HTTPS /health/ready: ${https_health}"
 
 ui_code="$(curl -fsSL -o /tmp/yanshi_ui_check.$$ -w '%{http_code}' --resolve "${SITE_HOST}:443:127.0.0.1" "${SITE_URL}/")"
-grep -q "yanshi-debugger" /tmp/yanshi_ui_check.$$
+grep -q "Yanshi Studio" /tmp/yanshi_ui_check.$$
 rm -f /tmp/yanshi_ui_check.$$
 echo "HTTPS / -> /ui/studio SPA verified (HTTP ${ui_code})"
 
@@ -303,6 +305,6 @@ ok "Remote loopback & Pingora TLS verification passed"
 
 log "Verifying public internet reachability from local machine (${SITE_URL})"
 pub_code="$(curl -fsSL -o /tmp/yanshi_pub_ui.$$ -w '%{http_code}' "${SITE_URL}/")"
-grep -q "yanshi-debugger" /tmp/yanshi_pub_ui.$$
+grep -q "Yanshi Studio" /tmp/yanshi_pub_ui.$$
 rm -f /tmp/yanshi_pub_ui.$$
 ok "Public ${SITE_URL}/ -> /ui/studio HTTP ${pub_code} verified!"

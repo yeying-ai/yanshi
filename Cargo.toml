@@ -29,7 +29,7 @@ members = [
   "xtask",
 ]
 exclude = [
-  "yanshi-ui/src-tauri",
+  "yanshi-desktop",
   "yanshi-ui-dx",
   "crates/gateway",
 ]

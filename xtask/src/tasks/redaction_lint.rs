@@ -79,7 +79,7 @@ pub(crate) fn redaction_lint_at(
       }
     }
   }
-  for extra_rel in ["yanshi-ui/src-tauri/src", "crates/gateway/src"] {
+  for extra_rel in ["yanshi-desktop/src", "crates/gateway/src"] {
     let extra_src = workspace_root.join(extra_rel);
     if extra_src.is_dir() {
       crate_dirs.push(extra_src);
@@ -317,7 +317,7 @@ mod redaction_lint_tests {
   fn scans_tauri_and_gateway_src_trees_too() {
     let dir = TempDir::new().unwrap();
     let workspace = dir.path();
-    let tauri_src = workspace.join("yanshi-ui/src-tauri/src");
+    let tauri_src = workspace.join("yanshi-desktop/src");
     let gateway_src = workspace.join("crates/gateway/src");
     fs::create_dir_all(&tauri_src).unwrap();
     fs::create_dir_all(&gateway_src).unwrap();

@@ -233,7 +233,8 @@ nodes that build a `ReActAgent` from a Skill manifest at run time.
 | `yanshi-server` | Axum gateway with health endpoints, run submission/query routes, SSE event streams, Skill routes, bearer auth, Web UI embedding, and distributed scheduler control-plane primitives. |
 | `yanshi-worker` | Distributed worker runtime and binary built around the `WorkerProtocol` abstraction. |
 | `yanshi-harness` | **Governance shell.** Wraps a runtime (`AgentRuntime`/`TurnDrivenRuntime` via `yanshi-agent-spi`) with hooks, interactive approval, sandboxing, audit, run limits, and background tasks; emits the `HarnessEvent` envelope. |
-| `yanshi-ui` | React + Vite + TypeScript SPA embedded by the server at `/ui` (run list, DAG status, event replay, SSE). |
+| `yanshi-ui-dx` | Dioxus 0.7 + `dioxus-shadcn 0.8` WebAssembly SPA served at `/ui/*` under strict zero-eval CSP (Visual DAG Studio, App Runner, Notebook Workspace, Harness sessions, run console, diagnostics). |
+| `yanshi-desktop` | Tauri v2 desktop shell embedding the zero-Postgres loopback engine (`local_engine.rs`) for offline Yanshi Studio execution. |
 
 `yanshi-config` is the shared config-first workflow-assembly crate (extracted
 from `yanshi-cli` by P-A2.4): the YAML workflow schema (`config::v2`), the

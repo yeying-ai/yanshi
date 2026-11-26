@@ -19,7 +19,7 @@ target/
 # mdBook output (`mdbook build site`)
 /site/book/
 Cargo.lock
-!yanshi-ui/src-tauri/Cargo.lock
+!yanshi-desktop/Cargo.lock
 
 # Frontend dependencies
 node_modules/
@@ -41,9 +41,10 @@ commit-docs
 **/runs/
 
 # Playwright E2E reports & traces
-yanshi-ui/test-results/
-yanshi-ui/playwright-report/
-yanshi-ui/playwright-results.xml
+yanshi-ui-dx/e2e/node_modules/
+yanshi-ui-dx/e2e/test-results/
+yanshi-ui-dx/e2e/playwright-report/
+yanshi-ui-dx/e2e/playwright-results.xml
 
 # Dioxus UI Phase 0 spike build outputs & local patch overrides
 yanshi-ui-dx/dist/
